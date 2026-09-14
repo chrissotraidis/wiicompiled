@@ -1,3 +1,11 @@
+# KartPad maintained WiiCompiled source (android)
+
+This is a source fork of [WiiCompiled by patchzyy and contributors](https://github.com/patchzyy/wiicompiled), maintained for [KartPad](https://github.com/chrissotraidis/kartpad). Original authorship, licenses and component notices are preserved.
+
+Platform branches: [macOS](https://github.com/chrissotraidis/wiicompiled/tree/kartpad-macos), [iOS/iPadOS](https://github.com/chrissotraidis/wiicompiled/tree/kartpad-ios), [Android](https://github.com/chrissotraidis/wiicompiled/tree/kartpad-android), [tvOS](https://github.com/chrissotraidis/wiicompiled/tree/kartpad-tvos). KartPad pins exact commits; these branches are not standalone KartPad app releases. See [KARTPAD.md](KARTPAD.md) for source ownership, the upstream base and contribution workflow.
+
+---
+
 
 # WiiCompiled
 
