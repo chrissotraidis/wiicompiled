@@ -102,6 +102,8 @@ bool CreateParentDirectories(const std::string& path);
 
 bool SeedFaceLibResource(const std::string& hostPath);
 bool IsFaceLibResourcePath(const char* path);
+bool SeedFaceLibFile(const char* wiiPath, const std::string& hostPath);
+bool IsFaceLibSeedPath(const char* path);
 
 // ============================================================================
 // stdio helpers shared by the NAND* library and the IOS_* device layer

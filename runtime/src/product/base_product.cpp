@@ -5,9 +5,13 @@ namespace RuntimeProduct {
 const Descriptor& Active() noexcept {
     static constexpr Descriptor descriptor{
         Kind::BaseGame,
-        "WiiCompiled",
+        "KartPad",
     };
     return descriptor;
+}
+
+bool Select(Kind kind) noexcept {
+    return kind == Kind::BaseGame;
 }
 
 } // namespace RuntimeProduct

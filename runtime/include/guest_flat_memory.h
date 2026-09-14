@@ -6,6 +6,9 @@
 // executable/deferred-read pages are uncommitted or protected), while the HOST view is a plain
 // alias native runtime code (image loading, DVD reads, HLE, GX) writes through unchecked.
 #include <cstddef>
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#endif
 #include <cstdint>
 #include <vector>
 
@@ -15,9 +18,15 @@ namespace GuestFlat {
 // of a global. 16 TiB: clear of the Windows ASan shadow (32 TiB) and of the
 // usual image/heap placement.
 inline constexpr uint64_t kGuestSpaceSize = 0x1'0000'0000ull;
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+// Physical iOS chooses the 4 GiB reservation at launch. Its userspace layout
+// does not guarantee that a build-time address is available.
+extern uint8_t* gFlatGuestBase;
+#define MKW_FLAT_GUEST_BASE (GuestFlat::gFlatGuestBase)
+#else
 inline constexpr uintptr_t kFixedFlatGuestBase = 0x0000'1000'0000'0000ull;
-
 #define MKW_FLAT_GUEST_BASE (reinterpret_cast<uint8_t*>(GuestFlat::kFixedFlatGuestBase))
+#endif
 
 enum class Backing {
     Owned,
