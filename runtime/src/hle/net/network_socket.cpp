@@ -1,6 +1,17 @@
+#include <kartpad/android/network_stall.h>
 #include "network_internal.h"
 
+#include <kartpad/network/blocking_stream_wait.h>
+
 namespace NetworkHle {
+
+static uint32_t HostOrderIpv4(const sockaddr_in& address) {
+    return ntohl(address.sin_addr.s_addr);
+}
+
+static bool ShouldTracePacket(uint64_t count) {
+    return count <= 8 || count % 256 == 0;
+}
 
 static int32_t NewWiiSocket(uint32_t af, uint32_t type, uint32_t protocol) {
     if (!EnsureSocketRuntime()) {
@@ -25,6 +36,13 @@ static int32_t DeleteWiiSocket(uint32_t fd) {
     WiiSocket* s = GetWiiSocket(fd);
     if (!s) {
         return -SO_EBADF;
+    }
+    if (s->type == SOCK_DGRAM &&
+        (s->localTestUdpSendCalls != 0 || s->localTestUdpRecvCalls != 0)) {
+        LocalWfcTrace("udp summary fd=%u sends=%" PRIu64 " recv-calls=%" PRIu64
+                      " recv-packets=%" PRIu64,
+                      fd, s->localTestUdpSendCalls, s->localTestUdpRecvCalls,
+                      s->localTestUdpPacketsReceived);
     }
     ClearSslSessionsForSocket(fd);
     CloseNativeSocket(s->native);
@@ -157,6 +175,9 @@ static int32_t HandleInetPton(uint32_t inBuf, uint32_t inLen, uint32_t outBuf, u
 }
 
 int32_t HandleIpTopIoctl(uint32_t cmd, uint32_t inBuf, uint32_t inLen, uint32_t outBuf, uint32_t outLen) {
+#if defined(__ANDROID__)
+    kartpad::android::NetworkCallTimer stallTimer("socket_ioctl", cmd);
+#endif
     switch (cmd) {
     case IOCTL_SO_INITINTERFACE:
     case IOCTL_SO_SETINTERFACE:
@@ -176,9 +197,23 @@ int32_t HandleIpTopIoctl(uint32_t cmd, uint32_t inBuf, uint32_t inLen, uint32_t 
             return -SO_EBADF;
         }
         sockaddr_in addr = ReadWiiSockAddr(inBuf + 8);
+        const uint16_t requestedPort = ntohs(addr.sin_port);
+        if (cmd == IOCTL_SO_CONNECT) {
+            addr.sin_port = htons(RoutedWfcConnectPort(requestedPort));
+        }
         const int ret = (cmd == IOCTL_SO_BIND)
             ? bind(s->native, reinterpret_cast<sockaddr*>(&addr), sizeof(addr))
             : connect(s->native, reinterpret_cast<sockaddr*>(&addr), sizeof(addr));
+        if (cmd == IOCTL_SO_BIND && s->type == SOCK_DGRAM && LocalWfcTraceEnabled()) {
+            sockaddr_in actual{};
+            socklen_t actualLen = sizeof(actual);
+            const bool hasActual = ret == 0 &&
+                getsockname(s->native, reinterpret_cast<sockaddr*>(&actual), &actualLen) == 0;
+            LocalWfcTrace("udp bind fd=%u requested=%08x:%u host-ret=%d actual=%08x:%u",
+                          requestFd, HostOrderIpv4(addr), requestedPort, ret,
+                          hasActual ? HostOrderIpv4(actual) : 0,
+                          hasActual ? ntohs(actual.sin_port) : 0);
+        }
         int32_t result = 0;
         if (cmd == IOCTL_SO_CONNECT && ret < 0) {
             // Nonblocking connects only (blocking ones go through
@@ -190,7 +225,7 @@ int32_t HandleIpTopIoctl(uint32_t cmd, uint32_t inBuf, uint32_t inLen, uint32_t 
             result = SocketResult(ret, false);
         }
         if (cmd == IOCTL_SO_CONNECT && result == 0) {
-            s->peerPort = ntohs(addr.sin_port);
+            s->peerPort = requestedPort;
             s->peerAddr = addr;
             s->hasPeerAddr = true;
         }
@@ -418,6 +453,9 @@ static int32_t HandleGetInterfaceOpt(const std::vector<IoVector>& in, const std:
 }
 
 int32_t HandleIpTopIoctlv(uint32_t cmd, const std::vector<IoVector>& in, const std::vector<IoVector>& out) {
+#if defined(__ANDROID__)
+    kartpad::android::NetworkCallTimer stallTimer("socket_ioctlv", cmd);
+#endif
     switch (cmd) {
     case IOCTLV_SO_STARTUP:
         EnsureSocketRuntime();
@@ -467,6 +505,15 @@ int32_t HandleIpTopIoctlv(uint32_t cmd, const std::vector<IoVector>& in, const s
         const int ret = sendto(s->native, reinterpret_cast<const char*>(sendData), static_cast<int>(sendSize),
                                static_cast<int>(flags), destPtr, destLen);
         const int hostError = ret < 0 ? NativeLastError() : 0;
+        if (s->type == SOCK_DGRAM && LocalWfcTraceEnabled()) {
+            ++s->localTestUdpSendCalls;
+            if (ShouldTracePacket(s->localTestUdpSendCalls)) {
+                LocalWfcTrace("udp send fd=%u call=%" PRIu64 " size=%u dest=%08x:%u host-ret=%d host-err=%d",
+                              fd, s->localTestUdpSendCalls, sendSize,
+                              destPtr ? HostOrderIpv4(dest) : 0,
+                              destPtr ? ntohs(dest.sin_port) : 0, ret, hostError);
+            }
+        }
         int32_t result = SocketResult(ret);
         if (patchedWrite && ret == static_cast<int>(sendSize)) {
             result = static_cast<int32_t>(in[0].size);
@@ -499,8 +546,8 @@ int32_t HandleIpTopIoctlv(uint32_t cmd, const std::vector<IoVector>& in, const s
         // Nonblocking sockets get -SO_EAGAIN immediately (Dolphin's retry predicate
         // short-circuits on nonBlock/forceNonBlock, IOS/Network/Socket.cpp:715-718);
         // waiting here anyway stalled the whole emulation thread on every empty read.
-        constexpr int kStreamRecvWaitMs = 250;
-        const int streamWaitMs = (forceNonBlock || s->nonblocking) ? 0 : kStreamRecvWaitMs;
+        const int streamWaitMs = KartPad::Network::StreamReceiveWaitMilliseconds(
+            forceNonBlock, s->nonblocking);
         const bool waited = ret < 0 && !fromPtr && s->type == SOCK_STREAM &&
             IsWouldBlockError(nativeErr) && WaitForReadable(s->native, streamWaitMs);
         if (waited) {
@@ -516,6 +563,21 @@ int32_t HandleIpTopIoctlv(uint32_t cmd, const std::vector<IoVector>& in, const s
             WriteWiiSockAddr(out[1].address, from, static_cast<uint32_t>(fromLen));
         }
         const int32_t result = ret >= 0 ? SocketResult(ret) : SocketErrorResult(nativeErr);
+        if (s->type == SOCK_DGRAM && LocalWfcTraceEnabled()) {
+            ++s->localTestUdpRecvCalls;
+            if (ret >= 0) {
+                ++s->localTestUdpPacketsReceived;
+                if (ShouldTracePacket(s->localTestUdpPacketsReceived)) {
+                    LocalWfcTrace("udp recv fd=%u packet=%" PRIu64 " size=%d from=%08x:%u",
+                                  fd, s->localTestUdpPacketsReceived, ret,
+                                  fromPtr ? HostOrderIpv4(from) : 0,
+                                  fromPtr ? ntohs(from.sin_port) : 0);
+                }
+            } else if (s->localTestUdpRecvCalls <= 3) {
+                LocalWfcTrace("udp recv fd=%u call=%" PRIu64 " host-ret=%d host-err=%d wii=%d",
+                              fd, s->localTestUdpRecvCalls, ret, nativeErr, result);
+            }
+        }
         if (ret < 0 && result != -SO_EAGAIN && result != s->lastLoggedRecvError) {
             s->lastLoggedRecvError = result;
             NetFail("recv failed fd=%u host=%d wii=%d", fd, nativeErr, result);

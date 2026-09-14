@@ -68,6 +68,12 @@ inline std::filesystem::path ManagedNandRootPath() {
 }
 
 inline std::optional<std::filesystem::path> BootstrapPayloadPath() {
+#ifdef __ANDROID__
+    const auto bundled = RuntimeConfigFile::BundledResourcesDirectory() / "wii";
+    if (ExistingDirectory(bundled / "shared2" / "wc24")) {
+        return bundled;
+    }
+#endif
     if (auto executableDirectory = RuntimeConfigFile::ExecutableDirectory()) {
         const auto adjacent = *executableDirectory / "wii_bootstrap";
         if (ExistingDirectory(adjacent / "shared2" / "wc24")) {

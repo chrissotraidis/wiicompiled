@@ -22,6 +22,23 @@ using namespace std::string_view_literals;
 
 static Module Log("aurora::gfx::gx");
 
+static std::string kartpad_const_matrix_switch(std::string_view arrayName,
+                                               std::string_view localName,
+                                               std::string_view vectorExpression, u32 count) {
+  std::string result = fmt::format(
+      "\n    var {0} = vec3f(0.0);"
+      "\n    switch (in_pnmtxidx) {{",
+      localName);
+  for (u32 slot = 0; slot < count; ++slot) {
+    result += fmt::format("\n      case {0}u: {{ {1} = {2} * ubuf.{3}[{0}u]; }}", slot, localName,
+                          vectorExpression, arrayName);
+  }
+  result += fmt::format(
+      "\n      default: {{ {0} = vec3f(0.0); }}"
+      "\n    }}",
+      localName);
+  return result;
+}
 
 static inline std::string_view chan_comp(GXTevColorChan chan) noexcept {
   switch (chan) {
@@ -960,11 +977,22 @@ wgpu::ShaderModule build_shader(const ShaderConfig& config) noexcept {
     }
   }
 
+  const bool constantPnMtx = config.kartpadConstantPnMtx != 0 && config.lineMode == 0 &&
+                             config.attrs[GX_VA_PNMTXIDX].attrType == GX_DIRECT &&
+                             info.matrixLayout.absolutePosRegion &&
+                             info.matrixLayout.postexCount >= MaxPnMtx &&
+                             info.matrixLayout.nrmCount == MaxPnMtx;
   if (config.lineMode == 0) {
-    vtxXfrAttrsPre += fmt::format(
-        "\n    let mv_pos = vec4f({}, 1.0) * ubuf.postex_mtx[in_pnmtxidx];"
-        "\n    out.pos = vec4f(mv_pos, 1.0) * ubuf.proj;",
-        vtx_attr(config, GX_VA_POS));
+    if (constantPnMtx) {
+      vtxXfrAttrsPre += kartpad_const_matrix_switch(
+          "postex_mtx"sv, "mv_pos"sv, fmt::format("vec4f({}, 1.0)", vtx_attr(config, GX_VA_POS)), info.matrixLayout.postexCount);
+      vtxXfrAttrsPre += "\n    out.pos = vec4f(mv_pos, 1.0) * ubuf.proj;";
+    } else {
+      vtxXfrAttrsPre += fmt::format(
+          "\n    let mv_pos = vec4f({}, 1.0) * ubuf.postex_mtx[in_pnmtxidx];"
+          "\n    out.pos = vec4f(mv_pos, 1.0) * ubuf.proj;",
+          vtx_attr(config, GX_VA_POS));
+    }
   } else if (config.lineMode == 3) {
     // GX_POINTS: expand single vertex to axis-aligned screen-space square
     vtxXfrAttrsPre +=
@@ -1003,10 +1031,16 @@ wgpu::ShaderModule build_shader(const ShaderConfig& config) noexcept {
       "\n    let gx_pixel_center_correction = "
       "vec2f(-1.0, 1.0) / (6.0 * max(abs(ubuf.render_viewport_size), vec2f(1.0)));"
       "\n    out.pos = vec4f(out.pos.xy + out.pos.w * gx_pixel_center_correction, out.pos.zw);";
-  vtxXfrAttrsPre += fmt::format(
-      "\n    let nrm_tmp = vec4f({}, 0.0) * ubuf.nrm_mtx[in_pnmtxidx];"
-      "\n    let mv_nrm = select(nrm_tmp, normalize(nrm_tmp), dot(nrm_tmp, nrm_tmp) > 1e-10);",
-      vtx_attr(config, GX_VA_NRM));
+  if (constantPnMtx) {
+    vtxXfrAttrsPre += kartpad_const_matrix_switch(
+        "nrm_mtx"sv, "nrm_tmp"sv, fmt::format("vec4f({}, 0.0)", vtx_attr(config, GX_VA_NRM)), info.matrixLayout.nrmCount);
+    vtxXfrAttrsPre += "\n    let mv_nrm = select(nrm_tmp, normalize(nrm_tmp), dot(nrm_tmp, nrm_tmp) > 1e-10);";
+  } else {
+    vtxXfrAttrsPre += fmt::format(
+        "\n    let nrm_tmp = vec4f({}, 0.0) * ubuf.nrm_mtx[in_pnmtxidx];"
+        "\n    let mv_nrm = select(nrm_tmp, normalize(nrm_tmp), dot(nrm_tmp, nrm_tmp) > 1e-10);",
+        vtx_attr(config, GX_VA_NRM));
+  }
 
   uniBufAttrs += "\n    proj: mat4x4f,";
   // Only the matrix slots this shader can read are uploaded, in compacted order; see UniformMatrixLayout.
@@ -1693,8 +1727,22 @@ fn load_u16(p: ptr<storage, array<u32>>, byte_off: u32, le: bool) -> u32 {{
   return bswap16(raw, le);
 }}
 
+fn load_u24_raw(p: ptr<storage, array<u32>>, byte_off: u32) -> u32 {{
+  let word_idx = byte_off >> 2u;
+  let sub = byte_off & 3u;
+  let word = p[word_idx];
+  // Three bytes at offsets zero or one fit entirely in this word. Do not
+  // access the next word: this attribute may end at the binding boundary.
+  if (sub <= 1u) {{
+    return (word >> (sub * 8u)) & 0x00FFFFFFu;
+  }}
+  let next = p[word_idx + 1u];
+  let shift = sub * 8u;
+  return ((word >> shift) | (next << (32u - shift))) & 0x00FFFFFFu;
+}}
+
 fn load_u24(p: ptr<storage, array<u32>>, byte_off: u32, le: bool) -> u32 {{
-  let raw = load_u32_raw(p, byte_off) & 0x00FFFFFFu;
+  let raw = load_u24_raw(p, byte_off);
   if (le) {{
     return raw;
   }}
@@ -1734,7 +1782,7 @@ fn raw_fetch_u8_2(p: ptr<storage, array<u32>>, byte_off: u32) -> vec2u {{
 }}
 
 fn raw_fetch_u8_3(p: ptr<storage, array<u32>>, byte_off: u32) -> vec3u {{
-  let raw = load_u32_raw(p, byte_off);
+  let raw = load_u24_raw(p, byte_off);
   return vec3u(
     extractBits(raw, 0u, 8u),
     extractBits(raw, 8u, 8u),
@@ -2059,6 +2107,10 @@ fn fs_main(in: VertexOutput) -> {9} {{{6}{5}
       .nextInChain = &wgslDescriptor,
       .label = label.c_str(),
   };
+  if (constantPnMtx) {
+    Log.info("KartPadPNMTX shader_variant=constant config={:016x} postex={} nrm={}", hash,
+             info.matrixLayout.postexCount, info.matrixLayout.nrmCount);
+  }
   return webgpu::g_device.CreateShaderModule(&shaderDescriptor);
 }
 } // namespace aurora::gx

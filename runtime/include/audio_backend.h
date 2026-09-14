@@ -22,6 +22,8 @@ public:
     // Applied to the final host output, covering both AX and direct AI DMA.
     void SetMasterVolume(float volume);
     void SetMuted(bool muted);
+    // Suspend this runtime output without changing the user's mute/volume.
+    void SetPausedForHost(bool paused);
 
 private:
     AudioBackend() = default;
@@ -31,6 +33,7 @@ private:
 
     bool EnsureInitializedLocked(uint32_t sampleRate, uint32_t channels);
     bool QueueHasCapacityLocked(int incomingBytes);
+    void LogQueueTelemetryLocked(int queued, bool final = false);
     uint32_t QueueLimitBytesLocked() const;
     float EffectiveGainLocked() const;
     void ApplyGainLocked();
@@ -44,5 +47,13 @@ private:
     float m_masterVolume = 1.0f;
     bool m_muted = false;
     bool m_reportedDroppedBlock = false;
+    bool m_reportedAudibleBlock = false;
+    uint64_t m_queueChecks = 0;
+    uint64_t m_emptyQueueChecks = 0;
+    uint64_t m_droppedBlocks = 0;
+    uint64_t m_droppedBytes = 0;
+    uint64_t m_submittedBytes = 0;
+    int m_minQueuedBytes = -1;
+    int m_maxQueuedBytes = 0;
     std::vector<int16_t> m_convertBuffer;
 };

@@ -3,8 +3,15 @@
 #include "hle/controller_status_contract.h"
 
 #include <cstdint>
+#include <cstring>
+
+#if defined(__ANDROID__)
+#include <aurora/input.hpp>
+#include "kartpad/android/gamepad_contract.h"
+#endif
 
 void NandQueueIosCallback(uint32_t callbackPtr, int32_t result, uint32_t callbackArg);
+extern "C" bool KPAD_IsKeyboardChannelConnected(uint32_t chan);
 
 namespace {
 
@@ -100,7 +107,15 @@ PPC_NATIVE_OVERRIDE(801C0B54, WPADGetDataFormat_HLE, int32_t, (uint32_t chan), (
 
 extern "C" int32_t WPADSetDataFormat_HLE(uint32_t chan, int32_t format)
 {
-    return g_state.contract.SetDataFormat(chan, format);
+    if (chan >= WpadContract::kChannelCount) {
+        return WpadContract::kErrorBadChannel;
+    }
+    if (!g_state.contract.IsInitialized()) {
+        return WpadContract::kErrorNotReady;
+    }
+    (void)format;
+    return KPAD_IsKeyboardChannelConnected(chan) ? kStatusOk :
+                                                  WpadContract::kErrorNoController;
 }
 PPC_NATIVE_OVERRIDE(801C0B9C, WPADSetDataFormat_HLE, int32_t, (uint32_t chan, int32_t format), (chan, format));
 
@@ -111,16 +126,23 @@ extern "C" int32_t WPADProbe_HLE(uint32_t chan, uint32_t typePtr)
     }
 
     if (typePtr != 0) {
-        Memory::Write32(typePtr, WpadContract::kExtensionCore);
+        Memory::Write32(typePtr, WpadContract::kExtensionClassic);
     }
-    return WpadContract::kErrorNoController;
+    return KPAD_IsKeyboardChannelConnected(chan) ? kStatusOk :
+                                                  WpadContract::kErrorNoController;
 }
 PPC_NATIVE_OVERRIDE(801C0990, WPADProbe_HLE, int32_t, (uint32_t chan, uint32_t typePtr), (chan, typePtr));
 
 extern "C" void WPADControlMotor_HLE(uint32_t chan, uint32_t command)
 {
+#if defined(__ANDROID__)
+    aurora::input::set_standard_gamepad_rumble(
+        chan, chan == 0,
+        kartpad::android::WpadMotorCommandEnablesRumble(command));
+#else
     (void)chan;
     (void)command;
+#endif
 }
 PPC_NATIVE_OVERRIDE(801C0EC4, WPADControlMotor_HLE, void, (uint32_t chan, uint32_t command), (chan, command));
 
@@ -130,8 +152,16 @@ extern "C" int32_t WPADGetInfoAsync_HLE(uint32_t chan, uint32_t infoPtr, uint32_
         return CompleteWpadRequest(chan, callback, WpadContract::kErrorBadChannel);
     }
 
-    (void)infoPtr;
-    return CompleteWpadRequest(chan, callback, WpadContract::kErrorNoController);
+    if (!KPAD_IsKeyboardChannelConnected(chan)) {
+        return CompleteWpadRequest(chan, callback, WpadContract::kErrorNoController);
+    }
+    if (infoPtr != 0) {
+        // WPADInfo is 24 bytes in the Revolution SDK. A zeroed core-remote
+        // report with a full battery is sufficient for the menu connection path.
+        std::memset(Memory::GetPointer(infoPtr, 24), 0, 24);
+        Memory::Write32(infoPtr, 4);
+    }
+    return CompleteWpadRequest(chan, callback, kStatusOk);
 }
 PPC_NATIVE_OVERRIDE(801C0CA4, WPADGetInfoAsync_HLE, int32_t,
          (uint32_t chan, uint32_t infoPtr, uint32_t callback), (chan, infoPtr, callback));
@@ -142,7 +172,9 @@ extern "C" int32_t WPADControlLed_HLE(uint32_t chan, uint32_t ledMask, uint32_t 
         return CompleteWpadRequest(chan, callback, WpadContract::kErrorBadChannel);
     }
     (void)ledMask;
-    return CompleteWpadRequest(chan, callback, WpadContract::kErrorNoController);
+    return CompleteWpadRequest(chan, callback,
+                               KPAD_IsKeyboardChannelConnected(chan) ? kStatusOk :
+                                                                      WpadContract::kErrorNoController);
 }
 PPC_NATIVE_OVERRIDE(801C0FF8, WPADControlLed_HLE, int32_t,
          (uint32_t chan, uint32_t ledMask, uint32_t callback), (chan, ledMask, callback));

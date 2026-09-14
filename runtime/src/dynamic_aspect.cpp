@@ -14,6 +14,7 @@ extern "C" int g_gxFrameCount;
 namespace {
 
 bool g_widescreenConfigured = false;
+int g_aspectMode = 0;
 uint32_t g_lastEggWidth43 = 0;
 uint32_t g_lastEggWidth169 = 0;
 
@@ -167,25 +168,35 @@ void AssertMkwOffscreenScreenBypass() {
 }
 
 void UpdateMkwDynamicAspectSurface(uint32_t surfaceWidth, uint32_t surfaceHeight) {
-    if (!g_widescreenConfigured || surfaceWidth == 0 || surfaceHeight == 0) {
+    if (surfaceWidth == 0 || surfaceHeight == 0) {
         return;
     }
-    AuroraSetViewportPolicy(AURORA_VIEWPORT_STRETCH);
-    ApplyEggScreenRecords(surfaceWidth, surfaceHeight);
+    if (g_aspectMode == 2) {
+        AuroraSetViewportPolicy(AURORA_VIEWPORT_STRETCH);
+        VIUnlockAspectRatio();
+        ApplyEggScreenRecords(surfaceWidth, surfaceHeight);
+    } else if (g_aspectMode == 1) {
+        AuroraSetViewportPolicy(AURORA_VIEWPORT_FIT);
+        VILockAspectRatio(16, 9);
+        ApplyEggScreenRecords(16, 9);
+    } else {
+        AuroraSetViewportPolicy(AURORA_VIEWPORT_FIT);
+        VILockAspectRatio(4, 3);
+        ApplyEggScreenRecords(4, 3);
+    }
 }
 
 void ConfigureMkwDynamicAspect(bool widescreen, uint32_t surfaceWidth, uint32_t surfaceHeight) {
+    ConfigureMkwMobileAspectMode(widescreen ? 2 : 0, surfaceWidth, surfaceHeight);
+}
+
+void ConfigureMkwMobileAspectMode(int aspectMode, uint32_t surfaceWidth,
+                                  uint32_t surfaceHeight) {
+    g_aspectMode = std::clamp(aspectMode, 0, 2);
+    const bool widescreen = g_aspectMode != 0;
     g_widescreenConfigured = widescreen;
-    g_dynamicAspectRatioEnabled = widescreen;
+    g_dynamicAspectRatioEnabled = g_aspectMode == 2;
     g_lastEggWidth43 = 0;
     g_lastEggWidth169 = 0;
-    if (widescreen) {
-        VIUnlockAspectRatio();
-        ApplyEggScreenRecords(surfaceWidth, surfaceHeight);
-        return;
-    }
-
-    AuroraSetViewportPolicy(AURORA_VIEWPORT_FIT);
-    VILockAspectRatio(4, 3);
-    ApplyEggScreenRecords(surfaceWidth, surfaceHeight);
+    UpdateMkwDynamicAspectSurface(surfaceWidth, surfaceHeight);
 }

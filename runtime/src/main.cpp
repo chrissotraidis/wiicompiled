@@ -23,6 +23,10 @@
 #include <unordered_map>
 #include <vector>
 
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#endif
+
 #if defined(_WIN32)
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -58,6 +62,14 @@
 #include <aurora/gfx.h>
 #include <dolphin/gx/GXAurora.h>
 #include <dolphin/vi.h>
+
+#if (defined(__APPLE__) && TARGET_OS_IOS) || defined(__ANDROID__)
+#include <SDL3/SDL_main.h>
+#endif
+
+#if defined(__APPLE__) && TARGET_OS_IOS
+#include "kartpad_mobile_runtime_host.h"
+#endif
 
 // Defined in `runtime/src/hle/vi.cpp` (used by GX/VI HLE).
 extern std::atomic_bool g_auroraFrameActive;
@@ -1169,8 +1181,47 @@ int RuntimeMain(int argc, char** argv) {
         if (argc != 1) {
             throw std::invalid_argument("The game runtime does not accept command-line options; use Config.toml through the installed host.");
         }
+#if defined(__APPLE__) && TARGET_OS_IOS
+        if (!KartPadMobileEnsureGameDataAvailable()) {
+            SetRuntimeExitCodeImpl(0);
+            ShutdownProcessTranscript();
+            return 0;
+        }
+        RuntimeConfigFile::Reload();
+#endif
         RuntimeConfigFile::LogLoadedConfig();
+#if defined(__APPLE__) && TARGET_OS_IOS
+        if (const char* requestedProfile = KartPadMobileSelectedRuntimeProfile()) {
+            const bool selected = std::string_view(requestedProfile) == "retro_rewind"
+                ? RuntimeProduct::Select(RuntimeProduct::Kind::RetroRewind)
+                : RuntimeProduct::Select(RuntimeProduct::Kind::BaseGame);
+            if (!selected) {
+                throw std::runtime_error(std::string("selected profile is not linked: ") + requestedProfile);
+            }
+        }
+#else
+        if (const char* requestedProfile = std::getenv("KARTPAD_RUNTIME_PROFILE")) {
+            const bool selected = std::string_view(requestedProfile) == "retro_rewind"
+                ? RuntimeProduct::Select(RuntimeProduct::Kind::RetroRewind)
+                : std::string_view(requestedProfile) == "base" &&
+                      RuntimeProduct::Select(RuntimeProduct::Kind::BaseGame);
+            if (!selected) {
+                throw std::runtime_error(std::string("selected profile is not linked: ") + requestedProfile);
+            }
+        }
+#endif
+        const char* activeProfile = RuntimeProduct::IsRetroRewind() ? "retro_rewind" : "base";
+        RecompMod::ActivateProfile(activeProfile);
+        TranslatedFunctionRegistry::SelectProfile(activeProfile);
         SystemBridge::Initialize();
+#if defined(__ANDROID__)
+        if (!NetworkHle::RunAndroidDnsIoctlFixture()) {
+            RT_LOG(RT_TAG_NET) << "Android guest DNS IOCTL fixture failed" << std::endl;
+        }
+        if (!NetworkHle::RunAndroidTlsIoctlvFixture()) {
+            RT_LOG(RT_TAG_NET) << "Android guest TLS IOCTLV fixture failed" << std::endl;
+        }
+#endif
         TranslatedFunctionRegistry::Finalize();
 
         // Initialize Aurora (graphics backend)
@@ -1179,7 +1230,7 @@ int RuntimeMain(int argc, char** argv) {
         AuroraConfig auroraConfig = {};
         auroraConfig.appName = RuntimeProduct::Active().displayName.data();
         const auto applicationDataDirectory = RuntimeConfigFile::ApplicationDataDirectory();
-        const auto rendererCacheDirectory = applicationDataDirectory / "Cache";
+        const auto rendererCacheDirectory = RuntimeConfigFile::CacheDataDirectory();
         std::error_code rendererPathError;
         std::filesystem::create_directories(rendererCacheDirectory, rendererPathError);
         if (rendererPathError) {
@@ -1190,9 +1241,25 @@ int RuntimeMain(int argc, char** argv) {
         const std::string auroraCachePath = rendererCacheDirectory.string();
         auroraConfig.userPath = auroraUserPath.c_str();
         auroraConfig.cachePath = auroraCachePath.c_str();
+#if defined(__ANDROID__)
+        const std::string auroraResourcesPath =
+            (RuntimeConfigFile::BundledResourcesDirectory() / "pipeline").string();
+        auroraConfig.resourcesPath = auroraResourcesPath.c_str();
+#endif
         auroraConfig.logCallback = &RuntimeAuroraLogCallback;
         auroraConfig.logLevel = LOG_DEBUG;
-        const bool configWidescreen = RuntimeConfigFile::WidescreenEnabled(true);
+        bool configWidescreen = RuntimeConfigFile::WidescreenEnabled(false);
+        int mobileAspectMode = configWidescreen ? 2 : 0;
+        float resolutionMultiplier = RuntimeConfigFile::ResolutionMultiplier(1.0f);
+#if defined(__APPLE__) && TARGET_OS_IOS
+        KartPadMobileRuntimeSettings mobileSettings{};
+        if (KartPadMobileReadRuntimeSettings(&mobileSettings)) {
+            mobileAspectMode = std::clamp(mobileSettings.aspectRatioMode, 0, 2);
+            configWidescreen = mobileAspectMode != 0;
+            resolutionMultiplier = std::clamp(mobileSettings.resolutionScale, 1.0f, 4.0f);
+            settings_overlay::SetShowFpsForHost(mobileSettings.showFps != 0);
+        }
+#endif
         auroraConfig.windowWidth = configWidescreen ? 854 : 640;
         auroraConfig.windowHeight = 480;
         auroraConfig.windowWidth = RuntimeConfigFile::WindowWidth(auroraConfig.windowWidth);
@@ -1210,8 +1277,13 @@ int RuntimeMain(int argc, char** argv) {
                                          RuntimeConfigFile::TextureDumps(false);
         // No vsync knob: aurora always configures a non-blocking present mode.
         auroraConfig.desiredBackend = BACKEND_AUTO;
-        const float resolutionMultiplier = RuntimeConfigFile::ResolutionMultiplier(1.0f);
-        ConfigureMkwDynamicAspect(configWidescreen, auroraConfig.windowWidth, auroraConfig.windowHeight);
+#if defined(__APPLE__) && TARGET_OS_IOS
+        ConfigureMkwMobileAspectMode(mobileAspectMode, auroraConfig.windowWidth,
+                                     auroraConfig.windowHeight);
+#else
+        ConfigureMkwDynamicAspect(configWidescreen, auroraConfig.windowWidth,
+                                  auroraConfig.windowHeight);
+#endif
         VISetFrameBufferScale(resolutionMultiplier);
         // One table for both directions. RuntimeConfigFile::IsSupportedGraphicsApi
         // whitelists exactly these config names, so an unrecognised value has
@@ -1242,6 +1314,9 @@ int RuntimeMain(int argc, char** argv) {
         const AuroraBackend requestedBackend = auroraConfig.desiredBackend;
 
         const AuroraInfo auroraInfo = aurora_initialize(0, nullptr, &auroraConfig);
+#if defined(__APPLE__) && TARGET_OS_IOS
+        KartPadMobileRuntimeHostInstall(auroraInfo.window);
+#endif
         if (requestedBackend != BACKEND_AUTO && auroraInfo.backend != requestedBackend) {
             RT_LOG(RT_TAG_RUNTIME) << "graphics_api=\"" << backend
                       << "\" is not available on this system; aurora fell back to \""
@@ -1257,15 +1332,23 @@ int RuntimeMain(int argc, char** argv) {
         UpdateMkwDynamicAspectSurface(auroraInfo.windowSize.native_fb_width,
                                       auroraInfo.windowSize.native_fb_height);
         settings_overlay::InitializeRuntimeSettings();
+        const char *viewportPolicy = g_dynamicAspectRatioEnabled ? "stretch" : "fit";
+        const char *presentAspect = configWidescreen ? "surface (dynamic EGG canvas)" : "4:3";
+#if defined(__APPLE__) && TARGET_OS_IOS
+        presentAspect = mobileAspectMode == 2 ? "surface (dynamic EGG canvas)" :
+                        mobileAspectMode == 1 ? "16:9" : "4:3";
+#endif
         RT_LOG(RT_TAG_CONFIG) << "video.widescreen=" << (configWidescreen ? "true" : "false")
+#if defined(__APPLE__) && TARGET_OS_IOS
+                  << " mobileAspectMode=" << mobileAspectMode
+#endif
                   << " SCGetAspectRatio=" << (configWidescreen ? 1 : 0)
                   << " resolutionMultiplier=" << resolutionMultiplier
                   << " window=" << auroraInfo.windowSize.width << "x" << auroraInfo.windowSize.height
                   << " native=" << auroraInfo.windowSize.native_fb_width << "x"
                   << auroraInfo.windowSize.native_fb_height
-                  << " viewportPolicy=" << (g_dynamicAspectRatioEnabled ? "stretch" : "fit")
-                  << " presentAspect="
-                  << (g_dynamicAspectRatioEnabled ? "surface (dynamic EGG canvas)" : "4:3")
+                  << " viewportPolicy=" << viewportPolicy
+                  << " presentAspect=" << presentAspect
                   << std::endl;
         g_auroraInitialized.store(true, std::memory_order_release);
 
@@ -1296,6 +1379,9 @@ int RuntimeMain(int argc, char** argv) {
         Fiber::GuestFiberManager::Shutdown();
         WindowPlacementPersistence::Flush(true);
         Wup028Adapter::Shutdown();
+#if defined(__APPLE__) && TARGET_OS_IOS
+        KartPadMobileRuntimeHostUninstall();
+#endif
         aurora_shutdown();
         SetRuntimeExitCodeImpl(0);
         ShutdownProcessTranscript();
@@ -1314,6 +1400,9 @@ int RuntimeMain(int argc, char** argv) {
         Fiber::GuestFiberManager::Shutdown();
         WindowPlacementPersistence::Flush(true);
         Wup028Adapter::Shutdown();
+#if defined(__APPLE__) && TARGET_OS_IOS
+        KartPadMobileRuntimeHostUninstall();
+#endif
         aurora_shutdown();
         ShutdownProcessTranscript();
         return 1;
@@ -1326,6 +1415,9 @@ int RuntimeMain(int argc, char** argv) {
         Fiber::GuestFiberManager::Shutdown();
         WindowPlacementPersistence::Flush(true);
         Wup028Adapter::Shutdown();
+#if defined(__APPLE__) && TARGET_OS_IOS
+        KartPadMobileRuntimeHostUninstall();
+#endif
         aurora_shutdown();
         ShutdownProcessTranscript();
         return 1;

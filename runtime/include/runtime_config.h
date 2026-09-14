@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -17,6 +18,11 @@
 #include <utility>
 #include <vector>
 #include <toml.hpp>
+#ifdef __APPLE__
+#include <mach-o/dyld.h>
+#include <pwd.h>
+#include <unistd.h>
+#endif
 #ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -155,6 +161,15 @@ inline std::optional<std::filesystem::path> ExecutableDirectory() {
         }
         buffer.resize(buffer.size() * 2);
     }
+#elif defined(__APPLE__)
+    uint32_t size = 0;
+    _NSGetExecutablePath(nullptr, &size);
+    std::vector<char> buffer(size + 1, '\0');
+    if (_NSGetExecutablePath(buffer.data(), &size) != 0)
+        return std::nullopt;
+    std::error_code ec;
+    const auto canonical = std::filesystem::weakly_canonical(buffer.data(), ec);
+    return (ec ? std::filesystem::path(buffer.data()) : canonical).parent_path();
 #else
     return std::nullopt;
 #endif
@@ -197,9 +212,58 @@ inline std::filesystem::path ApplicationDataDirectory() {
         CoTaskMemFree(rawPath);
         return directory;
     }
+#elif defined(__APPLE__)
+    // A normal app bundle must never write saves, caches, configuration, or
+    // logs into its signed resources. HOME is container-aware for a future
+    // sandboxed build; the account database is a defensive non-sandboxed
+    // fallback for unusual launch environments that omit HOME.
+    if (const char* home = std::getenv("HOME"); home && *home) {
+        return std::filesystem::path(home) / "Library" / "Application Support" / "KartPad";
+    }
+    if (const passwd* account = getpwuid(getuid());
+        account && account->pw_dir && *account->pw_dir) {
+        return std::filesystem::path(account->pw_dir) / "Library" / "Application Support" / "KartPad";
+    }
+#elif defined(__ANDROID__)
+    // SDL's Android helpers cannot be called from libmain.so static
+    // initialization: SDLActivity is still loading the library and has not
+    // installed its JNI class references yet. The Activity exports its exact
+    // Context-derived directory before delegating to SDLActivity.onCreate().
+    if (const char* files = std::getenv("KARTPAD_ANDROID_FILES_DIR"); files && *files) {
+        return std::filesystem::path(files) / "KartPad";
+    }
 #endif
     return std::filesystem::current_path() / kApplicationDirectoryName;
 }
+
+inline std::filesystem::path CacheDataDirectory() {
+    if (const auto& portableRoot = PortableRootDirectory()) {
+        return *portableRoot / kPortableUserDataDirectoryName / "Cache";
+    }
+#ifdef __APPLE__
+    // Installed Apple apps keep regenerable renderer/texture caches out of
+    // durable Application Support. HOME is container-aware for a future
+    // sandboxed build; use the account database only when HOME is unavailable.
+    if (const char* home = std::getenv("HOME"); home && *home) {
+        return std::filesystem::path(home) / "Library" / "Caches" / "KartPad";
+    }
+    if (const passwd* account = getpwuid(getuid());
+        account && account->pw_dir && *account->pw_dir) {
+        return std::filesystem::path(account->pw_dir) / "Library" / "Caches" / "KartPad";
+    }
+#elif defined(__ANDROID__)
+    if (const char* cache = std::getenv("KARTPAD_ANDROID_CACHE_DIR"); cache && *cache) {
+        return std::filesystem::path(cache) / "KartPad";
+    }
+#endif
+    return ApplicationDataDirectory() / "Cache";
+}
+
+#ifdef __ANDROID__
+inline std::filesystem::path BundledResourcesDirectory() {
+    return ApplicationDataDirectory() / "RuntimeResources" / "a2-v1";
+}
+#endif
 
 inline std::filesystem::path ResolveConfigPath() {
     return ApplicationDataDirectory() / kConfigFileName;
@@ -220,7 +284,7 @@ inline void EnsureConfigFile() {
     output << "# WiiCompiled user configuration\n"
               "# Set paths.dvd_root to an extracted Mario Kart Wii DATA directory.\n\n"
               "[video]\n"
-              "widescreen = true\n"
+              "widescreen = false\n"
               "resolution_multiplier = 1.0\n"
               "frame_interpolation_fps = 0\n"
               "display_mode = \"windowed\"\n"
@@ -430,6 +494,10 @@ inline const RuntimeUserConfig& Get() {
 inline RuntimeUserConfig& Mutable() {
     return const_cast<RuntimeUserConfig&>(Get());
 }
+inline void Reload() {
+    Mutable() = LoadConfigFile();
+}
+
 
 inline constexpr std::array<std::string_view, 12> kControllerButtonKeys = {
     "a", "b", "x", "y", "start", "z", "l", "r", "up", "down", "left", "right",

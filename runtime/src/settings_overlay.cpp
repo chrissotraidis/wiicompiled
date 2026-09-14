@@ -1,13 +1,30 @@
 #include "settings_overlay.h"
+#include <android/log.h>
+#include <time.h>
+extern "C" void KartPadAndroidLogMetric(const char*, const char*, ...);
 #include "wup028_adapter.h"
 #include "audio_backend.h"
 #include "controller_mapping_wizard.h"
 #include "game_graphics_options.h"
 #include "music_attenuation.h"
 #include "runtime_config.h"
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#if TARGET_OS_IOS
+#include "aurora_events.h"
+#include "kartpad_mobile_runtime_host.h"
+#include <dolphin/gx/GXAurora.h>
+#endif
+#endif
+#if defined(__ANDROID__)
+#include "aurora_events.h"
+#include "kartpad/android/runtime_settings.hpp"
+#include <dolphin/gx/GXAurora.h>
+#endif
 #include "runtime_log.h"
 
 #include <imgui.h>
+#include <imgui_internal.h>
 #include <SDL3/SDL_events.h>
 #include <SDL3/SDL_gamepad.h>
 #include <SDL3/SDL_keyboard.h>
@@ -175,6 +192,23 @@ constexpr std::array<const char*, PAD_BUTTON_COUNT> kClassicProPreset = {
     "back",           // Z
     "left_shoulder",  // L
     "right_shoulder", // R
+    "dpad_up", "dpad_down", "dpad_left", "dpad_right",
+};
+
+// SDL presents an attached Nunchuk as the left stick, C as left shoulder, and
+// Z as the left-trigger axis. Leave Classic L without a digital binding so
+// Aurora's normal analog-trigger emulation turns Nunchuk Z into the item
+// button. Wii Remote B becomes Classic R (drift); button 1 provides Classic B
+// for menu-back/brake without making every drift press brake simultaneously.
+constexpr std::array<const char*, PAD_BUTTON_COUNT> kWiimoteNunchukPreset = {
+    "east",          // A: Wii Remote A
+    "west",          // B: Wii Remote 1
+    "left_shoulder", // X: Nunchuk C / look behind
+    "north",         // Y: Wii Remote 2
+    "start",         // Start: Plus
+    "back",          // Z: Minus
+    "unmapped",      // L: Nunchuk Z arrives on the left-trigger axis
+    "south",         // R: Wii Remote B / drift
     "dpad_up", "dpad_down", "dpad_left", "dpad_right",
 };
 
@@ -476,6 +510,22 @@ void DrawControllerSettings() {
         PADSerializeMappings();
         mappings = PADGetButtonMappings(port, &mappingCount);
     }
+    ImGui::SameLine();
+    if (ImGui::Button("Wii Remote + Nunchuk (Experimental)")) {
+        const uint32_t port = static_cast<uint32_t>(g_controllerPort);
+        for (size_t i = 0; i < kControllerButtons.size(); ++i) {
+            if (const NativeButtonItem* native = FindNativeButton(kWiimoteNunchukPreset[i])) {
+                PADSetButtonMapping(port,
+                    PADButtonMapping{native->nativeButton, kControllerButtons[i].padButton});
+                PADSetAltButtonMapping(port,
+                    PADButtonMapping{PAD_NATIVE_BUTTON_INVALID, kControllerButtons[i].padButton});
+                RuntimeConfigFile::SetControllerButton(i, kWiimoteNunchukPreset[i]);
+            }
+        }
+        altRowExpanded.fill(false);
+        PADSerializeMappings();
+        mappings = PADGetButtonMappings(port, &mappingCount);
+    }
 
     ImGui::SeparatorText("Button mapping");
     for (size_t i = 0; i < kControllerButtons.size(); ++i) {
@@ -712,9 +762,62 @@ void DrawGraphicsSettings() {
     ImGui::Text("Graphics API: %s", GraphicsApiDisplayName());
 }
 
+#if defined(__ANDROID__)
+float g_androidFpsOverlayScale = 1.0f;
+#endif
+
 void DrawFpsOverlay() {
+    static uint64_t lastTelemetryPresentCount = 0;
     AuroraPresentTiming presentTiming{};
     aurora_get_present_timing(&presentTiming);
+    if (presentTiming.sampleCount > 0 &&
+        presentTiming.totalPresentCount >= lastTelemetryPresentCount + 300) {
+        const AuroraStats* stats = aurora_get_stats();
+        RT_LOGF(RT_TAG_GX,
+                "present telemetry: total=%llu samples=%u avg-ms=%.3f p50-ms=%.3f "
+                "p95-ms=%.3f p99-ms=%.3f worst-ms=%.3f jitter-ms=%.3f fps=%.3f "
+                "effective-fps=%.3f pipelines-queued=%u pipelines-created=%u\n",
+                static_cast<unsigned long long>(presentTiming.totalPresentCount),
+                presentTiming.sampleCount,
+                presentTiming.averageFrameTimeMs,
+                presentTiming.p50FrameTimeMs,
+                presentTiming.p95FrameTimeMs,
+                presentTiming.p99FrameTimeMs,
+                presentTiming.worstFrameTimeMs,
+                presentTiming.jitterMs,
+                presentTiming.framesPerSecond,
+                presentTiming.effectiveFramesPerSecond,
+                stats != nullptr ? stats->queuedPipelines : 0,
+                stats != nullptr ? stats->createdPipelines : 0);
+        // Bounded, content-free diagnostics remain available in release builds.
+        KartPadAndroidLogMetric("KartPadPerf",
+                "frames=%llu fps=%.2f effective=%.2f p50_ms=%.2f p95_ms=%.2f "
+                "p99_ms=%.2f pipelines_queued=%u pipelines_created=%u",
+                static_cast<unsigned long long>(presentTiming.totalPresentCount),
+                presentTiming.framesPerSecond, presentTiming.effectiveFramesPerSecond,
+                presentTiming.p50FrameTimeMs, presentTiming.p95FrameTimeMs,
+                presentTiming.p99FrameTimeMs,
+                stats != nullptr ? stats->queuedPipelines : 0,
+                stats != nullptr ? stats->createdPipelines : 0);
+        lastTelemetryPresentCount = presentTiming.totalPresentCount;
+        // Once per telemetry interval, not per instruction/frame. CPU occupancy
+        // distinguishes producer work from off-thread/GPU/presentation waiting;
+        // it is not GPU utilization and does not identify the wait by itself.
+        static double previousWall = 0, previousCpu = 0;
+        timespec wall{}, cpu{};
+        if (clock_gettime(CLOCK_MONOTONIC, &wall) == 0 &&
+            clock_gettime(CLOCK_THREAD_CPUTIME_ID, &cpu) == 0) {
+            const double wallSeconds = wall.tv_sec + wall.tv_nsec * 1e-9;
+            const double cpuSeconds = cpu.tv_sec + cpu.tv_nsec * 1e-9;
+            if (previousWall > 0 && wallSeconds > previousWall)
+                KartPadAndroidLogMetric("KartPadCPU",
+                    "main_thread_occupancy_pct=%.1f interval_s=%.3f",
+                    100.0 * (cpuSeconds - previousCpu) / (wallSeconds - previousWall),
+                    wallSeconds - previousWall);
+            previousWall = wallSeconds;
+            previousCpu = cpuSeconds;
+        }
+    }
     if (!g_showFps) {
         return;
     }
@@ -732,12 +835,25 @@ void DrawFpsOverlay() {
                                          ImGuiWindowFlags_NoNav |
                                          ImGuiWindowFlags_NoSavedSettings;
     if (ImGui::Begin("FPS Overlay", nullptr, kFlags)) {
+#if defined(__ANDROID__)
+        ImGui::SetWindowFontScale(g_androidFpsOverlayScale);
+#endif
         if (presentTiming.sampleCount == 0) {
             ImGui::TextUnformatted("FPS: --");
         } else {
             // Present timing includes the additional frames produced by
             // interpolation, so this remains the actual displayed FPS.
             ImGui::Text("FPS: %.1f", presentTiming.framesPerSecond);
+#if defined(__ANDROID__)
+            ImGui::Text("Frame ms: p50 %.1f  p95 %.1f",
+                        presentTiming.p50FrameTimeMs, presentTiming.p95FrameTimeMs);
+            ImGui::Text("p99 %.1f  worst %.1f",
+                        presentTiming.p99FrameTimeMs, presentTiming.worstFrameTimeMs);
+#else
+            ImGui::Text("Frame ms: p50 %.1f  p95 %.1f  p99 %.1f  worst %.1f",
+                        presentTiming.p50FrameTimeMs, presentTiming.p95FrameTimeMs,
+                        presentTiming.p99FrameTimeMs, presentTiming.worstFrameTimeMs);
+#endif
             // Replay-unsafe frames hold the presented cadence with duplicated
             // slots, so the counter alone reads 180 while the motion on screen
             // is 60 Hz. Surface the divergence instead of hiding it.
@@ -795,9 +911,9 @@ void DrawStartupScreen() {
                                         ImGuiWindowFlags_NoNav |
                                         ImGuiWindowFlags_NoSavedSettings |
                                         ImGuiWindowFlags_NoBringToFrontOnFocus;
-    if (ImGui::Begin("Wiicompiled Startup", nullptr, kFlags)) {
+    if (ImGui::Begin("KartPad Startup", nullptr, kFlags)) {
         ImGui::SetWindowFontScale(1.25f);
-        constexpr const char* kTitle = "WiiCompiled";
+        constexpr const char* kTitle = "KartPad";
         const ImVec2 titleSize = ImGui::CalcTextSize(kTitle);
         const float titleX = std::max(0.0f, (viewport->Size.x - titleSize.x) * 0.5f);
         const float startY = std::max(0.0f, (viewport->Size.y - titleSize.y) * 0.5f);
@@ -814,7 +930,7 @@ void DrawTopBar() {
         return;
     }
 
-    ImGui::TextUnformatted("WiiCompiled");
+    ImGui::TextUnformatted("KartPad");
     ImGui::Separator();
     const auto resolutionIt = std::find_if(kResolutions.begin(), kResolutions.end(), [](const ResolutionItem& item) {
         return std::fabs(item.scale - g_resolutionScale) < 0.001f;
@@ -910,6 +1026,65 @@ void PersistDisplayModeIfChanged() {
 }
 } // namespace
 
+void SetShowFpsForHost(bool show) noexcept {
+    g_showFps = show;
+}
+
+void RefreshHostSettings() noexcept {
+#if defined(__APPLE__) && TARGET_OS_IOS
+    KartPadMobileRuntimeSettings settings{};
+    if (KartPadMobileReadRuntimeSettings(&settings)) {
+        g_showFps = settings.showFps != 0;
+        static int lastAspectMode = -1;
+        const int aspectMode = std::clamp(settings.aspectRatioMode, 0, 2);
+        if (aspectMode != lastAspectMode) {
+            uint32_t surfaceWidth = 0;
+            uint32_t surfaceHeight = 0;
+            AuroraGetSurfaceSize(&surfaceWidth, &surfaceHeight);
+            if (surfaceWidth != 0 && surfaceHeight != 0) {
+                ConfigureMkwMobileAspectMode(aspectMode, surfaceWidth,
+                                             surfaceHeight);
+                lastAspectMode = aspectMode;
+                RT_LOG(RT_TAG_CONFIG) << "mobile runtime aspectMode=" << aspectMode << std::endl;
+            }
+        }
+        static float lastResolutionScale = -1.0f;
+        const float resolutionScale =
+            std::clamp(settings.resolutionScale, 1.0f, 4.0f);
+        if (std::fabs(resolutionScale - lastResolutionScale) > 0.001f) {
+            g_resolutionScale = resolutionScale;
+            VISetFrameBufferScale(resolutionScale);
+            lastResolutionScale = resolutionScale;
+            RT_LOG(RT_TAG_CONFIG) << "mobile runtime resolutionScale=" << resolutionScale << std::endl;
+        }
+    }
+#elif defined(__ANDROID__)
+    kartpad::android::DisplaySettings settings{};
+    if (kartpad::android::ConsumeDisplaySettings(&settings)) {
+        g_showFps = settings.show_fps;
+        constexpr float kFpsScales[]{1.0f, 1.5f, 2.0f};
+        const int fpsSize = std::clamp(settings.fps_size, 0, 2);
+        g_androidFpsOverlayScale = kFpsScales[fpsSize];
+        const int aspectMode = std::clamp(settings.aspect_mode, 0, 2);
+        uint32_t surfaceWidth = 0;
+        uint32_t surfaceHeight = 0;
+        AuroraGetSurfaceSize(&surfaceWidth, &surfaceHeight);
+        if (surfaceWidth != 0 && surfaceHeight != 0) {
+            ConfigureMkwMobileAspectMode(aspectMode, surfaceWidth,
+                                         surfaceHeight);
+        }
+        const float resolutionScale =
+            std::clamp(settings.resolution_scale, 1.0f, 4.0f);
+        g_resolutionScale = resolutionScale;
+        VISetFrameBufferScale(resolutionScale);
+        RT_LOG(RT_TAG_CONFIG) << "android runtime aspectMode=" << aspectMode
+                              << " resolutionScale=" << resolutionScale
+                              << " showFps=" << g_showFps
+                              << " fpsSize=" << fpsSize << std::endl;
+    }
+#endif
+}
+
 void InitializeRuntimeSettings() noexcept {
     controller_mapping_wizard::LoadPersistedMappings();
     ApplyConfiguredMappings();
@@ -954,10 +1129,19 @@ void HandleEvents(const AuroraEvent* events) noexcept {
     }
 }
 
-void Draw() noexcept {
+bool FrameReadyForOverlay() noexcept {
     // Wait for the frame worker's DONE phase: it has replayed the previous frame's ImGui draw lists
     // and started the next ImGui frame, so all overlay callers can now safely issue ImGui commands.
     aurora_wait_for_frame_worker();
+    const ImGuiContext* context = ImGui::GetCurrentContext();
+    return context != nullptr && context->WithinFrameScope;
+}
+
+bool Draw() noexcept {
+    if (!FrameReadyForOverlay()) {
+        return false;
+    }
+    RefreshHostSettings();
     ApplyConfiguredMappings();
     PersistDisplayModeIfChanged();
     UpdateCursorAutoHide();
@@ -971,6 +1155,7 @@ void Draw() noexcept {
     // top bar is hidden mid-setup.
     PADBlockInput(g_topBarVisible || controller_mapping_wizard::IsActive());
     DrawStartupScreen();
+    return true;
 }
 
 bool StartupScreenVisible() noexcept {

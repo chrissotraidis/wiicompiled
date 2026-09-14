@@ -5,6 +5,13 @@
 #include "ppc_runtime.h"
 #include "runtime_log.h"
 
+#include <algorithm>
+#include <chrono>
+#include <fstream>
+#include <iterator>
+#include <thread>
+#include <unordered_set>
+
 void OS_HLE_WakeupThreadNoReschedule(CpuContext* ctx, uint32_t waitQueue);
 void NandQueueIosCallback(uint32_t callbackPtr, int32_t result, uint32_t callbackArg);
 
@@ -31,6 +38,7 @@ static const char* DeferredDnsKindName(DeferredDnsKind kind) {
 enum class DeferredNetworkCompletionKind {
     SyncWaitQueue,
     AsyncCallback,
+    AndroidFixture,
 };
 
 struct DeferredNetworkRoute {
@@ -119,6 +127,7 @@ struct DeferredConnectWork {
     NativeSocket nativeFd = kInvalidSocket;
     uint64_t socketGeneration = 0;
     sockaddr_in peerAddress{};
+    uint16_t requestedPeerPort = 0;
     std::optional<int32_t> initialResult;
 };
 
@@ -132,6 +141,7 @@ using DeferredConnectPreparation =
 struct DeferredNetworkStore {
     std::mutex completedMutex;
     std::deque<DeferredDnsCompletion> completed;
+    std::unordered_set<uint64_t> cancelledAndroidFixtureTokens;
     // Pending polls are submitted and probed only by the emulation scheduler
     // thread, so unlike DNS worker completions they need no cross-thread lock.
     std::vector<DeferredPollWork> pendingPolls;
@@ -197,6 +207,10 @@ static int32_t DeferredDnsFailureResult(DeferredDnsKind kind) {
 static void QueueDeferredDnsCompletion(DeferredDnsCompletion completion) {
     DeferredNetworkStore& store = GetDeferredNetworkStore();
     std::lock_guard<std::mutex> lock(store.completedMutex);
+    if (completion.work.route.kind == DeferredNetworkCompletionKind::AndroidFixture &&
+        store.cancelledAndroidFixtureTokens.erase(completion.work.route.token) != 0) {
+        return;
+    }
     store.completed.push_back(std::move(completion));
 }
 
@@ -233,7 +247,8 @@ static DeferredDnsCompletion ResolveDeferredDns(DeferredDnsWork work) {
     }
 
     addrinfo* nativeResults = nullptr;
-    const char* node = completion.work.node.empty() ? nullptr : completion.work.node.c_str();
+    const std::string routedNode = RoutedWfcDnsNode(completion.work.node);
+    const char* node = routedNode.empty() ? nullptr : routedNode.c_str();
     const char* service = completion.work.service.empty() ? nullptr : completion.work.service.c_str();
     const int gai = getaddrinfo(node, service, hintPtr, &nativeResults);
     if (gai != 0 || !nativeResults) {
@@ -452,6 +467,8 @@ static DeferredConnectPreparation PrepareDeferredConnect(
     work.nativeFd = socket->native;
     work.socketGeneration = socket->generation;
     work.peerAddress = ReadWiiSockAddr(inBuf + 8u);
+    work.requestedPeerPort = ntohs(work.peerAddress.sin_port);
+    work.peerAddress.sin_port = htons(RoutedWfcConnectPort(work.requestedPeerPort));
     work.timeout = NetworkPollContract::Timeout::FromMilliseconds(
         NetworkConnectContract::kGuestBlockingTimeoutMilliseconds);
     return DeferredConnectPreparation::Ready(std::move(work), -SO_EINVAL);
@@ -676,6 +693,51 @@ static DeferredStartOutcome StartDeferred(NetworkDeferredContract::Preparation<W
         });
 }
 
+static auto AndroidFixtureRoute() {
+    return [](DeferredNetworkRoute& route) {
+        NoteDeferredNetworkSchedulerThread("Android DNS fixture submission");
+        DeferredNetworkStore& store = GetDeferredNetworkStore();
+        uint64_t token = store.nextToken.fetch_add(1, std::memory_order_relaxed);
+        if (token == 0) {
+            token = store.nextToken.fetch_add(1, std::memory_order_relaxed);
+        }
+        route.kind = DeferredNetworkCompletionKind::AndroidFixture;
+        route.token = token;
+        return true;
+    };
+}
+
+static std::optional<DeferredDnsCompletion> TakeAndroidFixtureCompletion(uint64_t token) {
+    DeferredNetworkStore& store = GetDeferredNetworkStore();
+    std::lock_guard<std::mutex> lock(store.completedMutex);
+    const auto it = std::find_if(store.completed.begin(), store.completed.end(),
+                                 [token](const DeferredDnsCompletion& completion) {
+        return completion.work.route.kind ==
+                   DeferredNetworkCompletionKind::AndroidFixture &&
+               completion.work.route.token == token;
+    });
+    if (it == store.completed.end()) {
+        return std::nullopt;
+    }
+    DeferredDnsCompletion completion = std::move(*it);
+    store.completed.erase(it);
+    return completion;
+}
+
+static void CancelAndroidFixtureCompletion(uint64_t token) {
+    DeferredNetworkStore& store = GetDeferredNetworkStore();
+    std::lock_guard<std::mutex> lock(store.completedMutex);
+    store.completed.erase(
+        std::remove_if(store.completed.begin(), store.completed.end(),
+                       [token](const DeferredDnsCompletion& completion) {
+            return completion.work.route.kind ==
+                       DeferredNetworkCompletionKind::AndroidFixture &&
+                   completion.work.route.token == token;
+        }),
+        store.completed.end());
+    store.cancelledAndroidFixtureTokens.insert(token);
+}
+
 static bool DeferredConnectSocketIsStillValid(const DeferredConnectWork& work) {
     return SocketIdentityIsCurrent(work.wiiFd, work.nativeFd, work.socketGeneration);
 }
@@ -890,10 +952,15 @@ static void DeliverDeferredNetworkResult(CpuContext* cpu, DeferredNetworkStore& 
         }
         // Output and result are committed before the waiter becomes READY.
         OS_HLE_WakeupThreadNoReschedule(cpu, route.waitQueue);
-    } else {
+    } else if (route.kind == DeferredNetworkCompletionKind::AsyncCallback) {
         // NandProcessPendingCallbacks runs immediately after this pump, on
         // this same emulation/scheduler host thread.
         NandQueueIosCallback(route.callback, result, route.callbackArg);
+    } else {
+        // A timed-out opt-in fixture may finish after normal runtime startup.
+        // Preserve the result without fabricating an IOS callback.
+        std::lock_guard<std::mutex> lock(store.resultMutex);
+        store.syncResults[route.token] = result;
     }
 }
 
@@ -1044,7 +1111,7 @@ bool Network_HLE_ProcessCompletions(CpuContext* cpu) {
         if (result == 0) {
             if (DeferredConnectSocketIsStillValid(work)) {
                 WiiSocket& socket = g_sockets[work.wiiFd];
-                socket.peerPort = ntohs(work.peerAddress.sin_port);
+                socket.peerPort = work.requestedPeerPort;
                 socket.peerAddr = work.peerAddress;
                 socket.hasPeerAddr = true;
             } else {
@@ -1068,3 +1135,135 @@ bool Network_HLE_ProcessCompletions(CpuContext* cpu) {
     }
     return handledAny;
 }
+
+namespace NetworkHle {
+
+bool RunAndroidDnsIoctlFixture() {
+#ifndef __ANDROID__
+    return true;
+#else
+    constexpr uint32_t kScratch = 0x93fe0000u;
+    constexpr uint32_t kScratchSize = 0x1000u;
+    constexpr uint32_t kNode = kScratch;
+    constexpr uint32_t kOutput = kScratch + 0x200u;
+    constexpr uint32_t kOutputSize = 0x460u;
+
+    const char* const filesDir = std::getenv("KARTPAD_ANDROID_FILES_DIR");
+    if (!filesDir || *filesDir == '\0') {
+        return true;
+    }
+    const std::string root = std::string(filesDir) + "/KartPadDnsIoctlFixture";
+    const auto readText = [](const std::string& path) {
+        std::ifstream input(path);
+        std::string value{std::istreambuf_iterator<char>(input),
+                          std::istreambuf_iterator<char>()};
+        while (!value.empty() &&
+               (value.back() == '\n' || value.back() == '\r' ||
+                value.back() == ' ' || value.back() == '\t')) {
+            value.pop_back();
+        }
+        return value;
+    };
+    const std::string node = readText(root + "/node");
+    if (node.empty()) {
+        return true;
+    }
+    const std::string expectedText = readText(root + "/expected_ipv4");
+    in_addr expectedNative{};
+    if (node.size() > 255u || expectedText.empty() ||
+        inet_pton(AF_INET, expectedText.c_str(), &expectedNative) != 1) {
+        NetFail("A5 guest DNS IOCTL fixture invalid configuration");
+        return false;
+    }
+    const uint32_t expectedAddress = ntohl(expectedNative.s_addr);
+
+    uint8_t* const scratch = Memory::GetPointer(kScratch, kScratchSize);
+    if (!scratch) {
+        NetFail("A5 guest DNS IOCTL fixture has no guest scratch mapping");
+        return false;
+    }
+    std::array<uint8_t, kScratchSize> saved{};
+    std::memcpy(saved.data(), scratch, saved.size());
+    std::memset(scratch, 0, kScratchSize);
+
+    int32_t fd = 0;
+    uint64_t token = 0;
+    const auto finish = [&](bool success) {
+        if (fd > 0) {
+            (void)Network_HLE_Close(static_cast<uint32_t>(fd));
+        }
+        std::memcpy(scratch, saved.data(), saved.size());
+        return success;
+    };
+
+    fd = Network_HLE_OpenDevice("/dev/net/ip/top", 0);
+    if (fd <= 0) {
+        NetFail("A5 guest DNS IOCTL fixture could not open ip/top result=%d", fd);
+        return finish(false);
+    }
+    CopyToGuest(kNode, node.c_str(), static_cast<uint32_t>(node.size() + 1u));
+    const DeferredStartOutcome started = RunDeferredEntry(-1, -1, [&] {
+        return StartScalarDeferredIoctl(
+            static_cast<uint32_t>(fd), IOCTL_SO_GETHOSTBYNAME,
+            kNode, static_cast<uint32_t>(node.size() + 1u),
+            kOutput, kOutputSize, AndroidFixtureRoute());
+    });
+    if (started.disposition != NetworkDeferredContract::StartDisposition::Started ||
+        started.token == 0) {
+        NetFail("A5 guest DNS IOCTL fixture did not start result=%d",
+                started.result);
+        return finish(false);
+    }
+    token = started.token;
+
+    std::optional<DeferredDnsCompletion> completion;
+    for (int attempt = 0; attempt < 500 && !completion; ++attempt) {
+        completion = TakeAndroidFixtureCompletion(token);
+        if (!completion) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+    }
+    if (!completion) {
+        CancelAndroidFixtureCompletion(token);
+        NetFail("A5 guest DNS IOCTL fixture timed out");
+        return finish(false);
+    }
+
+    int32_t result = completion->result;
+    if (result == 0) {
+        try {
+            result = ApplyDeferredDnsCompletion(*completion);
+        } catch (const Memory::AccessViolation&) {
+            result = -SO_EINVAL;
+        }
+    }
+    if (result != 0) {
+        NetFail("A5 guest DNS IOCTL fixture lookup failed result=%d", result);
+        return finish(false);
+    }
+
+    const uint32_t canonicalName = Memory::Read32(kOutput);
+    const uint32_t addressList = Memory::Read32(kOutput + 12u);
+    if (canonicalName != kOutput + 0x10u ||
+        ReadGuestString(canonicalName, 256u) != node ||
+        Memory::Read16(kOutput + 8u) != kWiiAfInet ||
+        Memory::Read16(kOutput + 10u) != 4u ||
+        addressList != kOutput + 0x340u) {
+        NetFail("A5 guest DNS IOCTL fixture returned malformed hostent");
+        return finish(false);
+    }
+    const uint32_t firstAddress = Memory::Read32(addressList);
+    if (!firstAddress || !Memory::Contains(firstAddress, 4u) ||
+        Memory::Read32(firstAddress) != expectedAddress) {
+        NetFail("A5 guest DNS IOCTL fixture returned unexpected IPv4 address");
+        return finish(false);
+    }
+
+    RT_LOGF(RT_TAG_NET,
+            "A5 guest DNS IOCTL fixture passed request_marshaled=yes "
+            "worker_resolved=yes guest_hostent=yes\n");
+    return finish(true);
+#endif
+}
+
+}  // namespace NetworkHle

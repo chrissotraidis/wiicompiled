@@ -1,3 +1,4 @@
+#include "kartpad/android/trace_scope.h"
 #include "hle_stubs.h"
 #include "memory.h"
 #include "abi_bridge.h"
@@ -16,6 +17,7 @@
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <iostream>
 #include <mutex>
 #include <thread>
@@ -256,6 +258,68 @@ uint32_t ExtractTvFormat(uint32_t tvMode) {
     return (tvMode >> 2) & 0x7;
 }
 
+void TraceKartStateAtFrameEnd(uint32_t retraceCount) {
+    static bool initialized = false;
+    static std::FILE* trace = nullptr;
+    static uint64_t sample = 0;
+    if (!initialized) {
+        initialized = true;
+        const char* path = std::getenv("KARTPAD_STATE_TRACE");
+        if (path != nullptr && path[0] != '\0') {
+            trace = std::fopen(path, "w");
+            if (trace != nullptr) {
+                std::setvbuf(trace, nullptr, _IOLBF, 0);
+                std::fprintf(trace,
+                    "sample,retrace,stage,race_time,pos_x,pos_y,pos_z,"
+                    "external_x,external_y,external_z,rot_x,rot_y,rot_z,rot_w,"
+                    "internal_x,internal_y,internal_z,internal_speed,move_dir_x,move_dir_y,move_dir_z\n");
+            } else {
+                std::fprintf(stderr, "[state-trace] unable to open %s\n", path);
+            }
+        }
+    }
+    if (trace == nullptr) {
+        return;
+    }
+
+    try {
+        const uint32_t raceManager = Memory::Read32(0x809bd730);
+        const uint32_t kartManager = Memory::Read32(0x809c18f8);
+        if (raceManager == 0 || kartManager == 0 || Memory::Read8(kartManager + 0x24) == 0) {
+            return;
+        }
+        const uint32_t objects = Memory::Read32(kartManager + 0x20);
+        const uint32_t object = objects == 0 ? 0 : Memory::Read32(objects);
+        const uint32_t accessor = object == 0 ? 0 : Memory::Read32(object);
+        const uint32_t body = accessor == 0 ? 0 : Memory::Read32(accessor + 0x08);
+        const uint32_t holder = body == 0 ? 0 : Memory::Read32(body + 0x90);
+        const uint32_t physics = holder == 0 ? 0 : Memory::Read32(holder + 0x04);
+        const uint32_t move = accessor == 0 ? 0 : Memory::Read32(accessor + 0x28);
+        if (physics == 0 || move == 0) {
+            return;
+        }
+
+        std::fprintf(trace,
+            "%llu,%u,%u,%u,%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x,"
+            "%08x,%08x,%08x,%08x,%08x,%08x,%08x\n",
+            static_cast<unsigned long long>(sample++), retraceCount,
+            static_cast<unsigned>(Memory::Read8(raceManager + 0x2b)),
+            Memory::Read32(raceManager + 0x20),
+            Memory::Read32(physics + 0x68), Memory::Read32(physics + 0x6c),
+            Memory::Read32(physics + 0x70), Memory::Read32(physics + 0x74),
+            Memory::Read32(physics + 0x78), Memory::Read32(physics + 0x7c),
+            Memory::Read32(physics + 0xf0), Memory::Read32(physics + 0xf4),
+            Memory::Read32(physics + 0xf8), Memory::Read32(physics + 0xfc),
+            Memory::Read32(physics + 0x14c), Memory::Read32(physics + 0x150),
+            Memory::Read32(physics + 0x154), Memory::Read32(move + 0x20),
+            Memory::Read32(move + 0x74), Memory::Read32(move + 0x78),
+            Memory::Read32(move + 0x7c));
+    } catch (const Memory::AccessViolation&) {
+        // Object graphs are legitimately absent while transitioning between
+        // menus and races. Resume automatically when the next graph exists.
+    }
+}
+
 // Re-entry guard to prevent AdvanceRetrace calling itself via OSWakeupThread -> SelectThread
 static std::atomic<bool> s_inAdvanceRetrace{false};
 
@@ -361,13 +425,21 @@ void AdvanceRetrace(CpuContext* ctx, Clock::time_point retraceStamp, bool servic
         const bool shouldSubmit = frameActive && (shouldPresentXfb || shouldPresentBlack);
 
         if (shouldSubmit) {
+            bool frameReady = false;
             if (!isBlack || settings_overlay::StartupScreenVisible()) {
                 // Normal presentation: draw overlay on top of GX content
-                settings_overlay::Draw();
+                frameReady = settings_overlay::Draw();
+            } else {
+                frameReady = settings_overlay::FrameReadyForOverlay();
             }
-            // Outside startup, VI black remains a pure black presentation.
-            // Unpaced: this present already runs in retrace context.
-            VI_HLE_PresentFrame(shouldPresentXfb, false);
+            if (frameReady) {
+                // Outside startup, VI black remains a pure black presentation.
+                // Unpaced: this present already runs in retrace context.
+                VI_HLE_PresentFrame(shouldPresentXfb, false);
+            } else {
+                g_auroraFrameActive.store(false, std::memory_order_release);
+                g_auroraFrameHadWork.store(false, std::memory_order_release);
+            }
         } else if (g_auroraFrameHadWork.load(std::memory_order_acquire) && !shouldPresentXfb && !isBlack) {
             // GX work is in progress but frame not complete - just poll window events
             // Don't call aurora_end_frame() as that would present incomplete work
@@ -518,6 +590,7 @@ void PaceToRetraceBoundary(Clock::time_point deadline) {
 // producer to the VI retrace boundary, and pre-warms the next frame. Paced from GXCopyDisp; unpaced for
 // the retrace-context black/boot present path in AdvanceRetrace.
 void VI_HLE_PresentFrame(bool presentedXfb, bool paceToRetrace) {
+    kartpad::android::TraceScope trace("KartPad/vi-present-sequence");
     if (s_presentSequenceActive.exchange(true, std::memory_order_acq_rel)) {
         return;
     }
@@ -526,6 +599,7 @@ void VI_HLE_PresentFrame(bool presentedXfb, bool paceToRetrace) {
     } sequenceGuard;
     Clock::time_point paceDeadline{};
     bool paceThisFrame = false;
+    uint32_t traceRetraceCount = 0;
     if (paceToRetrace) {
         uint64_t baseNanos = 0;
         uint64_t intervalNanos = 0;
@@ -535,6 +609,7 @@ void VI_HLE_PresentFrame(bool presentedXfb, bool paceToRetrace) {
             EnsureInitializedLocked();
             paceDeadline = g_vi.lastRetrace + g_vi.retraceInterval;
             retraceCount = g_vi.retraceCount;
+            traceRetraceCount = retraceCount;
             baseNanos = static_cast<uint64_t>(
                 std::chrono::duration_cast<std::chrono::nanoseconds>(
                     g_vi.lastRetrace.time_since_epoch())
@@ -579,6 +654,9 @@ void VI_HLE_PresentFrame(bool presentedXfb, bool paceToRetrace) {
         aurora_set_present_schedule(0, 0);
     }
 
+    if (presentedXfb && paceToRetrace) {
+        TraceKartStateAtFrameEnd(traceRetraceCount);
+    }
     aurora_end_frame();
     if (paceThisFrame) {
         PaceToRetraceBoundary(paceDeadline);

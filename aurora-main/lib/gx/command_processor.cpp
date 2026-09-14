@@ -1,3 +1,5 @@
+#include "kartpad_draw_inputs.hpp"
+#include <cstdlib>
 #include "command_processor.hpp"
 
 #include "../gfx/common.hpp"
@@ -2013,9 +2015,28 @@ static ArrayRef<u16> offset_index_template(const CachedIndexTemplate& indexTempl
   return {dst, count};
 }
 
+// Process-start controlled experiment for the two actual #193 pipeline recipes.
+// Both explicit modes disable merging equally; an unset/invalid value is normal rendering.
+static int kartpad_pnmtx_mode() {
+  static const int mode = [] {
+    const char* value = std::getenv("KARTPAD_RENDERER_CONST_PNMTX");
+    if (value && std::strcmp(value, "1") == 0) return 1;
+    if (value && std::strcmp(value, "0") == 0) return 0;
+    return -1;
+  }();
+  return mode;
+}
+
+static bool kartpad_pnmtx_target(HashType hash) {
+  return hash == 0x58866e32bada1f83ULL || hash == 0x33c5ff18d5c180e0ULL;
+}
+
 struct CachedPipelineState {
   gfx::PipelineRef ref = 0;
   HashType configHash = 0;
+  HashType originalConfigHash = 0;
+  HashType shaderConfigHash = 0;
+  bool constantPnMtx = false;
   // Carried here so the draw can be recorded without keeping the PipelineConfig that produced it alive; it is the only field of the config the draw itself still needs.
   u32 dstAlpha = UINT32_MAX;
   ShaderInfo shaderInfo{};
@@ -2037,11 +2058,20 @@ static const CachedPipelineState& cached_pipeline_state(const PipelineConfig& co
     return entry.state;
   }
 
+  HashType originalHash = hash;
+  if (config.shaderConfig.kartpadConstantPnMtx) {
+    auto originalConfig = config;
+    originalConfig.shaderConfig.kartpadConstantPnMtx = 0;
+    originalHash = xxh3_hash(originalConfig, static_cast<HashType>(gfx::ShaderType::GX));
+  }
   entry.valid = true;
   entry.config = config;
   entry.state = {
       .ref = gfx::pipeline_ref(config),
       .configHash = hash,
+      .originalConfigHash = originalHash,
+      .shaderConfigHash = xxh3_hash(config.shaderConfig),
+      .constantPnMtx = config.shaderConfig.kartpadConstantPnMtx != 0,
       .dstAlpha = config.dstAlpha,
       .shaderInfo = build_shader_info(config.shaderConfig),
   };
@@ -2068,6 +2098,16 @@ static const CachedPipelineState& resolve_pipeline_state(GXPrimitive prim, GXVtx
 
   PipelineConfig config{};
   populate_pipeline_config(config, prim, fmt);
+  if (kartpad_pnmtx_mode() == 1 &&
+      kartpad_pnmtx_target(xxh3_hash(config, static_cast<HashType>(gfx::ShaderType::GX)))) {
+    const auto info = build_shader_info(config.shaderConfig);
+    if (config.shaderConfig.lineMode == 0 &&
+        config.shaderConfig.attrs[GX_VA_PNMTXIDX].attrType == GX_DIRECT &&
+        info.matrixLayout.absolutePosRegion && info.matrixLayout.postexCount == 20 &&
+        info.matrixLayout.nrmCount == MaxPnMtx) {
+      config.shaderConfig.kartpadConstantPnMtx = 1;
+    }
+  }
   // cached_pipeline_state hands back a reference into a fixed direct-mapped table, so the address stays valid; the entry it points at can only be rewritten by another call to that function, and every such call goes through this miss path and replaces the memo in the same breath.
   const CachedPipelineState& state = cached_pipeline_state(config);
   memo = Memo{
@@ -2078,6 +2118,35 @@ static const CachedPipelineState& resolve_pipeline_state(GXPrimitive prim, GXVtx
       .fmt = fmt,
   };
   return state;
+}
+
+// Opt-in CPU-side evidence from the actual submitted GX stream, including merged draws.
+static void kartpad_audit_draw(GXPrimitive prim, GXVtxFmt fmt, const uint8_t* vertices,
+                               uint16_t count, uint32_t stride, uint32_t bytes) {
+  static const bool enabled = [] {
+    const char* value = std::getenv("KARTPAD_RENDERER_VALIDATION");
+    return value && std::strcmp(value, "1") == 0;
+  }();
+  if (!enabled || g_gxState.vtxDesc[GX_VA_PNMTXIDX] != GX_DIRECT) return;
+  const auto selection = kartpad::diagnostics::inspect_matrix_selection(vertices, bytes, count, stride);
+  unsigned nonfinitePosition = 0;
+  unsigned nonfiniteNormal = 0;
+  for (unsigned slot = 0; slot < MaxPnMtx; ++slot) {
+    if ((selection.used_mask & (1u << slot)) == 0) continue;
+    nonfinitePosition += kartpad::diagnostics::count_nonfinite(
+        &g_gxState.pnMtx[slot].pos, sizeof(g_gxState.pnMtx[slot].pos));
+    nonfiniteNormal += kartpad::diagnostics::count_nonfinite(
+        &g_gxState.pnMtx[slot].nrm, sizeof(g_gxState.pnMtx[slot].nrm));
+  }
+  const auto& pipeline = resolve_pipeline_state(prim, fmt);
+  static kartpad::diagnostics::DrawReportBudget budget;
+  const bool anomaly = !selection.complete || selection.outside_palette || nonfinitePosition || nonfiniteNormal;
+  if (!budget.take(pipeline.configHash, anomaly)) return;
+  Log.info("KartPadDrawCheck pipeline={:016x} anomaly={} vertices={} stride={} complete={} pn_mask={} pn_max_raw={} pn_outside={} pn_nonmultiple={} pos_nonfinite={} nrm_nonfinite={} postex_count={} nrm_count={} absolute={}",
+           pipeline.configHash, anomaly, count, stride, selection.complete,
+           selection.used_mask, selection.max_raw, selection.outside_palette, selection.non_row_multiple,
+           nonfinitePosition, nonfiniteNormal, pipeline.shaderInfo.matrixLayout.postexCount,
+           pipeline.shaderInfo.matrixLayout.nrmCount, pipeline.shaderInfo.matrixLayout.absolutePosRegion);
 }
 
 bool submit_raw_draw(GXPrimitive prim, GXVtxFmt fmt, const uint8_t* vertices, uint16_t vtxCount,
@@ -2114,6 +2183,7 @@ bool submit_raw_draw(GXPrimitive prim, GXVtxFmt fmt, const uint8_t* vertices, ui
 
   // This entry point bypasses process(), so it owns the renderer lock itself.
   std::lock_guard gpuLock(aurora::renderer_gpu_mutex());
+  kartpad_audit_draw(prim, fmt, vertices, vtxCount, vtxSize, vertexBytes);
   const gfx::Range vertRange = gfx::push_verts(vertices, vertexBytes);
   const bool interpolationIdentityActive = frame_interpolation_identity_needed();
   const PnMtxUsage matrixUsage = interpolationIdentityActive
@@ -2153,11 +2223,12 @@ static bool handle_draw(u8 cmd, const u8* data, u32& pos, u32 size, bool bigEndi
 
   // Push raw vertex data to buffer
   const uint8_t* vertices = data + pos;
+  kartpad_audit_draw(prim, fmt, vertices, vtxCount, vtxSize, totalVtxBytes);
   gfx::Range vertRange = gfx::push_verts(vertices, totalVtxBytes);
   pos += totalVtxBytes;
 
   // Try to merge with previous draw call
-  if (!g_gxState.stateDirty) LIKELY {
+  if (!g_gxState.stateDirty && kartpad_pnmtx_mode() < 0) LIKELY {
     auto* lastDraw = gfx::get_last_draw_command<DrawData>();
     // Only if the previous draw call was a single instance draw (no lines/points handling)
     if (lastDraw != nullptr && prim != GX_LINES && prim != GX_LINESTRIP && prim != GX_POINTS &&
@@ -2231,6 +2302,16 @@ static void handle_draw_unmerged(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount,
 
   const auto& pipelineState = resolve_pipeline_state(prim, fmt);
   const auto& info = pipelineState.shaderInfo;
+  if (kartpad_pnmtx_mode() >= 0 && kartpad_pnmtx_target(pipelineState.originalConfigHash)) {
+    static unsigned reports[2]{};
+    const auto slot = pipelineState.originalConfigHash == 0x58866e32bada1f83ULL ? 0u : 1u;
+    if (reports[slot] < 8) {
+      ++reports[slot];
+      Log.info("KartPadPNMTX draw_binding original={:016x} pipeline={:016x} shader={:016x} variant={} vertices={} merging=disabled",
+               pipelineState.originalConfigHash, pipelineState.configHash, pipelineState.shaderConfigHash,
+               pipelineState.constantPnMtx ? "literal" : "dynamic", vtxCount);
+    }
+  }
 
   resolve_sampled_textures(info);
 

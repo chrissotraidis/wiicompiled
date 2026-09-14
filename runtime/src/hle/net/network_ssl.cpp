@@ -1,4 +1,19 @@
+#include <kartpad/android/network_stall.h>
 #include "network_internal.h"
+#include "kartpad/network/private_wfc.h"
+
+#ifdef __APPLE__
+#include <kartpad/network/apple_secure_transport.h>
+#elif defined(__ANDROID__)
+#include <kartpad/network/android_mbedtls.h>
+#include "nand_path.h"
+#include <arpa/inet.h>
+#endif
+
+#include <array>
+#include <fstream>
+#include <iterator>
+#include <memory>
 
 namespace NetworkHle {
 
@@ -56,6 +71,10 @@ struct SslSession {
     CredHandle cred{};
     CtxtHandle context{};
     SecPkgContext_StreamSizes sizes{};
+#elif defined(__APPLE__)
+    SSLContextRef context = nullptr;
+#elif defined(__ANDROID__)
+    std::unique_ptr<kartpad::network::AndroidMbedTlsSession> context;
 #endif
 };
 
@@ -73,6 +92,9 @@ static bool IsRetroNasSslHost(std::string_view hostname) {
 }
 
 static bool IsRetroPlaintextSslHost(std::string_view hostname) {
+    // An explicitly selected compatible private WFC service uses the legacy
+    // Wii plaintext protocol. Ordinary TLS hosts keep certificate validation.
+    if (KartPad::Network::PrivateWfcRoutesHost(hostname)) return true;
     if (IsRetroNasSslHost(hostname)) {
         return true;
     }
@@ -525,6 +547,223 @@ static int32_t SslRead(SslSession& ssl, uint8_t* out, uint32_t size) {
     ssl.decrypted.erase(ssl.decrypted.begin(), ssl.decrypted.begin() + copied);
     return copied == 0 ? SSL_ERR_ZERO : static_cast<int32_t>(copied);
 }
+#elif defined(__APPLE__)
+static int32_t AppleSslResult(OSStatus status, bool writing) {
+    using kartpad::network::ClassifySecureTransportStatus;
+    using kartpad::network::SecureTransportResult;
+    switch (ClassifySecureTransportStatus(status)) {
+    case SecureTransportResult::kSuccess:
+        return SSL_OK;
+    case SecureTransportResult::kWouldBlock:
+        return writing ? SSL_ERR_WAGAIN : SSL_ERR_RAGAIN;
+    case SecureTransportResult::kClosed:
+        return SSL_ERR_ZERO;
+    case SecureTransportResult::kHostnameMismatch:
+        return SSL_ERR_VCOMMONNAME;
+    case SecureTransportResult::kFailed:
+        return SSL_ERR_FAILED;
+    }
+    return SSL_ERR_FAILED;
+}
+
+static bool SendAllApple(NativeSocket socket, const uint8_t* data, size_t size) {
+    size_t offset = 0;
+    while (offset < size) {
+        const ssize_t sent = send(socket, data + offset, size - offset, 0);
+        if (sent > 0) {
+            offset += static_cast<size_t>(sent);
+            continue;
+        }
+        if (sent < 0 && errno == EINTR) {
+            continue;
+        }
+        return false;
+    }
+    return true;
+}
+
+static void ClearSslSession(SslSession& ssl) {
+    if (ssl.context != nullptr) {
+        CFRelease(ssl.context);
+    }
+    ssl = {};
+}
+
+static int32_t EnsureAppleSslContext(SslSession& ssl) {
+    if (ssl.context != nullptr) {
+        return SSL_OK;
+    }
+    ssl.context = SSLCreateContext(kCFAllocatorDefault, kSSLClientSide,
+                                   kSSLStreamType);
+    if (ssl.context == nullptr) {
+        return SSL_ERR_FAILED;
+    }
+    OSStatus status = SSLSetIOFuncs(
+        ssl.context, kartpad::network::SecureTransportSocketRead,
+        kartpad::network::SecureTransportSocketWrite);
+    if (status == noErr) {
+        status = SSLSetConnection(ssl.context, &ssl.native);
+    }
+    if (status == noErr && !ssl.hostname.empty()) {
+        status = SSLSetPeerDomainName(ssl.context, ssl.hostname.data(),
+                                      ssl.hostname.size());
+    }
+    if (status != noErr) {
+        CFRelease(ssl.context);
+        ssl.context = nullptr;
+        return AppleSslResult(status, false);
+    }
+    return SSL_OK;
+}
+
+static int32_t SslHandshakeImpl(SslSession& ssl) {
+    if (ssl.plaintextWfc) {
+        ssl.handshaked = true;
+        return SSL_OK;
+    }
+    if (ssl.handshaked) {
+        return SSL_OK;
+    }
+    const int32_t contextResult = EnsureAppleSslContext(ssl);
+    if (contextResult != SSL_OK) {
+        return contextResult;
+    }
+    const OSStatus status = SSLHandshake(ssl.context);
+    if (status == noErr) {
+        ssl.handshaked = true;
+        return SSL_OK;
+    }
+    return AppleSslResult(status, false);
+}
+
+static int32_t SslWrite(SslSession& ssl, const uint8_t* data, uint32_t size) {
+    if (!data || size == 0) {
+        return SSL_ERR_ZERO;
+    }
+    const int32_t handshakeResult = SslHandshake(ssl);
+    if (handshakeResult != SSL_OK) {
+        return handshakeResult;
+    }
+    if (ssl.plaintextWfc) {
+        return SendAllApple(ssl.native, data, size)
+            ? static_cast<int32_t>(size) : SSL_ERR_SYSCALL;
+    }
+
+    size_t total = 0;
+    while (total < size) {
+        size_t processed = 0;
+        const OSStatus status = SSLWrite(ssl.context, data + total,
+                                         size - total, &processed);
+        total += processed;
+        if (status == noErr) {
+            continue;
+        }
+        if (status == errSSLWouldBlock && processed > 0) {
+            continue;
+        }
+        return total > 0 ? static_cast<int32_t>(total)
+                         : AppleSslResult(status, true);
+    }
+    return static_cast<int32_t>(total);
+}
+
+static int32_t SslRead(SslSession& ssl, uint8_t* out, uint32_t size) {
+    if (!out || size == 0) {
+        return SSL_ERR_ZERO;
+    }
+    const int32_t handshakeResult = SslHandshake(ssl);
+    if (handshakeResult != SSL_OK) {
+        return handshakeResult;
+    }
+    if (ssl.plaintextWfc) {
+        for (;;) {
+            const ssize_t received = recv(ssl.native, out, size, 0);
+            if (received > 0) {
+                return static_cast<int32_t>(received);
+            }
+            if (received == 0) {
+                return SSL_ERR_ZERO;
+            }
+            if (errno == EINTR) {
+                continue;
+            }
+            return errno == EAGAIN || errno == EWOULDBLOCK
+                ? SSL_ERR_RAGAIN : SSL_ERR_SYSCALL;
+        }
+    }
+
+    size_t processed = 0;
+    const OSStatus status = SSLRead(ssl.context, out, size, &processed);
+    if (processed > 0) {
+        return static_cast<int32_t>(processed);
+    }
+    return AppleSslResult(status, false);
+}
+#elif defined(__ANDROID__)
+static void ClearSslSession(SslSession& ssl) {
+    if (ssl.context) {
+        ssl.context->Close();
+    }
+    ssl = {};
+}
+
+static int32_t SslHandshakeImpl(SslSession& ssl) {
+    if (ssl.plaintextWfc) {
+        ssl.handshaked = true;
+        return SSL_OK;
+    }
+    if (ssl.handshaked) {
+        return SSL_OK;
+    }
+    if (!ssl.context) {
+        return SSL_ERR_FAILED;
+    }
+    const int32_t result = ssl.context->Handshake();
+    if (result == SSL_OK) {
+        ssl.handshaked = true;
+    }
+    return result;
+}
+
+static int32_t SslWrite(SslSession& ssl, const uint8_t* data, uint32_t size) {
+    if (!data || size == 0) {
+        return SSL_ERR_ZERO;
+    }
+    const int32_t handshakeResult = SslHandshake(ssl);
+    if (handshakeResult != SSL_OK) {
+        return handshakeResult;
+    }
+    if (ssl.plaintextWfc) {
+        const ssize_t sent = send(ssl.native, data, size, MSG_NOSIGNAL);
+        if (sent > 0) {
+            return static_cast<int32_t>(sent);
+        }
+        return sent == 0 ? SSL_ERR_ZERO
+                         : (errno == EAGAIN || errno == EWOULDBLOCK
+                                ? SSL_ERR_WAGAIN : SSL_ERR_SYSCALL);
+    }
+    return ssl.context->Write(data, size);
+}
+
+static int32_t SslRead(SslSession& ssl, uint8_t* out, uint32_t size) {
+    if (!out || size == 0) {
+        return SSL_ERR_ZERO;
+    }
+    const int32_t handshakeResult = SslHandshake(ssl);
+    if (handshakeResult != SSL_OK) {
+        return handshakeResult;
+    }
+    if (ssl.plaintextWfc) {
+        const ssize_t received = recv(ssl.native, out, size, 0);
+        if (received > 0) {
+            return static_cast<int32_t>(received);
+        }
+        return received == 0 ? SSL_ERR_ZERO
+                             : (errno == EAGAIN || errno == EWOULDBLOCK
+                                    ? SSL_ERR_RAGAIN : SSL_ERR_SYSCALL);
+    }
+    return ssl.context->Read(out, size);
+}
 #else
 static void ClearSslSession(SslSession& ssl) {
     ssl = {};
@@ -564,6 +803,9 @@ void ClearSslSessionsForSocket(uint32_t fd) {
 }
 
 int32_t HandleSslIoctlv(uint32_t cmd, const std::vector<IoVector>& in, const std::vector<IoVector>& out) {
+#if defined(__ANDROID__)
+    kartpad::android::NetworkCallTimer stallTimer("ssl_ioctlv", cmd);
+#endif
 
     switch (cmd) {
     case IOCTLV_NET_SSL_NEW: {
@@ -581,6 +823,15 @@ int32_t HandleSslIoctlv(uint32_t cmd, const std::vector<IoVector>& in, const std
                 ClearSslSession(g_sslSessions[i]);
                 g_sslSessions[i].active = true;
                 g_sslSessions[i].hostname = hostname;
+#ifdef __ANDROID__
+                g_sslSessions[i].context =
+                    std::make_unique<kartpad::network::AndroidMbedTlsSession>();
+                if (g_sslSessions[i].context->SetHostname(hostname) != SSL_OK) {
+                    ClearSslSession(g_sslSessions[i]);
+                    WriteSslReturn(in, SSL_ERR_FAILED);
+                    return 0;
+                }
+#endif
                 WriteSslReturn(in, i + 1);
                 return 0;
             }
@@ -624,10 +875,32 @@ int32_t HandleSslIoctlv(uint32_t cmd, const std::vector<IoVector>& in, const std
             ssl.native = socket->native;
             ssl.plaintextWfc = true;
         }
+#ifdef __ANDROID__
+        if (!ssl.plaintextWfc &&
+            (!ssl.context || ssl.context->AttachSocket(ssl.native) != SSL_OK)) {
+            WriteSslReturn(in, SSL_ERR_FAILED);
+            return 0;
+        }
+#endif
 #ifdef _WIN32
         const int timeoutMs = 15000;
         setsockopt(socket->native, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&timeoutMs), sizeof(timeoutMs));
         setsockopt(socket->native, SOL_SOCKET, SO_SNDTIMEO, reinterpret_cast<const char*>(&timeoutMs), sizeof(timeoutMs));
+#elif defined(__APPLE__)
+        const int noSigPipe = 1;
+        setsockopt(socket->native, SOL_SOCKET, SO_NOSIGPIPE, &noSigPipe,
+                   sizeof(noSigPipe));
+        const timeval timeout{15, 0};
+        setsockopt(socket->native, SOL_SOCKET, SO_RCVTIMEO, &timeout,
+                   sizeof(timeout));
+        setsockopt(socket->native, SOL_SOCKET, SO_SNDTIMEO, &timeout,
+                   sizeof(timeout));
+#elif defined(__ANDROID__)
+        const timeval timeout{15, 0};
+        setsockopt(socket->native, SOL_SOCKET, SO_RCVTIMEO, &timeout,
+                   sizeof(timeout));
+        setsockopt(socket->native, SOL_SOCKET, SO_SNDTIMEO, &timeout,
+                   sizeof(timeout));
 #endif
         WriteSslReturn(in, SSL_OK);
         return 0;
@@ -717,7 +990,36 @@ int32_t HandleSslIoctlv(uint32_t cmd, const std::vector<IoVector>& in, const std
     case IOCTLV_NET_SSL_SETBUILTINCLIENTCERT:
     case IOCTLV_NET_SSL_DISABLEVERIFYOPTIONFORDEBUG: {
         const int sslId = ReadSslId(out);
-        WriteSslReturn(in, IsSslIdValid(sslId) ? SSL_OK : SSL_ERR_ID);
+        int32_t result = IsSslIdValid(sslId) ? SSL_OK : SSL_ERR_ID;
+#ifdef __ANDROID__
+        if (result == SSL_OK && cmd == IOCTLV_NET_SSL_SETROOTCA) {
+            if (out.size() < 2 || !out[1].address || out[1].size == 0 ||
+                !g_sslSessions[sslId].context) {
+                result = SSL_ERR_FAILED;
+            } else {
+                const auto* certificate =
+                    Memory::GetPointer(out[1].address, out[1].size);
+                result = g_sslSessions[sslId].context->SetRootCaDer(
+                    certificate, out[1].size);
+            }
+        } else if (result == SSL_OK && cmd == IOCTLV_NET_SSL_SETBUILTINROOTCA) {
+            if (!g_sslSessions[sslId].context) {
+                result = SSL_ERR_FAILED;
+            } else {
+                const std::filesystem::path rootCa =
+                    RuntimeNandPath::DiscoverNandRootPath() / "rootca.pem";
+                result = g_sslSessions[sslId].context->SetBuiltinRootCaFile(
+                    rootCa.string());
+            }
+        } else if (result == SSL_OK &&
+                   (cmd == IOCTLV_NET_SSL_SETCLIENTCERT ||
+                    cmd == IOCTLV_NET_SSL_SETBUILTINCLIENTCERT)) {
+            // Do not acknowledge a client certificate that Android has not
+            // actually configured. Mutual TLS support remains a separate gate.
+            result = SSL_ERR_FAILED;
+        }
+#endif
+        WriteSslReturn(in, result);
         return 0;
     }
     case IOCTLV_NET_SSL_DEBUGGETVERSION:
@@ -728,6 +1030,222 @@ int32_t HandleSslIoctlv(uint32_t cmd, const std::vector<IoVector>& in, const std
         WriteSslReturn(in, SSL_ERR_FAILED);
         return 0;
     }
+}
+
+bool RunAndroidTlsIoctlvFixture() {
+#ifndef __ANDROID__
+    return true;
+#else
+    constexpr uint32_t kScratch = 0x93ff0000u;
+    constexpr uint32_t kScratchSize = 0x10000u;
+    constexpr uint32_t kReturn = kScratch;
+    constexpr uint32_t kId = kScratch + 4u;
+    constexpr uint32_t kSocket = kScratch + 8u;
+    constexpr uint32_t kHostname = kScratch + 0x100u;
+    constexpr uint32_t kCertificate = kScratch + 0x200u;
+    constexpr uint32_t kRequest = kScratch + 0x4000u;
+    constexpr uint32_t kResponse = kScratch + 0x5000u;
+    constexpr uint32_t kResponseSize = 4096u;
+
+    const char* const filesDir = std::getenv("KARTPAD_ANDROID_FILES_DIR");
+    if (!filesDir || *filesDir == '\0') {
+        return true;
+    }
+    const std::string root = std::string(filesDir) + "/KartPadTlsIoctlvFixture";
+    static thread_local bool useRecoveryPort = false;
+    const auto readText = [](const std::string& path) {
+        std::ifstream input(path);
+        std::string value{std::istreambuf_iterator<char>(input),
+                          std::istreambuf_iterator<char>()};
+        while (!value.empty() && (value.back() == '\n' || value.back() == '\r' ||
+                                  value.back() == ' ' || value.back() == '\t')) {
+            value.pop_back();
+        }
+        return value;
+    };
+    const std::string portText = readText(root + "/port");
+    if (portText.empty()) {
+        return true;
+    }
+    const std::string addressText = readText(root + "/address");
+    const std::string hostname = readText(root + "/hostname");
+    const std::string expectedText = readText(root + "/expected");
+    const std::string recoveryPortText = readText(root + "/recovery_port");
+    const bool checkBuiltinRootMissing =
+        readText(root + "/check_builtin_root_missing") == "1";
+    std::ifstream certificateInput(root + "/ca.der", std::ios::binary);
+    const std::vector<uint8_t> certificate{
+        std::istreambuf_iterator<char>(certificateInput),
+        std::istreambuf_iterator<char>()};
+    const int primaryPort = std::atoi(portText.c_str());
+    const int recoveryPort = std::atoi(recoveryPortText.c_str());
+    const int port = useRecoveryPort ? recoveryPort : primaryPort;
+    const int32_t expected = std::atoi(expectedText.c_str());
+    const std::string address = addressText.empty() ? "10.0.2.2" : addressText;
+    if (port <= 0 || port > 65535 || hostname.empty() || expectedText.empty() ||
+        certificate.empty() || certificate.size() > 0x3000u ||
+        (!recoveryPortText.empty() &&
+         (recoveryPort <= 0 || recoveryPort > 65535))) {
+        NetFail("A5 guest TLS IOCTLV fixture invalid configuration");
+        return false;
+    }
+
+    uint8_t* const scratch = Memory::GetPointer(kScratch, kScratchSize);
+    if (!scratch) {
+        NetFail("A5 guest TLS IOCTLV fixture has no guest scratch mapping");
+        return false;
+    }
+    std::array<uint8_t, kScratchSize> saved{};
+    std::memcpy(saved.data(), scratch, saved.size());
+    std::memset(scratch, 0, kScratchSize);
+
+    int32_t sslId = 0;
+    const auto finish = [&](bool success) {
+        if (sslId > 0) {
+            Memory::Write32(kId, static_cast<uint32_t>(sslId));
+            (void)HandleSslIoctlv(IOCTLV_NET_SSL_SHUTDOWN,
+                                  {{kReturn, 4u}}, {{kId, 4u}});
+        }
+        CleanupAllWiiSockets();
+        std::memcpy(scratch, saved.data(), saved.size());
+        return success;
+    };
+    const auto result = [&]() {
+        return static_cast<int32_t>(Memory::Read32(kReturn));
+    };
+
+    CopyToGuest(kHostname, hostname.c_str(),
+                static_cast<uint32_t>(hostname.size() + 1u));
+    Memory::Write32(kId, 0u);
+    (void)HandleSslIoctlv(IOCTLV_NET_SSL_NEW, {{kReturn, 4u}},
+                          {{kId, 4u}, {kHostname, static_cast<uint32_t>(hostname.size() + 1u)}});
+    sslId = result();
+    if (sslId <= 0) {
+        NetFail("A5 guest TLS IOCTLV fixture SSL_NEW failed result=%d", sslId);
+        return finish(false);
+    }
+
+    if (checkBuiltinRootMissing) {
+        Memory::Write32(kId, static_cast<uint32_t>(sslId));
+        (void)HandleSslIoctlv(IOCTLV_NET_SSL_SETBUILTINROOTCA,
+                              {{kReturn, 4u}}, {{kId, 4u}});
+        if (result() != SSL_ERR_FAILED) {
+            NetFail("A5 guest TLS IOCTLV missing built-in root returned=%d",
+                    result());
+            return finish(false);
+        }
+        RT_LOGF(RT_TAG_NET,
+                "A5 guest TLS IOCTLV missing built-in root rejection passed result=%d\n",
+                result());
+    }
+
+    Memory::Write32(kId, static_cast<uint32_t>(sslId));
+    CopyToGuest(kCertificate, certificate.data(),
+                static_cast<uint32_t>(certificate.size()));
+    (void)HandleSslIoctlv(IOCTLV_NET_SSL_SETROOTCA, {{kReturn, 4u}},
+                          {{kId, 4u}, {kCertificate, static_cast<uint32_t>(certificate.size())}});
+    if (result() != SSL_OK) {
+        NetFail("A5 guest TLS IOCTLV fixture SETROOTCA failed result=%d", result());
+        return finish(false);
+    }
+
+    const NativeSocket native = ::socket(AF_INET, SOCK_STREAM, 0);
+    sockaddr_in peer{};
+    peer.sin_family = AF_INET;
+    peer.sin_port = htons(static_cast<uint16_t>(port));
+    if (native == kInvalidSocket || inet_pton(AF_INET, address.c_str(), &peer.sin_addr) != 1 ||
+        connect(native, reinterpret_cast<const sockaddr*>(&peer), sizeof(peer)) != 0) {
+        if (native != kInvalidSocket) {
+            CloseNativeSocket(native);
+        }
+        NetFail("A5 guest TLS IOCTLV fixture TCP connect failed");
+        return finish(false);
+    }
+    const int32_t wiiFd = AddWiiSocket(native, AF_INET, SOCK_STREAM, 0);
+    if (wiiFd < 0) {
+        NetFail("A5 guest TLS IOCTLV fixture socket registration failed result=%d", wiiFd);
+        return finish(false);
+    }
+    if (WiiSocket* socket = GetWiiSocket(static_cast<uint32_t>(wiiFd))) {
+        socket->peerPort = static_cast<uint16_t>(port);
+        socket->peerAddr = peer;
+        socket->hasPeerAddr = true;
+    }
+
+    Memory::Write32(kId, static_cast<uint32_t>(sslId));
+    Memory::Write32(kSocket, static_cast<uint32_t>(wiiFd));
+    (void)HandleSslIoctlv(IOCTLV_NET_SSL_CONNECT, {{kReturn, 4u}},
+                          {{kId, 4u}, {kSocket, 4u}});
+    if (result() != SSL_OK) {
+        NetFail("A5 guest TLS IOCTLV fixture SSL_CONNECT failed result=%d", result());
+        return finish(false);
+    }
+
+    (void)HandleSslIoctlv(IOCTLV_NET_SSL_DOHANDSHAKE, {{kReturn, 4u}}, {{kId, 4u}});
+    const int32_t handshake = result();
+    if (handshake != expected) {
+        NetFail("A5 guest TLS IOCTLV fixture handshake=%d expected=%d", handshake, expected);
+        if (expected == SSL_OK && !useRecoveryPort && recoveryPort > 0) {
+            (void)finish(false);
+            useRecoveryPort = true;
+            const bool recovered = RunAndroidTlsIoctlvFixture();
+            useRecoveryPort = false;
+            if (recovered) {
+                RT_LOGF(RT_TAG_NET,
+                        "A5 guest TLS IOCTLV same-process recovery passed result=%d\n",
+                        handshake);
+            }
+            return recovered;
+        }
+        return finish(false);
+    }
+    if (expected != SSL_OK) {
+        RT_LOGF(RT_TAG_NET, "A5 guest TLS IOCTLV hostname rejection passed result=%d\n",
+                handshake);
+        return finish(true);
+    }
+
+    constexpr char request[] =
+        "GET / HTTP/1.1\r\nHost: kartpad.test\r\nConnection: close\r\n\r\n";
+    CopyToGuest(kRequest, request, sizeof(request) - 1u);
+    (void)HandleSslIoctlv(IOCTLV_NET_SSL_WRITE, {{kReturn, 4u}},
+                          {{kId, 4u}, {kRequest, sizeof(request) - 1u}});
+    if (result() != static_cast<int32_t>(sizeof(request) - 1u)) {
+        NetFail("A5 guest TLS IOCTLV SSL_WRITE failed result=%d", result());
+        return finish(false);
+    }
+
+    std::string response;
+    int32_t terminalRead = SSL_ERR_RAGAIN;
+    for (int attempt = 0; attempt < 8; ++attempt) {
+        (void)HandleSslIoctlv(IOCTLV_NET_SSL_READ,
+                              {{kReturn, 4u}, {kResponse, kResponseSize}},
+                              {{kId, 4u}});
+        const int32_t received = result();
+        terminalRead = received;
+        if (received > 0) {
+            const char* const bytes = reinterpret_cast<const char*>(
+                Memory::GetPointer(kResponse, static_cast<uint32_t>(received)));
+            response.append(bytes, static_cast<size_t>(received));
+        } else if (received != SSL_ERR_RAGAIN) {
+            break;
+        }
+    }
+    if (response.find("200 OK") == std::string::npos &&
+        response.find("200 ok") == std::string::npos) {
+        NetFail("A5 guest TLS IOCTLV SSL_READ lacked HTTP success bytes=%zu", response.size());
+        return finish(false);
+    }
+    if (terminalRead != SSL_ERR_ZERO) {
+        NetFail("A5 guest TLS IOCTLV did not observe peer close result=%d",
+                terminalRead);
+        return finish(false);
+    }
+    RT_LOGF(RT_TAG_NET,
+            "A5 guest TLS IOCTLV trusted exchange passed response_bytes=%zu peer_close=%d\n",
+            response.size(), terminalRead);
+    return finish(true);
+#endif
 }
 
 }  // namespace NetworkHle

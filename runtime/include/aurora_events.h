@@ -2,10 +2,18 @@
 
 #include "settings_overlay.h"
 #include "runtime_config.h"
+#include "fiber_manager.h"
 
 #include <aurora/aurora.h>
 #include <aurora/event.h>
 #include <dolphin/gx/GXAurora.h>
+
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#if TARGET_OS_IOS
+#include "kartpad_mobile_runtime_host.h"
+#endif
+#endif
 
 #include <cstdlib>
 #include <atomic>
@@ -17,6 +25,8 @@
 
 extern "C" bool g_dynamicAspectRatioEnabled;
 void ConfigureMkwDynamicAspect(bool widescreen, uint32_t surfaceWidth, uint32_t surfaceHeight);
+void ConfigureMkwMobileAspectMode(int aspectMode, uint32_t surfaceWidth,
+                                  uint32_t surfaceHeight);
 void UpdateMkwDynamicAspectSurface(uint32_t surfaceWidth, uint32_t surfaceHeight);
 // Arms the "keep EGG::Frustum's projection scale" flag on every screen that
 // renders to a fixed-size offscreen target. Cheap and idempotent; called from
@@ -136,7 +146,30 @@ inline bool BeginAuroraFrame() {
     return true;
 }
 
+#if defined(__ANDROID__)
+inline std::atomic_bool g_androidAuroraPollPending{false};
+#endif
+
 // Poll Aurora events and update cached window/framebuffer dimensions.
 inline void UpdateAuroraAndProcessEvents() {
+#if defined(__ANDROID__)
+    if (!Fiber::GuestFiberManager::IsOnSchedulerFiber()) {
+        g_androidAuroraPollPending.store(true, std::memory_order_release);
+        return;
+    }
+    g_androidAuroraPollPending.store(false, std::memory_order_release);
+#endif
     ProcessAuroraEvents(aurora_update());
+#if defined(__APPLE__) && TARGET_OS_IOS
+    KartPadMobileServiceMainMenu();
+#endif
+}
+
+inline void ServicePendingAuroraEventsOnScheduler() {
+#if defined(__ANDROID__)
+    if (Fiber::GuestFiberManager::IsOnSchedulerFiber() &&
+        g_androidAuroraPollPending.exchange(false, std::memory_order_acq_rel)) {
+        ProcessAuroraEvents(aurora_update());
+    }
+#endif
 }

@@ -1,4 +1,29 @@
 #include <aurora/aurora.h>
+#include "kartpad_android_trace_scope.h"
+
+#if defined(__ANDROID__)
+#include <chrono>
+extern "C" long long KartPadAndroidThreadCpuNanos();
+extern "C" void KartPadAndroidRecordPhase(unsigned, long long, long long);
+struct KartPadAndroidPhaseScope {
+  unsigned id;
+  std::chrono::steady_clock::time_point wall = std::chrono::steady_clock::now();
+  long long cpu = KartPadAndroidThreadCpuNanos();
+  kartpad::android::TraceScope trace;
+  explicit KartPadAndroidPhaseScope(unsigned value) : id(value), trace(
+      value == 8 ? "KartPad/worker-seal-encode" :
+      value == 9 ? "KartPad/worker-prepare" :
+      value == 10 ? "KartPad/worker-overlap-encode" :
+      value == 11 ? "KartPad/producer-wait-sealed" : "KartPad/producer-wait-ready") {}
+  ~KartPadAndroidPhaseScope() {
+    const auto endCpu = KartPadAndroidThreadCpuNanos();
+    KartPadAndroidRecordPhase(id,
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now() - wall).count(),
+        cpu >= 0 && endCpu >= cpu ? endCpu - cpu : -1);
+  }
+};
+#endif
 
 #ifdef AURORA_ENABLE_GX
 #include "gfx/common.hpp"
@@ -206,8 +231,15 @@ AuroraPresentTiming snapshot_present_timing() noexcept {
   }
   result.jitterMs = std::sqrt(result.jitterMs / static_cast<double>(milliseconds.size()));
   std::sort(milliseconds.begin(), milliseconds.end());
-  result.p95FrameTimeMs =
-      milliseconds[static_cast<size_t>(std::floor(static_cast<double>(milliseconds.size() - 1) * 0.95))];
+  const auto percentile = [&milliseconds](double fraction) {
+    const auto index = static_cast<size_t>(
+        std::floor(static_cast<double>(milliseconds.size() - 1) * fraction));
+    return milliseconds[index];
+  };
+  result.p50FrameTimeMs = percentile(0.50);
+  result.p95FrameTimeMs = percentile(0.95);
+  result.p99FrameTimeMs = percentile(0.99);
+  result.worstFrameTimeMs = milliseconds.back();
   return result;
 }
 
@@ -364,6 +396,11 @@ bool wait_for_frame_worker_private_for(FrameWorkerPhase phase, std::chrono::micr
     return true;
   }
 
+#if defined(__ANDROID__)
+  // Only actual wait attempts are counted; callbacks can do useful guest work.
+  KartPadAndroidPhaseScope phaseTiming(phase == FrameWorkerPhase::Sealed ? 11 : 12);
+#endif
+
   std::unique_lock lock(g_frameWorker.mutex);
   if (!g_frameWorker.started || g_frameWorker.threadId == std::this_thread::get_id()) {
     return true;
@@ -382,6 +419,7 @@ bool wait_for_frame_worker_private_for(FrameWorkerPhase phase, std::chrono::micr
   // Both phases service the guest's alarm/retrace pump identically; the
   // producer must keep its own timing alive however long it waits.
   if (const auto callback = g_frameWorkerWaitCallback.load(std::memory_order_acquire)) {
+    kartpad::android::TraceScope trace("KartPad/worker-wait-callback");
     callback();
   }
   return false;
@@ -999,6 +1037,13 @@ bool present_presentation_job(const PresentationJob& job) {
   }
   const auto totalDuration =
       std::chrono::duration_cast<std::chrono::nanoseconds>(PresentClock::now() - submissionStarted);
+#if defined(__ANDROID__)
+  const std::chrono::nanoseconds stages[] = {surfaceLockDuration, acquireDuration,
+      encodeDuration, finishDuration, submitDuration, scheduleWaitDuration,
+      presentDuration, totalDuration};
+  for (unsigned i = 0; i < std::size(stages); ++i)
+    KartPadAndroidRecordPhase(i, stages[i].count(), -1);
+#endif
   constexpr int kStallRebuildThreshold = 3;
   constexpr auto kStallRebuildCooldown = std::chrono::seconds(5);
   static int s_consecutiveStalledPresents = 0;
@@ -1183,6 +1228,7 @@ void encode_presentation_snapshot(const wgpu::CommandEncoder& encoder,
             .view = image.texture.view,
             .loadOp = wgpu::LoadOp::Clear,
             .storeOp = wgpu::StoreOp::Store,
+            .clearValue = {.r = 0.0, .g = 0.0, .b = 0.0, .a = 1.0},
         },
     };
     const wgpu::RenderPassDescriptor renderPassDescriptor{
@@ -1214,7 +1260,7 @@ void encode_presentation_snapshot(const wgpu::CommandEncoder& encoder,
     const auto pass = encoder.BeginRenderPass(&renderPassDescriptor);
     pass.SetViewport(0.f, 0.f, static_cast<float>(image.texture.size.width),
                      static_cast<float>(image.texture.size.height), 0.f, 1.f);
-    imgui::render(pass);
+    imgui::render(pass, image.texture.size.width, image.texture.size.height);
     pass.End();
   }
 }
@@ -1575,6 +1621,9 @@ void record_frame_telemetry() {
 
 // One complete frame-worker cycle. The scene encode only leaves the renderer mutex when
 // interpolation actually inserts slots; otherwise both phases publish together.
+#if defined(__ANDROID__)
+extern "C" bool KartPadAndroidNativeFrameOverlapExperiment();
+#endif
 bool run_frame_worker_cycle(gfx::SealedFrame& sealedFrame) noexcept {
   ZoneScopedN("Frame worker cycle");
   webgpu::fail_if_device_lost();
@@ -1582,9 +1631,16 @@ bool run_frame_worker_cycle(gfx::SealedFrame& sealedFrame) noexcept {
   std::vector<PresentationJob> presentationJobs;
   bool overlapEncode = false;
   {
+#if defined(__ANDROID__)
+    KartPadAndroidPhaseScope phaseTiming(8);
+#endif
     std::lock_guard gpuLock(g_rendererGpuMutex);
     seal_frame_locked(sealedFrame, ctx);
     overlapEncode = ctx.interpolationActive;
+#if defined(__ANDROID__)
+    // Controlled warmed-scene experiment only. Do not change slot count or deadlines.
+    overlapEncode = overlapEncode || KartPadAndroidNativeFrameOverlapExperiment();
+#endif
     if (!overlapEncode) {
       presentationJobs = encode_sealed_frame(sealedFrame, ctx);
     }
@@ -1605,9 +1661,14 @@ bool run_frame_worker_cycle(gfx::SealedFrame& sealedFrame) noexcept {
   // Preparing the next frame belongs to the SEALED phase: without a fresh pass 0 and mapped
   // staging buffers the producer's drain has nowhere to put its commands.
   bool imguiNewFrameOwed = false;
-  const bool prepared = begin_frame_impl(
+  const bool prepared = [&] {
+#if defined(__ANDROID__)
+    KartPadAndroidPhaseScope phaseTiming(9);
+#endif
+    return begin_frame_impl(
       false, overlapEncode ? ImGuiFramePolicy::Deferred : ImGuiFramePolicy::Immediate,
       &imguiNewFrameOwed);
+  }();
 
   {
     std::lock_guard lock(g_frameWorker.mutex);
@@ -1622,6 +1683,9 @@ bool run_frame_worker_cycle(gfx::SealedFrame& sealedFrame) noexcept {
   if (overlapEncode) {
     // Mutex-free: the producer drains and records the next frame in parallel, taking the renderer
     // mutex per drain, and this phase never takes it.
+#if defined(__ANDROID__)
+    KartPadAndroidPhaseScope phaseTiming(10);
+#endif
     presentationJobs = encode_sealed_frame(sealedFrame, ctx);
     publish_presentations(std::move(presentationJobs), ctx.interpolationActive);
     if (imguiNewFrameOwed) {

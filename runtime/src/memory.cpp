@@ -23,8 +23,10 @@
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
+#if defined(_WIN32)
 #include <windows.h>
 #include <dbghelp.h>
+#endif
 
 MemoryInline::PageEntry MemoryInline::g_pageTable[MemoryInline::kPageCount]{};
 uintptr_t MemoryInline::g_fullPageBias[MemoryInline::kPageCount]{};

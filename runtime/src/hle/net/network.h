@@ -31,3 +31,10 @@ NetworkDeferredContract::StartOutcome Network_HLE_StartIoctlvAsync(
     uint32_t vectorPtr, uint32_t callback, uint32_t callbackArg);
 bool Network_HLE_TakeSyncResult(uint64_t token, int32_t* result);
 bool Network_HLE_ProcessCompletions(CpuContext* cpu);
+
+// Opt-in Android product fixture. It is a no-op unless the app-private
+// KartPadTlsIoctlvFixture configuration exists.
+namespace NetworkHle {
+bool RunAndroidTlsIoctlvFixture();
+bool RunAndroidDnsIoctlFixture();
+}

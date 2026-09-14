@@ -436,6 +436,11 @@ struct GXState {
   u32 pipelineStateGeneration = next_gx_state_epoch();
   std::array<u32, 0x100> bpRegCache = [] {
     std::array<u32, 0x100> regs{};
+    // Cache entries include the register ID. GEN_MODE is the only ID whose
+    // first zero write otherwise matches this uninitialized cache. An invalid
+    // tag forces its first decode while keeping all 24 hardware reset bits zero.
+    // The BP mask merge strips this tag before storing the first real write.
+    regs[0x00] = 0xFF000000;
     regs[0xFE] = 0x00FFFFFF;
     return regs;
   }();
@@ -550,7 +555,8 @@ struct ShaderConfig {
   u8 lineMode : 2 = 0; // 1 = GX_LINES, 2 = GX_LINESTRIP, 3 = GX_POINTS
   u8 dualTexEnabled : 1 = 0;
   u8 fogRangeAdjust : 1 = 0;
-  u8 pad1 : 4 = 0;
+  u8 pad1 : 3 = 0;
+  u8 kartpadConstantPnMtx : 1 = 0;
   u8 numTexGens = 0;
   u32 zTexture = 0; // bias[0:23], format[24:25], op[26:27]; 0 disables shader depth output.
   std::array<AttrConfig, MaxVtxAttr> attrs;

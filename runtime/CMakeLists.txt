@@ -1,12 +1,11 @@
 ﻿cmake_minimum_required(VERSION 3.16)
-project(mkw_recompiled)
+project(mkw_recompiled LANGUAGES C CXX ASM)
 
-if(NOT WIN32 OR NOT MINGW OR NOT CMAKE_CXX_COMPILER_ID STREQUAL "Clang" OR
-   NOT CMAKE_SIZEOF_VOID_P EQUAL 8 OR
-   NOT CMAKE_SYSTEM_PROCESSOR MATCHES "^(AMD64|amd64|x86_64|X86_64)$")
-    message(FATAL_ERROR "WiiCompiled requires 64-bit LLVM-MinGW Clang on Windows")
+if((NOT APPLE AND NOT ANDROID) OR NOT CMAKE_SIZEOF_VOID_P EQUAL 8 OR
+   NOT CMAKE_SYSTEM_PROCESSOR MATCHES "^(arm64|aarch64|ARM64)$")
+    message(FATAL_ERROR "KartPad runtime requires 64-bit Apple/Android arm64")
 endif()
-if(NOT CMAKE_BUILD_TYPE STREQUAL "Release")
+if(NOT ANDROID AND NOT CMAKE_BUILD_TYPE STREQUAL "Release")
     message(FATAL_ERROR "WiiCompiled only supports Release builds")
 endif()
 
@@ -18,7 +17,16 @@ endif()
 # aurora-main and its third-party tree stay unaffected.
 set(MKW_PROJECT_COMPILE_DEFINITIONS NOMINMAX)
 
-set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD 20)
+find_package(Threads REQUIRED)
+
+# Release binaries must not disclose the local checkout path through __FILE__
+# strings emitted by first-party sources and header-only dependencies.
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+    add_compile_options(
+        "-ffile-prefix-map=${CMAKE_SOURCE_DIR}=."
+        "-fmacro-prefix-map=${CMAKE_SOURCE_DIR}=.")
+endif()
 
 # Declared before the vendored libraries so the third-party block below can
 # branch on it and so cmake/NativePrebuilt.cmake is included after the names it
@@ -91,7 +99,8 @@ set(MKW_CPPWINRT_INCLUDE_DIR "" CACHE PATH "Optional self-contained C++/WinRT in
 # not compiled at all; imported targets with the same names are wired up from
 # the package instead, so this project's own code compiles and links exactly
 # as before.
-set(MKW_AURORA_DIR "${CMAKE_CURRENT_LIST_DIR}/../aurora-main")
+set(MKW_AURORA_DIR "${CMAKE_CURRENT_LIST_DIR}/../aurora-main"
+    CACHE PATH "Pinned Aurora source")
 
 # The translator's explicit float casts are PPC single-precision rounding points.
 # Fast-math may erase them and change guest-visible integer conversions.
@@ -109,13 +118,47 @@ else()
     if(NOT EXISTS ${MKW_AURORA_DIR}/CMakeLists.txt)
         message(FATAL_ERROR "Requested aurora-main but ${MKW_AURORA_DIR} is missing")
     endif()
-    set(DAWN_ENABLE_D3D11 OFF CACHE BOOL "" FORCE)
-    set(DAWN_ENABLE_D3D12 ON CACHE BOOL "" FORCE)
-    set(DAWN_ENABLE_VULKAN ON CACHE BOOL "" FORCE)
-    set(TINT_BUILD_HLSL_WRITER ON CACHE BOOL "" FORCE)
-    set(DAWN_BUILD_SAMPLES OFF CACHE BOOL "" FORCE)
-    set(DAWN_BUILD_TESTS OFF CACHE BOOL "" FORCE)
-    set(DAWN_USE_WINDOWS_UI OFF CACHE BOOL "" FORCE)
+    if(ANDROID)
+        set(AURORA_DAWN_PROVIDER system CACHE STRING "" FORCE)
+        set(AURORA_SDL3_PROVIDER system CACHE STRING "" FORCE)
+        set(AURORA_SDL3_LINKAGE shared CACHE STRING "" FORCE)
+    else()
+        set(AURORA_DAWN_PROVIDER package CACHE STRING "" FORCE)
+    endif()
+    set(AURORA_DAWN_VERSION v20260603.191052 CACHE STRING "" FORCE)
+    set(AURORA_DAWN_PACKAGE_URL "" CACHE STRING
+        "file:// URL for the pinned Dawn Darwin arm64 archive")
+    string(TOLOWER "${CMAKE_OSX_SYSROOT}" MKW_APPLE_SYSROOT_LOWER)
+    if(CMAKE_SYSTEM_NAME STREQUAL "iOS" AND
+       MKW_APPLE_SYSROOT_LOWER MATCHES "iphonesimulator")
+        set(AURORA_DAWN_PACKAGE_URL_HASH
+            "SHA256=feb5c4e07da90c47d2f279bf83c43bc67db01dac1138cb9af8ea9b5b50c67fbf"
+            CACHE STRING "" FORCE)
+    elseif(CMAKE_SYSTEM_NAME STREQUAL "iOS")
+        set(AURORA_DAWN_PACKAGE_URL_HASH
+            "SHA256=a361fcca75929fa5c766cfcde979c010a6da7d805e5db8e15c75e73fd8260e78"
+            CACHE STRING "" FORCE)
+    else()
+        set(AURORA_DAWN_PACKAGE_URL_HASH
+            "SHA256=084ffd2ef500d614e443e3d494738272134628867bad3270d67ee8b0fb5f0838"
+            CACHE STRING "" FORCE)
+    endif()
+    # Release products must not inherit whichever Homebrew packages happen to
+    # be installed on the build host. Build these pinned dependencies from
+    # source as static libraries under the declared deployment target.
+    set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+    set(CMAKE_DISABLE_FIND_PACKAGE_absl TRUE CACHE BOOL "" FORCE)
+    set(CMAKE_DISABLE_FIND_PACKAGE_PNG TRUE CACHE BOOL "" FORCE)
+    set(CMAKE_DISABLE_FIND_PACKAGE_Freetype TRUE CACHE BOOL "" FORCE)
+    if(ANDROID)
+        set(AURORA_SDL3_PROVIDER system CACHE STRING "" FORCE)
+        set(AURORA_SDL3_LINKAGE shared CACHE STRING "" FORCE)
+    else()
+        set(AURORA_SDL3_PROVIDER vendor CACHE STRING "" FORCE)
+        set(AURORA_SDL3_LINKAGE static CACHE STRING "" FORCE)
+    endif()
+    set(AURORA_ENABLE_GX ON CACHE BOOL "" FORCE)
+    set(AURORA_ENABLE_DVD OFF CACHE BOOL "" FORCE)
 
     # Provide a tiny stub for DXProgrammableCapture when the SDK/PIX headers are
     # missing (common on MinGW). Dawn only includes the header; no symbols are
@@ -136,14 +179,47 @@ else()
     # should add it to the Dawn targets the same way.
 
     # Keep SDL3 lean when aurora is enabled.
-    set(SDL_SHARED OFF CACHE BOOL "" FORCE)
-    set(SDL_STATIC ON CACHE BOOL "" FORCE)
+    if(NOT ANDROID)
+        set(SDL_SHARED OFF CACHE BOOL "" FORCE)
+        set(SDL_STATIC ON CACHE BOOL "" FORCE)
+    endif()
     set(SDL_TEST OFF CACHE BOOL "" FORCE)
+    # FetchContent uses the first declaration for a dependency. Declare the
+    # two Aurora source archives that lack upstream URL_HASH values before the
+    # Aurora subdirectory so tag retargeting or archive mutation fails closed.
+    include(FetchContent)
+    FetchContent_Declare(abseil-cpp
+        URL https://github.com/abseil/abseil-cpp/archive/refs/tags/20240722.0.tar.gz
+        URL_HASH SHA256=f50e5ac311a81382da7fa75b97310e4b9006474f9560ac46f54a9967f07d4ae3
+        DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+        EXCLUDE_FROM_ALL)
+    FetchContent_Declare(SDL
+        URL https://github.com/libsdl-org/SDL/releases/download/release-3.4.4/SDL3-3.4.4.tar.gz
+        URL_HASH SHA256=ee712dbe6a89bb140bbfc2ce72358fb5ee5cc2240abeabd54855012db30b3864
+        DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+        EXCLUDE_FROM_ALL)
 
     # MinGW/WSL can choke on SDL precompiled headers; disable PCH for aurora/SDL.
     set(CMAKE_DISABLE_PRECOMPILE_HEADERS ON)
     # Isolate aurora build products to a subdirectory under the main build dir.
+    # CMake's iOS toolchain roots package searches inside the SDK. Aurora's
+    # pinned Dawn archive is an explicit, verified install tree outside that
+    # root, so allow host-path package discovery only while resolving Aurora's
+    # declared dependencies. This does not permit host libraries to satisfy
+    # target links: every imported archive is still selected by its pinned URL
+    # and digest and audited as an iOS artifact.
+    set(MKW_SAVED_FIND_ROOT_PATH_MODE_PACKAGE "${CMAKE_FIND_ROOT_PATH_MODE_PACKAGE}")
+    if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
+        set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE BOTH)
+    endif()
     add_subdirectory(${MKW_AURORA_DIR} ${CMAKE_BINARY_DIR}/aurora-build EXCLUDE_FROM_ALL)
+    if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
+        if(MKW_SAVED_FIND_ROOT_PATH_MODE_PACKAGE)
+            set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE "${MKW_SAVED_FIND_ROOT_PATH_MODE_PACKAGE}")
+        else()
+            unset(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE)
+        endif()
+    endif()
     set(CMAKE_DISABLE_PRECOMPILE_HEADERS OFF)
 
     # Keep upstream Aurora split: several sources intentionally use file-local
@@ -200,12 +276,27 @@ endif()
 file(GLOB_RECURSE SOURCES CONFIGURE_DEPENDS "src/*.cpp")
 set(MKW_BASE_PRODUCT_SOURCE "${CMAKE_CURRENT_LIST_DIR}/src/product/base_product.cpp")
 set(MKW_RETRO_REWIND_PRODUCT_SOURCE "${CMAKE_CURRENT_LIST_DIR}/src/product/retro_rewind_product.cpp")
+set(MKW_KARTPAD_DUAL_PRODUCT_SOURCE "${CMAKE_CURRENT_LIST_DIR}/src/product/kartpad_dual_product.cpp")
 # The host ISA guard is the one translation unit that must not receive the
 # x86-64-v3 flags, so it gets its own object library instead of riding along in
 # mkw_runtime_common. See cmake/PublicProducts.cmake and the file's own header.
 set(MKW_CPU_BASELINE_SOURCE "${CMAKE_CURRENT_LIST_DIR}/src/host_cpu_baseline.cpp")
 list(REMOVE_ITEM SOURCES ${MKW_BASE_PRODUCT_SOURCE} ${MKW_RETRO_REWIND_PRODUCT_SOURCE}
+     ${MKW_KARTPAD_DUAL_PRODUCT_SOURCE}
      ${MKW_CPU_BASELINE_SOURCE})
+list(REMOVE_ITEM SOURCES
+    "${CMAKE_CURRENT_LIST_DIR}/src/guest_flat_memory.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/src/wup028_adapter.cpp")
+if(ANDROID)
+    list(APPEND SOURCES
+        "${CMAKE_CURRENT_LIST_DIR}/src/android/fiber_switch_android.S"
+        "${CMAKE_CURRENT_LIST_DIR}/src/apple/guest_flat_memory_apple.cpp"
+        "${CMAKE_CURRENT_LIST_DIR}/src/apple/wup028_adapter_stub.cpp")
+else()
+    list(APPEND SOURCES
+        "${CMAKE_CURRENT_LIST_DIR}/src/apple/guest_flat_memory_apple.cpp"
+        "${CMAKE_CURRENT_LIST_DIR}/src/apple/wup028_adapter_stub.cpp")
+endif()
 
 # The translator emits the complete, content-addressed source graph. Consuming
 # this one manifest keeps configure independent of the 28k generated function
@@ -225,5 +316,47 @@ message(STATUS
     "${MKW_PROFILE_SENSITIVE_CALLER_COUNT} profile-sensitive callers; "
     "${MKW_RETRO_REWIND_FUNCTION_COUNT} Retro Rewind functions")
 
+# Older private translation graphs predate profile-owned bulk registration.
+# Normalize those cold registration shards into the build directory without
+# modifying the translator-owned graph. Modern shards already carry the
+# profile string and pass through unchanged.
+if(ANDROID)
+    function(mkw_android_label_legacy_registrations variable profile)
+        set(normalized_sources)
+        foreach(source IN LISTS ${variable})
+            if(source MATCHES "/(base|retro_rewind)_registration/")
+                file(READ "${source}" registration_content)
+                string(REPLACE
+                    "kRegistrar(kRecords, std::size(kRecords))"
+                    "kRegistrar(\"${profile}\", kRecords, std::size(kRecords))"
+                    normalized_content "${registration_content}")
+                if(NOT normalized_content STREQUAL registration_content)
+                    get_filename_component(source_name "${source}" NAME)
+                    set(normalized_source
+                        "${CMAKE_CURRENT_BINARY_DIR}/android_${profile}_${source_name}")
+                    file(WRITE "${normalized_source}" "${normalized_content}")
+                    list(APPEND normalized_sources "${normalized_source}")
+                else()
+                    list(APPEND normalized_sources "${source}")
+                endif()
+            else()
+                list(APPEND normalized_sources "${source}")
+            endif()
+        endforeach()
+        set(${variable} "${normalized_sources}" PARENT_SCOPE)
+    endfunction()
+    mkw_android_label_legacy_registrations(MKW_BASE_REGISTRATION_SOURCES base)
+    mkw_android_label_legacy_registrations(
+        MKW_RETRO_REGISTRATION_SOURCES retro_rewind)
+endif()
+
 set(MKW_RUNTIME_SOURCE_DIR "${CMAKE_CURRENT_LIST_DIR}")
+set(MKW_KARTPAD_RUNTIME_INCLUDE "" CACHE PATH
+    "Path to KartPad's header-only PowerPC architectural semantics")
+if(NOT MKW_KARTPAD_RUNTIME_INCLUDE OR
+   NOT EXISTS "${MKW_KARTPAD_RUNTIME_INCLUDE}/kartpad/semantics/ppc_semantics.h")
+    message(FATAL_ERROR
+        "MKW_KARTPAD_RUNTIME_INCLUDE must contain kartpad/semantics/ppc_semantics.h")
+endif()
+include_directories(SYSTEM "${MKW_KARTPAD_RUNTIME_INCLUDE}")
 include("${CMAKE_CURRENT_LIST_DIR}/cmake/PublicProducts.cmake")

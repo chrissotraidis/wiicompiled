@@ -142,18 +142,9 @@ extern "C" int32_t NANDOpen_HLE(uint32_t pathPtr, uint32_t fileInfoPtr, uint32_t
     else if (mode == 3) fopenMode = "r+b";
     
     FILE* file = std::fopen(hostPath.c_str(), fopenMode);
-    if (!file && mode >= 2) {
-        // Try creating for write modes
-        file = std::fopen(hostPath.c_str(), "w+b");
-    }
-    
-    // Create parent directories and retry
-    if (!file && CreateParentDirectories(hostPath)) {
-        file = std::fopen(hostPath.c_str(), mode >= 2 ? "w+b" : "rb");
-    }
 
     if (!file) {
-        if (IsFaceLibResourcePath(path) && SeedFaceLibResource(hostPath)) {
+        if (IsFaceLibSeedPath(path) && SeedFaceLibFile(path, hostPath)) {
             file = std::fopen(hostPath.c_str(), fopenMode);
         }
         if (!file) {

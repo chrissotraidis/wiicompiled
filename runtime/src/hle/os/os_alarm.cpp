@@ -222,7 +222,6 @@ bool ProcessAlarmQueue(CpuContext* cpu, int maxToProcess)
                         throw;
                     }
                     DecrementSchedulerDisableCount();
-                    RunDeferredReschedule(cpu);
                 }
             }
         } catch (const ::Memory::AccessViolation& e) {
@@ -233,7 +232,9 @@ bool ProcessAlarmQueue(CpuContext* cpu, int maxToProcess)
     // Host DNS workers never touch guest memory. Commit their output here on
     // the scheduler thread, waking synchronous IOS waiters or queuing async IOS
     // callbacks before the callback drain below.
-    bool completionNeedsReschedule = false;
+    // Alarm handlers can wake threads too. Switch only after the alarm guard
+    // has unwound, so the selected fiber can pump its own completions.
+    bool completionNeedsReschedule = handledAny;
     if (Network_HLE_ProcessCompletions(cpu)) {
         handledAny = true;
         completionNeedsReschedule = true;
@@ -446,15 +447,22 @@ PPC_NATIVE_OVERRIDE_VOID(801A08E0, OS__SetPeriodicAlarm_801a08e0, (CpuContext* c
 // returning 0 when the manager pointer (0x80386298) is null.
 extern "C" uint32_t RFLiIsWorking_HLE_800bd860()
 {
-    // Pump alarms/callbacks on the current guest thread when available. Using a
-    // detached persistent context here can leave the busy loop waiting on work
-    // that completed on the wrong scheduling context.
-    CpuContext* cpu = TryGetCpuContext();
-    if (!cpu) {
-        cpu = &GetPersistentCpuContext();
-    }
+    // RFL polls from the middle of translated RFLInitRes. Alarm handlers are
+    // guest interrupts and must not publish their return registers into that
+    // live caller (notably its callee-saved heap pointer in r30). Seed a private
+    // interrupt context from the current thread so callbacks still observe the
+    // correct guest state while their register writes remain isolated.
+    GuestInterruptCallbackContext interrupt;
+    CpuContext* cpu = interrupt.get();
     EnsureSda1Base(cpu);
-    ProcessAlarmQueue(cpu, 32);
+    IncrementSchedulerDisableCount();
+    try {
+        ProcessAlarmQueue(cpu, 32);
+    } catch (...) {
+        DecrementSchedulerDisableCount();
+        throw;
+    }
+    DecrementSchedulerDisableCount();
 
     // Now return the actual "working" status
     constexpr uint32_t kRflManagerPtrAddr = 0x80386298u;

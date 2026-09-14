@@ -1,4 +1,5 @@
 #include "ax_dsp.h"
+#include "kartpad/android/trace_scope.h"
 
 #include "ax_internal.h"
 
@@ -32,6 +33,13 @@ namespace AxDspHle {
 namespace {
 
 std::filesystem::path FindDspCoefficientRom() {
+#ifdef __ANDROID__
+    const auto bundled = RuntimeConfigFile::BundledResourcesDirectory() /
+                         "dsp" / "dsp_coef.bin";
+    if (std::filesystem::is_regular_file(bundled)) {
+        return bundled;
+    }
+#endif
     if (const auto executableDirectory = RuntimeConfigFile::ExecutableDirectory()) {
         const auto adjacent = *executableDirectory / "dsp_coef.bin";
         if (std::filesystem::is_regular_file(adjacent)) {
@@ -113,6 +121,7 @@ public:
     }
 
     void JoinMix() {
+        kartpad::android::TraceScope trace("KartPad/audio-join-mix");
         if (m_mixThread.joinable()) {
             std::unique_lock<std::mutex> lock(m_mixMutex);
             m_mixIdle.wait(lock, [this] { return !m_mixPending && !m_mixBusy; });

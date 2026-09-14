@@ -74,6 +74,11 @@ void initialize() noexcept {
 
 void shutdown() noexcept {
   ZoneScoped;
+  // Runtime profile validation can fail before Aurora initializes, while the
+  // common exception path still asks Aurora to shut down. ImGui's backends
+  // assert when shut down without a context, so make this boundary safely
+  // idempotent for both pre-initialization failure and repeated cleanup.
+  if (ImGui::GetCurrentContext() == nullptr) return;
   if (g_useSdlRenderer) {
     ImGui_ImplSDLRenderer3_Shutdown();
   } else {
@@ -182,7 +187,7 @@ void render_frame_data() noexcept {
   g_frameDataBuilt = true;
 }
 
-void render(const wgpu::RenderPassEncoder& pass) noexcept {
+void render(const wgpu::RenderPassEncoder& pass, uint32_t targetWidth, uint32_t targetHeight) noexcept {
   ZoneScoped;
   render_frame_data();
 
@@ -193,6 +198,15 @@ void render(const wgpu::RenderPassEncoder& pass) noexcept {
     ImGui_ImplSDLRenderer3_RenderDrawData(data, renderer);
     SDL_RenderPresent(renderer);
   } else {
+    // A surface resize can occur after new_frame() built draw data for the
+    // previous dimensions. The WGPU backend clips against that draw data, not
+    // the attachment, so omit an oversized overlay until the next new_frame().
+    // Use the same integer pixel extent as the backend's scissor calculation.
+    const int width = static_cast<int>(data->DisplaySize.x * data->FramebufferScale.x);
+    const int height = static_cast<int>(data->DisplaySize.y * data->FramebufferScale.y);
+    if (width > static_cast<int>(targetWidth) || height > static_cast<int>(targetHeight)) {
+      return;
+    }
     pass.PushDebugGroup("Aurora: Dear Imgui");
     ImGui_ImplWGPU_RenderDrawData(data, pass.Get());
     pass.PopDebugGroup();

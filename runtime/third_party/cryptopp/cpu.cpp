@@ -69,7 +69,7 @@ unsigned long int getauxval(unsigned long int) { return 0; }
 // "$ANDROID_NDK_ROOT/sources/android/cpufeatures".
 // setenv-android.sh will copy the header and source file
 // into PWD and the makefile will build it in place.
-#if defined(__ANDROID__)
+#if defined(__ANDROID__) && defined(CRYPTOPP_USE_LEGACY_ANDROID_CPU_FEATURES)
 # include "cpu-features.h"
 #endif
 
@@ -862,7 +862,7 @@ inline bool CPU_QueryARMv7()
 
 inline bool CPU_QueryNEON()
 {
-#if defined(__ANDROID__) && defined(__aarch64__)
+#if defined(__ANDROID__) && defined(__aarch64__) && defined(CRYPTOPP_USE_LEGACY_ANDROID_CPU_FEATURES)
 	if (((android_getCpuFamily() & ANDROID_CPU_FAMILY_ARM64) != 0) &&
 		((android_getCpuFeatures() & ANDROID_CPU_ARM64_FEATURE_ASIMD) != 0))
 		return true;
@@ -893,7 +893,7 @@ inline bool CPU_QueryNEON()
 
 inline bool CPU_QueryCRC32()
 {
-#if defined(__ANDROID__) && defined(__aarch64__)
+#if defined(__ANDROID__) && defined(__aarch64__) && defined(CRYPTOPP_USE_LEGACY_ANDROID_CPU_FEATURES)
 	if (((android_getCpuFamily() & ANDROID_CPU_FAMILY_ARM64) != 0) &&
 		((android_getCpuFeatures() & ANDROID_CPU_ARM64_FEATURE_CRC32) != 0))
 		return true;
@@ -920,7 +920,7 @@ inline bool CPU_QueryCRC32()
 
 inline bool CPU_QueryPMULL()
 {
-#if defined(__ANDROID__) && defined(__aarch64__)
+#if defined(__ANDROID__) && defined(__aarch64__) && defined(CRYPTOPP_USE_LEGACY_ANDROID_CPU_FEATURES)
 	if (((android_getCpuFamily() & ANDROID_CPU_FAMILY_ARM64) != 0) &&
 		((android_getCpuFeatures() & ANDROID_CPU_ARM64_FEATURE_PMULL) != 0))
 		return true;
@@ -947,7 +947,7 @@ inline bool CPU_QueryPMULL()
 
 inline bool CPU_QueryAES()
 {
-#if defined(__ANDROID__) && defined(__aarch64__)
+#if defined(__ANDROID__) && defined(__aarch64__) && defined(CRYPTOPP_USE_LEGACY_ANDROID_CPU_FEATURES)
 	if (((android_getCpuFamily() & ANDROID_CPU_FAMILY_ARM64) != 0) &&
 		((android_getCpuFeatures() & ANDROID_CPU_ARM64_FEATURE_AES) != 0))
 		return true;
@@ -974,7 +974,7 @@ inline bool CPU_QueryAES()
 
 inline bool CPU_QuerySHA1()
 {
-#if defined(__ANDROID__) && defined(__aarch64__)
+#if defined(__ANDROID__) && defined(__aarch64__) && defined(CRYPTOPP_USE_LEGACY_ANDROID_CPU_FEATURES)
 	if (((android_getCpuFamily() & ANDROID_CPU_FAMILY_ARM64) != 0) &&
 		((android_getCpuFeatures() & ANDROID_CPU_ARM64_FEATURE_SHA1) != 0))
 		return true;
@@ -1001,7 +1001,7 @@ inline bool CPU_QuerySHA1()
 
 inline bool CPU_QuerySHA256()
 {
-#if defined(__ANDROID__) && defined(__aarch64__)
+#if defined(__ANDROID__) && defined(__aarch64__) && defined(CRYPTOPP_USE_LEGACY_ANDROID_CPU_FEATURES)
 	if (((android_getCpuFamily() & ANDROID_CPU_FAMILY_ARM64) != 0) &&
 		((android_getCpuFeatures() & ANDROID_CPU_ARM64_FEATURE_SHA2) != 0))
 		return true;

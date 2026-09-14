@@ -1,6 +1,8 @@
 #include "input.hpp"
 #include "internal.hpp"
 
+#include <aurora/input.hpp>
+
 #include "magic_enum.hpp"
 
 #include <SDL3/SDL_haptic.h>
@@ -12,8 +14,12 @@
 #include <absl/container/flat_hash_map.h>
 #include <algorithm>
 #include <array>
+#include <atomic>
+#include <cstring>
+#include <mutex>
 #include <string>
 #include <utility>
+#include <vector>
 
 using namespace std::string_view_literals;
 
@@ -22,6 +28,9 @@ Module Log("aurora::input");
 absl::flat_hash_map<Uint32, GameController> g_GameControllers;
 
 namespace {
+std::atomic_bool g_standardGamepadsActive{true};
+std::mutex g_standardGamepadBridgeMutex;
+
 constexpr uint32_t kPortPreferencesMagic = SBIG('CPRT');
 constexpr uint32_t kPortPreferencesVersion = 2;
 constexpr uint32_t kMaxPersistedStringLength = 256;
@@ -347,6 +356,275 @@ GameController* get_controller_for_player(uint32_t player) noexcept {
   return nullptr;
 }
 
+static GameController* resolve_standard_gamepad(
+    uint32_t player, bool allowSingleUnassigned) noexcept {
+  GameController* controller = nullptr;
+  for (auto& [instance, candidate] : g_GameControllers) {
+    (void)instance;
+    if (candidate.m_playerIndex == static_cast<int32_t>(player)) {
+      controller = &candidate;
+      break;
+    }
+  }
+  if (controller == nullptr && player == 0 && allowSingleUnassigned &&
+      g_GameControllers.size() == 1) {
+    auto& [instance, candidate] = *g_GameControllers.begin();
+    (void)instance;
+    if (candidate.m_playerIndex < 0) {
+      controller = &candidate;
+    }
+  }
+  return controller;
+}
+
+bool standard_gamepad_connected(uint32_t player, bool allowSingleUnassigned) noexcept {
+  std::scoped_lock lock(g_standardGamepadBridgeMutex);
+  if (!g_standardGamepadsActive.load(std::memory_order_acquire)) return false;
+  const GameController* controller =
+      resolve_standard_gamepad(player, allowSingleUnassigned);
+  return controller != nullptr && controller->m_controller != nullptr;
+}
+
+bool read_standard_gamepad_state(uint32_t player, bool allowSingleUnassigned,
+                                 StandardGamepadState* state) noexcept {
+  if (state == nullptr) {
+    return false;
+  }
+  *state = {};
+
+  std::scoped_lock lock(g_standardGamepadBridgeMutex);
+  if (!g_standardGamepadsActive.load(std::memory_order_acquire)) {
+    return false;
+  }
+
+  GameController* controller =
+      resolve_standard_gamepad(player, allowSingleUnassigned);
+  if (controller == nullptr || controller->m_controller == nullptr) {
+    return false;
+  }
+
+  state->connected = true;
+  state->buttons = controller->m_standardButtons | controller->m_standardButtonPresses;
+  controller->m_standardButtonPresses = 0;
+  state->leftX = controller->m_standardLeftX;
+  state->leftY = controller->m_standardLeftY;
+  state->leftTrigger = controller->m_standardLeftTrigger;
+  state->rightTrigger = controller->m_standardRightTrigger;
+  return true;
+}
+
+bool set_standard_gamepad_rumble(uint32_t player, bool allowSingleUnassigned,
+                                 bool enabled) noexcept {
+  std::scoped_lock lock(g_standardGamepadBridgeMutex);
+  if (enabled &&
+      !g_standardGamepadsActive.load(std::memory_order_acquire)) {
+    return false;
+  }
+  GameController* controller =
+      resolve_standard_gamepad(player, allowSingleUnassigned);
+  if (controller == nullptr || controller->m_controller == nullptr ||
+      !controller->m_hasRumble) {
+    return false;
+  }
+
+  controller->m_standardRumbleEnabled = enabled;
+  controller->m_standardRumbleDirty = true;
+  return true;
+}
+
+void set_standard_gamepads_active(bool active) noexcept {
+  std::scoped_lock lock(g_standardGamepadBridgeMutex);
+  const bool previous =
+      g_standardGamepadsActive.exchange(active, std::memory_order_acq_rel);
+  if (previous == active) {
+    return;
+  }
+
+  if (!active) {
+    for (auto& [instance, controller] : g_GameControllers) {
+      (void)instance;
+      if (controller.m_controller != nullptr && controller.m_hasRumble) {
+        controller.m_standardRumbleEnabled = false;
+        controller.m_standardRumbleDirty = true;
+      }
+    }
+  }
+  Log.info("Standard gamepads {}", active ? "resumed" : "suspended");
+}
+
+uint32_t list_standard_gamepads(uint32_t* instances, int32_t* players,
+                                uint32_t capacity) noexcept {
+  if (capacity != 0 && (instances == nullptr || players == nullptr)) {
+    return 0;
+  }
+  std::scoped_lock lock(g_standardGamepadBridgeMutex);
+  std::vector<uint32_t> ordered;
+  ordered.reserve(g_GameControllers.size());
+  for (const auto& [instance, controller] : g_GameControllers) {
+    (void)controller;
+    ordered.push_back(instance);
+  }
+  std::sort(ordered.begin(), ordered.end());
+  const uint32_t written = std::min<uint32_t>(
+      capacity, static_cast<uint32_t>(ordered.size()));
+  for (uint32_t index = 0; index < written; ++index) {
+    instances[index] = ordered[index];
+    players[index] = g_GameControllers.at(ordered[index]).m_playerIndex;
+  }
+  return written;
+}
+
+bool copy_standard_gamepad_name(uint32_t instance, char* name,
+                                size_t capacity) noexcept {
+  if (name == nullptr || capacity == 0) {
+    return false;
+  }
+  std::scoped_lock lock(g_standardGamepadBridgeMutex);
+  const auto found = g_GameControllers.find(instance);
+  if (found == g_GameControllers.end() || found->second.m_controller == nullptr) {
+    name[0] = '\0';
+    return false;
+  }
+  const char* source = SDL_GetGamepadName(found->second.m_controller);
+  if (source == nullptr) {
+    source = "Controller";
+  }
+  const size_t length = std::min(std::strlen(source), capacity - 1);
+  std::memcpy(name, source, length);
+  name[length] = '\0';
+  return true;
+}
+
+bool assign_standard_gamepad(uint32_t instance, uint32_t player) noexcept {
+  if (player >= PAD_MAX_CONTROLLERS) {
+    return false;
+  }
+  std::scoped_lock lock(g_standardGamepadBridgeMutex);
+  const auto found = g_GameControllers.find(instance);
+  if (found == g_GameControllers.end()) {
+    return false;
+  }
+  ensure_port_preferences_loaded();
+  GameController& selected = found->second;
+  const int32_t oldPlayer = selected.m_playerIndex;
+  if (oldPlayer >= 0 && oldPlayer < PAD_MAX_CONTROLLERS &&
+      oldPlayer != static_cast<int32_t>(player)) {
+    g_portPreferences[oldPlayer].state = PortPreferenceState::None;
+    g_portPreferences[oldPlayer].identity = {};
+  }
+  for (auto& [otherInstance, controller] : g_GameControllers) {
+    if (otherInstance != instance &&
+        controller.m_playerIndex == static_cast<int32_t>(player)) {
+      assign_player_index(controller, -1);
+    }
+  }
+  assign_player_index(selected, static_cast<int32_t>(player));
+  g_portPreferences[player].state = PortPreferenceState::Controller;
+  g_portPreferences[player].identity = controller_identity(selected);
+  save_port_preferences();
+  return true;
+}
+
+bool clear_standard_gamepad_player(uint32_t player) noexcept {
+  if (player >= PAD_MAX_CONTROLLERS) {
+    return false;
+  }
+  std::scoped_lock lock(g_standardGamepadBridgeMutex);
+  ensure_port_preferences_loaded();
+  for (auto& [instance, controller] : g_GameControllers) {
+    (void)instance;
+    if (controller.m_playerIndex == static_cast<int32_t>(player)) {
+      assign_player_index(controller, -1);
+    }
+  }
+  g_portPreferences[player].state = PortPreferenceState::None;
+  g_portPreferences[player].identity = {};
+  save_port_preferences();
+  return true;
+}
+
+namespace {
+uint32_t standard_button_mask(Uint8 button) noexcept {
+  switch (static_cast<SDL_GamepadButton>(button)) {
+  case SDL_GAMEPAD_BUTTON_SOUTH: return kStandardGamepadSouth;
+  case SDL_GAMEPAD_BUTTON_EAST: return kStandardGamepadEast;
+  case SDL_GAMEPAD_BUTTON_WEST: return kStandardGamepadWest;
+  case SDL_GAMEPAD_BUTTON_NORTH: return kStandardGamepadNorth;
+  case SDL_GAMEPAD_BUTTON_BACK: return kStandardGamepadBack;
+  case SDL_GAMEPAD_BUTTON_START: return kStandardGamepadStart;
+  case SDL_GAMEPAD_BUTTON_LEFT_SHOULDER: return kStandardGamepadLeftShoulder;
+  case SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER: return kStandardGamepadRightShoulder;
+  case SDL_GAMEPAD_BUTTON_DPAD_UP: return kStandardGamepadDpadUp;
+  case SDL_GAMEPAD_BUTTON_DPAD_DOWN: return kStandardGamepadDpadDown;
+  case SDL_GAMEPAD_BUTTON_DPAD_LEFT: return kStandardGamepadDpadLeft;
+  case SDL_GAMEPAD_BUTTON_DPAD_RIGHT: return kStandardGamepadDpadRight;
+  default: return 0;
+  }
+}
+
+void sample_standard_gamepad_state(GameController& controller) noexcept {
+  controller.m_standardButtons = 0;
+  for (int button = SDL_GAMEPAD_BUTTON_SOUTH; button < SDL_GAMEPAD_BUTTON_COUNT; ++button) {
+    const uint32_t mask = standard_button_mask(static_cast<Uint8>(button));
+    if (mask != 0 && SDL_GetGamepadButton(controller.m_controller, static_cast<SDL_GamepadButton>(button))) {
+      controller.m_standardButtons |= mask;
+    }
+  }
+  controller.m_standardLeftX = SDL_GetGamepadAxis(controller.m_controller, SDL_GAMEPAD_AXIS_LEFTX);
+  controller.m_standardLeftY = SDL_GetGamepadAxis(controller.m_controller, SDL_GAMEPAD_AXIS_LEFTY);
+  controller.m_standardLeftTrigger = SDL_GetGamepadAxis(controller.m_controller, SDL_GAMEPAD_AXIS_LEFT_TRIGGER);
+  controller.m_standardRightTrigger = SDL_GetGamepadAxis(controller.m_controller, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER);
+}
+} // namespace
+
+void update_standard_gamepad_button(Uint32 instance, Uint8 button, bool pressed) noexcept {
+  std::scoped_lock lock(g_standardGamepadBridgeMutex);
+  const auto it = g_GameControllers.find(instance);
+  if (it == g_GameControllers.end()) {
+    return;
+  }
+  const uint32_t mask = standard_button_mask(button);
+  if (pressed) {
+    it->second.m_standardButtons |= mask;
+    it->second.m_standardButtonPresses |= mask;
+  } else {
+    it->second.m_standardButtons &= ~mask;
+  }
+}
+
+void update_standard_gamepad_axis(Uint32 instance, Uint8 axis, Sint16 value) noexcept {
+  std::scoped_lock lock(g_standardGamepadBridgeMutex);
+  const auto it = g_GameControllers.find(instance);
+  if (it == g_GameControllers.end()) {
+    return;
+  }
+  switch (static_cast<SDL_GamepadAxis>(axis)) {
+  case SDL_GAMEPAD_AXIS_LEFTX: it->second.m_standardLeftX = value; break;
+  case SDL_GAMEPAD_AXIS_LEFTY: it->second.m_standardLeftY = value; break;
+  case SDL_GAMEPAD_AXIS_LEFT_TRIGGER: it->second.m_standardLeftTrigger = value; break;
+  case SDL_GAMEPAD_AXIS_RIGHT_TRIGGER: it->second.m_standardRightTrigger = value; break;
+  default: break;
+  }
+}
+
+void flush_standard_gamepad_rumble() noexcept {
+  std::scoped_lock lock(g_standardGamepadBridgeMutex);
+  for (auto& [instance, controller] : g_GameControllers) {
+    (void)instance;
+    if (!controller.m_standardRumbleDirty || controller.m_controller == nullptr || !controller.m_hasRumble) {
+      continue;
+    }
+    const bool enabled = controller.m_standardRumbleEnabled &&
+                         g_standardGamepadsActive.load(std::memory_order_acquire);
+    const uint16_t low = enabled ? controller.m_rumbleIntensityLow : 0;
+    const uint16_t high = enabled ? controller.m_rumbleIntensityHigh : 0;
+    if (!SDL_RumbleGamepad(controller.m_controller, low, high, enabled ? 0xffffffffu : 0u)) {
+      Log.warn("Failed to {} standard gamepad rumble: {}", enabled ? "start" : "stop", SDL_GetError());
+    }
+    controller.m_standardRumbleDirty = false;
+  }
+}
+
 Sint32 get_instance_for_player(uint32_t player) noexcept {
   for (const auto& [which, controller] : g_GameControllers) {
     if (player_index(which) == player) {
@@ -358,6 +636,7 @@ Sint32 get_instance_for_player(uint32_t player) noexcept {
 }
 
 SDL_JoystickID add_controller(SDL_JoystickID which) noexcept {
+  std::scoped_lock lock(g_standardGamepadBridgeMutex);
   if (g_GameControllers.contains(which)) {
     return which;
   }
@@ -381,6 +660,7 @@ SDL_JoystickID add_controller(SDL_JoystickID which) noexcept {
     const auto props = SDL_GetGamepadProperties(ctrl);
     controller.m_hasRumble = SDL_GetBooleanProperty(props, SDL_PROP_GAMEPAD_CAP_RUMBLE_BOOLEAN, true);
     controller.m_hasRgbLed = SDL_GetBooleanProperty(props, SDL_PROP_GAMEPAD_CAP_RGB_LED_BOOLEAN, false);
+    sample_standard_gamepad_state(controller);
     SDL_JoystickID instance = SDL_GetJoystickID(SDL_GetGamepadJoystick(ctrl));
     g_GameControllers[instance] = controller;
     ensure_player_index(g_GameControllers[instance]);
@@ -392,6 +672,7 @@ SDL_JoystickID add_controller(SDL_JoystickID which) noexcept {
 }
 
 bool refresh_controller(SDL_JoystickID instance) noexcept {
+  std::scoped_lock lock(g_standardGamepadBridgeMutex);
   const auto it = g_GameControllers.find(instance);
   if (it == g_GameControllers.end()) {
     return false;
@@ -399,13 +680,18 @@ bool refresh_controller(SDL_JoystickID instance) noexcept {
   // The SDL mapping changed underneath us; drop the cached PAD bindings so they
   // are rebuilt from the new one.
   it->second.m_mappingLoaded = false;
+  sample_standard_gamepad_state(it->second);
   ensure_player_index(it->second);
   apply_port_preferences();
   return true;
 }
 
 void remove_controller(Uint32 instance) noexcept {
+  std::scoped_lock lock(g_standardGamepadBridgeMutex);
   if (auto it = g_GameControllers.find(instance); it != g_GameControllers.end()) {
+    if (it->second.m_controller != nullptr && it->second.m_hasRumble) {
+      SDL_RumbleGamepad(it->second.m_controller, 0, 0, 0);
+    }
     SDL_CloseGamepad(it->second.m_controller);
     g_GameControllers.erase(it);
     apply_port_preferences();
@@ -421,8 +707,7 @@ bool is_gamecube(Uint32 instance) noexcept {
 
 int32_t player_index(Uint32 instance) noexcept {
   if (auto it = g_GameControllers.find(instance); it != g_GameControllers.end()) {
-    const int player = SDL_GetGamepadPlayerIndex(it->second.m_controller);
-    return player >= 0 ? player : it->second.m_playerIndex;
+    return it->second.m_playerIndex;
   }
   return -1;
 }
@@ -501,6 +786,7 @@ void get_mouse_scroll(float* scrollX, float* scrollY) noexcept {
 }
 
 void shutdown() noexcept {
+  std::scoped_lock lock(g_standardGamepadBridgeMutex);
   // Upon shutdown we want to ensure all controllers are in a default state, so force all rumble supporting controllers
   // to shut off their rumble motors.
   for (const auto& controller : g_GameControllers) {

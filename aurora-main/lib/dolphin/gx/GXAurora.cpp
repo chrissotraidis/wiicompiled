@@ -43,11 +43,11 @@ void AuroraSetViewportPolicy(AuroraViewportPolicy policy) {
   if (changed) {
     // Finish commands using the old framebuffer mapping before changing it.
     aurora::gx::fifo::drain();
+    g_gxState.viewportPolicy = policy;
   }
-  g_gxState.viewportPolicy = policy;
   aurora::window::set_frame_buffer_aspect_fit(policy == AURORA_VIEWPORT_FIT);
   aurora::window::set_present_surface_fill(policy == AURORA_VIEWPORT_STRETCH);
-  if (changed) {
+  if (changed && aurora::window::get_sdl_window() != nullptr) {
     // Reapply the guest viewport and scissor after a resize.
     aurora::gx::set_logical_viewport(g_gxState.logicalViewport);
     aurora::gx::set_logical_scissor(g_gxState.logicalScissor);

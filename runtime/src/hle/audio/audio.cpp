@@ -498,7 +498,8 @@ int64_t ConsumeAudioPollDeltaMicros()
     static thread_local Clock::time_point lastPoll = Clock::now();
 
     const Clock::time_point now = Clock::now();
-    auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(now - lastPoll).count();
+    int64_t elapsed = static_cast<int64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(now - lastPoll).count());
     lastPoll = now;
 
     if (elapsed < 0) {

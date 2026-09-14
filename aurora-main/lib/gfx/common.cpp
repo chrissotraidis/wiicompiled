@@ -36,10 +36,13 @@ using webgpu::g_device;
 using webgpu::g_instance;
 using webgpu::g_queue;
 
+struct DebugFrameData {
 #ifdef AURORA_GFX_DEBUG_GROUPS
-std::vector<std::string> g_debugGroupStack;
-std::vector<std::string> g_debugMarkers;
+  std::vector<std::string> groups;
+  std::vector<std::string> markers;
 #endif
+};
+DebugFrameData g_debugFrame;
 
 constexpr uint64_t StagingBufferSize = UniformBufferSize + VertexBufferSize + IndexBufferSize + StorageBufferSize +
                                        (UseTextureBuffer ? TextureUploadSize : 0);
@@ -229,6 +232,8 @@ static void recycle_render_passes(std::vector<RenderPass>& passes) noexcept {
 }
 
 struct SealedFrameData {
+  depth_peek::FrameMapping depthMapping;
+  DebugFrameData debug;
   std::vector<RenderPass> passes;
 };
 
@@ -274,7 +279,8 @@ static size_t g_recordingSnapshotSlot = 0;
 static TextureHandle new_resolve_source_snapshot(wgpu::Extent3D size, wgpu::TextureFormat format) noexcept {
   const wgpu::TextureDescriptor textureDescriptor{
       .label = "GX Copy Source Snapshot",
-      .usage = wgpu::TextureUsage::TextureBinding | wgpu::TextureUsage::CopyDst,
+      .usage = wgpu::TextureUsage::TextureBinding | wgpu::TextureUsage::CopySrc |
+               wgpu::TextureUsage::CopyDst,
       .dimension = wgpu::TextureDimension::e2D,
       .size = size,
       .format = format,
@@ -420,7 +426,7 @@ static inline void push_command(CommandType type, const Command::Data& data) {
   g_renderPasses[g_currentRenderPass].commands.push_back({
       .type = type,
 #ifdef AURORA_GFX_DEBUG_GROUPS
-      .debugGroupStack = g_debugGroupStack,
+      .debugGroupStack = g_debugFrame.groups,
 #endif
       .data = data,
   });
@@ -1196,10 +1202,10 @@ static const char* render_pass_label(u32 index) noexcept {
 }
 
 static void render_pass_impl(const wgpu::RenderPassEncoder& pass, const std::vector<RenderPass>& passes, u32 idx,
-                             int32_t interpolatedFrame);
+                             int32_t interpolatedFrame, DebugFrameData& debugFrame);
 
 static void render_impl(std::vector<RenderPass>& renderPasses, wgpu::CommandEncoder& cmd, int32_t interpolatedFrame,
-                        bool finalize) {
+                        bool finalize, DebugFrameData& debugFrame, const depth_peek::FrameMapping& depthMapping) {
   ZoneScoped;
   // Palette conversions, MSAA resolves and EFB copies depend on sealed frame state, not on the
   // interpolation weight, so encode them on the native render and let replay slots sample them.
@@ -1249,11 +1255,11 @@ static void render_impl(std::vector<RenderPass>& renderPasses, wgpu::CommandEnco
     };
 
     auto pass = cmd.BeginRenderPass(&renderPassDescriptor);
-    render_pass_impl(pass, renderPasses, i, interpolatedFrame);
+    render_pass_impl(pass, renderPasses, i, interpolatedFrame, debugFrame);
     pass.End();
 
     if (finalize && i == renderPasses.size() - 1) {
-      depth_peek::encode_frame_snapshot(cmd, passInfo.copySourceDepthView, passInfo.targetSize, passInfo.msaaSamples);
+      depth_peek::encode_frame_snapshot(cmd, passInfo.copySourceDepthView, passInfo.targetSize, passInfo.msaaSamples, depthMapping);
     }
 
     if (passInfo.resolveTarget) {
@@ -1327,20 +1333,21 @@ static void render_impl(std::vector<RenderPass>& renderPasses, wgpu::CommandEnco
   }
 
 #if defined(AURORA_GFX_DEBUG_GROUPS)
-  if (finalize && !g_debugGroupStack.empty()) {
-    for (auto& it : std::ranges::reverse_view(g_debugGroupStack)) {
+  if (finalize && !debugFrame.groups.empty()) {
+    for (auto& it : std::ranges::reverse_view(debugFrame.groups)) {
       Log.warn("Debug group was not popped at end of frame: {}", it);
     }
-    g_debugGroupStack.clear();
+    debugFrame.groups.clear();
   }
 
-  if (finalize && g_debugMarkers.size() > 0) {
-    g_debugMarkers.clear();
+  if (finalize && debugFrame.markers.size() > 0) {
+    debugFrame.markers.clear();
   }
 #endif
 }
 
 void seal_frame(SealedFrame& out) noexcept {
+  out.data().depthMapping = depth_peek::capture_frame_mapping();
   ZoneScoped;
   // The encode that could still have been holding these has completed: the
   // producer joins the worker's DONE phase before it seals another frame.
@@ -1350,15 +1357,24 @@ void seal_frame(SealedFrame& out) noexcept {
   // capacity included, back to the producer.
   recycle_render_passes(passes);
   passes.swap(g_renderPasses);
+#ifdef AURORA_GFX_DEBUG_GROUPS
+  // Marker indices and unmatched-group warnings belong to these detached passes.
+  // The next producer frame must not modify strings still read by this encoder.
+  auto& debug = out.data().debug;
+  debug.groups.clear();
+  debug.markers.clear();
+  debug.groups.swap(g_debugFrame.groups);
+  debug.markers.swap(g_debugFrame.markers);
+#endif
   g_currentRenderPass = UINT32_MAX;
 }
 
 void render(SealedFrame& frame, wgpu::CommandEncoder& cmd, int32_t interpolatedFrame, bool finalize) {
-  render_impl(frame.data().passes, cmd, interpolatedFrame, finalize);
+  render_impl(frame.data().passes, cmd, interpolatedFrame, finalize, frame.data().debug, frame.data().depthMapping);
 }
 
 void render(wgpu::CommandEncoder& cmd, int32_t interpolatedFrame, bool finalize) {
-  render_impl(g_renderPasses, cmd, interpolatedFrame, finalize);
+  render_impl(g_renderPasses, cmd, interpolatedFrame, finalize, g_debugFrame, depth_peek::capture_frame_mapping());
   if (finalize) {
     g_currentRenderPass = UINT32_MAX;
     expire_bind_group_cache();
@@ -1376,7 +1392,7 @@ void after_submit() noexcept {
 }
 
 static void render_pass_impl(const wgpu::RenderPassEncoder& pass, const std::vector<RenderPass>& renderPasses, u32 idx,
-                             int32_t interpolatedFrame) {
+                             int32_t interpolatedFrame, DebugFrameData& debugFrame) {
   // Per-invocation, not per-process: two encoders can be recording at once.
   gx::DrawEncodeState encodeState{};
   encodeState.boundTextureBindGroup = gx::g_emptyTextureBindGroup.Get();
@@ -1447,7 +1463,7 @@ static void render_pass_impl(const wgpu::RenderPassEncoder& pass, const std::vec
     } break;
     case CommandType::DebugMarker: {
 #if defined(AURORA_GFX_DEBUG_GROUPS)
-      pass.InsertDebugMarker(wgpu::StringView(g_debugMarkers[cmd.data.debugMarkerIndex]));
+      pass.InsertDebugMarker(wgpu::StringView(debugFrame.markers[cmd.data.debugMarkerIndex]));
 #endif
     } break;
     }
@@ -1600,8 +1616,8 @@ uint32_t align_uniform(uint32_t value) { return AURORA_ALIGN(value, g_cachedLimi
 
 void insert_debug_marker(std::string label) {
 #if defined(AURORA_GFX_DEBUG_GROUPS)
-  auto idx = g_debugMarkers.size();
-  g_debugMarkers.emplace_back(std::move(label));
+  auto idx = g_debugFrame.markers.size();
+  g_debugFrame.markers.emplace_back(std::move(label));
   push_command(CommandType::DebugMarker, {.debugMarkerIndex = idx});
 #endif
 }
@@ -1610,22 +1626,22 @@ void insert_debug_marker(std::string label) {
 
 void aurora::gfx::push_debug_group(std::string label) {
 #if defined(AURORA_GFX_DEBUG_GROUPS)
-  g_debugGroupStack.push_back(std::move(label));
+  g_debugFrame.groups.push_back(std::move(label));
 #endif
 }
 void aurora_push_debug_group(const char* label) {
 #ifdef AURORA_GFX_DEBUG_GROUPS
-  aurora::gfx::g_debugGroupStack.emplace_back(label);
+  aurora::gfx::g_debugFrame.groups.emplace_back(label);
 #endif
 }
 void aurora_pop_debug_group() {
 #ifdef AURORA_GFX_DEBUG_GROUPS
-  if (aurora::gfx::g_debugGroupStack.empty()) {
+  if (aurora::gfx::g_debugFrame.groups.empty()) {
     aurora::gfx::Log.error("Debug group stack underflowed!");
     return;
   }
 
-  aurora::gfx::g_debugGroupStack.pop_back();
+  aurora::gfx::g_debugFrame.groups.pop_back();
 #endif
 }
 

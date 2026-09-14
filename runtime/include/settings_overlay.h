@@ -6,9 +6,12 @@
 namespace settings_overlay {
 // Apply persistent controller settings once Aurora has discovered host devices.
 void InitializeRuntimeSettings() noexcept;
+void SetShowFpsForHost(bool show) noexcept;
+void RefreshHostSettings() noexcept;
 // Draw the F10 settings bar before each Aurora present.
 void HandleEvents(const AuroraEvent* events) noexcept;
-void Draw() noexcept;
+bool FrameReadyForOverlay() noexcept;
+bool Draw() noexcept;
 bool StartupScreenVisible() noexcept;
 void NotifyStrapInputAccepted() noexcept;
 void AdvancePresentedFrame() noexcept;

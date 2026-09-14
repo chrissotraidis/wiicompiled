@@ -637,7 +637,8 @@ static void BuildAndPublishRuntimeFst() {
     for (const DVDFileEntry& entry : g_fileEntries) {
         if (entry.discOffsetWords != 0) {
             nextFreeBytes = std::max(
-                nextFreeBytes, static_cast<uint64_t>(entry.discOffsetWords) * 4ull + entry.size);
+                nextFreeBytes,
+                static_cast<uint64_t>(entry.discOffsetWords) * uint64_t{4} + entry.size);
         }
     }
     for (DVDFileEntry& entry : g_fileEntries) {
@@ -1118,4 +1119,3 @@ PPC_NATIVE_OVERRIDE(801643FC, DVDCheckDevice_801643FC, int32_t, (), ());
 
 extern "C" int32_t DVDLowClearCoverInterrupt_80166964(uint32_t cb) { return 1; }
 PPC_NATIVE_OVERRIDE(80166964, DVDLowClearCoverInterrupt_80166964, int32_t, (uint32_t cb), (cb));
-

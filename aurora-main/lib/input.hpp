@@ -20,6 +20,14 @@ struct GameController {
   Sint32 m_index = -1;
   Sint32 m_playerIndex = -1;
   bool m_hasRumble = false;
+  uint32_t m_standardButtons = 0;
+  uint32_t m_standardButtonPresses = 0;
+  int16_t m_standardLeftX = 0;
+  int16_t m_standardLeftY = 0;
+  int16_t m_standardLeftTrigger = 0;
+  int16_t m_standardRightTrigger = 0;
+  bool m_standardRumbleEnabled = false;
+  bool m_standardRumbleDirty = false;
   PADDeadZones m_deadZones{
       .emulateTriggers = true,
       .useDeadzones = true,
@@ -53,6 +61,9 @@ Sint32 get_instance_for_player(uint32_t player) noexcept;
 SDL_JoystickID add_controller(SDL_JoystickID which) noexcept;
 bool refresh_controller(SDL_JoystickID instance) noexcept;
 void remove_controller(Uint32 instance) noexcept;
+void update_standard_gamepad_button(Uint32 instance, Uint8 button, bool pressed) noexcept;
+void update_standard_gamepad_axis(Uint32 instance, Uint8 axis, Sint16 value) noexcept;
+void flush_standard_gamepad_rumble() noexcept;
 Sint32 player_index(Uint32 instance) noexcept;
 void set_player_index(Uint32 instance, Sint32 index) noexcept;
 std::string controller_name(Uint32 instance) noexcept;

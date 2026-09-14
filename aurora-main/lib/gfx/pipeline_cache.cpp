@@ -13,8 +13,16 @@
 #include <filesystem>
 #include <limits>
 #include <mutex>
+#if defined(__ANDROID__)
+#include <android/api-level.h>
+#endif
+
 #include <thread>
 #include <vector>
+
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#endif
 
 #include <SDL3/SDL_iostream.h>
 #include <absl/container/flat_hash_map.h>
@@ -1039,7 +1047,21 @@ static void build_synchronous_pipelines_for_frame() {
   }
 }
 
+static bool pipeline_workers_supported() {
+#if defined(__ANDROID__)
+  // Android 10's Goldfish Vulkan transport serializes object-handle mapping
+  // internally and can deadlock when pipeline creation races submission.
+  return android_get_device_api_level() > 29;
+#else
+  return true;
+#endif
+}
+
 static size_t pipeline_worker_count() {
+#if defined(__APPLE__) && TARGET_OS_SIMULATOR
+  // Avoid an observed Metal Simulator compiler-scheduler crash under parallel submissions.
+  return 1;
+#endif
   const size_t logicalProcessors = std::thread::hardware_concurrency();
   if (logicalProcessors == 0) {
     return 1;
@@ -1167,7 +1189,7 @@ void initialize_pipeline_cache() {
   g_activeBackgroundPipelineWorkers = 0;
 
   if (webgpu::g_backendType == wgpu::BackendType::OpenGL || webgpu::g_backendType == wgpu::BackendType::OpenGLES ||
-      webgpu::g_backendType == wgpu::BackendType::WebGPU) {
+      webgpu::g_backendType == wgpu::BackendType::WebGPU || !pipeline_workers_supported()) {
     g_hasPipelineThread = false;
   } else {
     g_hasPipelineThread = true;
@@ -1177,7 +1199,7 @@ void initialize_pipeline_cache() {
       g_pipelineThreads.emplace_back(pipeline_worker);
     }
     Log.info("Enabled {} priority pipeline compilation workers ({} background prewarm)",
-             workerCount, MaxBackgroundPipelineWorkers);
+             workerCount, std::min(workerCount, MaxBackgroundPipelineWorkers));
   }
 
   load_pipeline_cache();

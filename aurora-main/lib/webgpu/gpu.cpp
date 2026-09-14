@@ -1,3 +1,7 @@
+#if defined(__ANDROID__)
+#include <android/log.h>
+extern "C" void KartPadAndroidLogMetric(const char*, const char*, ...);
+#endif
 #include "gpu.hpp"
 
 #include <array>
@@ -597,6 +601,14 @@ bool initialize(AuroraBackend auroraBackend) {
   Log.info("Graphics adapter information\n  API: {}\n  Device: {} ({})\n  Driver: {}", backendName, adapterName,
            magic_enum::enum_name(g_adapterInfo.adapterType), description);
 
+#if defined(__ANDROID__)
+  KartPadAndroidLogMetric("KartPadGPU",
+      "backend=%.*s adapter_type=%u device=%.*s",
+      static_cast<int>(backendName.size()), backendName.data(),
+      static_cast<unsigned>(g_adapterInfo.adapterType),
+      static_cast<int>(std::min<size_t>(adapterName.length, 96)), adapterName.data);
+#endif
+
   uint32_t maxTextureDimension2D = 0;
   {
     wgpu::Limits supportedLimits{};
@@ -682,10 +694,18 @@ bool initialize(AuroraBackend auroraBackend) {
       "enable_immediate_error_handling",
         /* clang-format on */
     };
+    const char* rendererValidationFlag = std::getenv("KARTPAD_RENDERER_VALIDATION");
+    const bool rendererValidation = rendererValidationFlag != nullptr &&
+                                    std::strcmp(rendererValidationFlag, "1") == 0;
 #ifdef NDEBUG
-    enableToggles.push_back("skip_validation");
-    enableToggles.push_back("disable_robustness");
+    if (!rendererValidation) {
+      enableToggles.push_back("skip_validation");
+      enableToggles.push_back("disable_robustness");
+    }
 #endif
+    const std::array<const char*, 2> validationDisabledToggles = {
+        "skip_validation", "disable_robustness"};
+    Log.info("KartPad renderer diagnostic mode: {}", rendererValidation ? "validation-and-robustness" : "normal");
     if (g_backendType == wgpu::BackendType::Vulkan) {
       enableToggles.push_back("vulkan_monolithic_pipeline_cache");
     }
@@ -693,6 +713,8 @@ bool initialize(AuroraBackend auroraBackend) {
         .nextInChain = &cacheDescriptor,
         .enabledToggleCount = enableToggles.size(),
         .enabledToggles = enableToggles.data(),
+        .disabledToggleCount = rendererValidation ? validationDisabledToggles.size() : 0,
+        .disabledToggles = rendererValidation ? validationDisabledToggles.data() : nullptr,
     });
 #endif
     wgpu::DeviceDescriptor deviceDescriptor;

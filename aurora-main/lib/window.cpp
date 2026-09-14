@@ -10,6 +10,7 @@
 #include <aurora/aurora.h>
 #include <aurora/event.h>
 #include <aurora/gfx.h>
+#include <aurora/input.hpp>
 #include <aurora/render_size_limits.hpp>
 #include <SDL3/SDL_error.h>
 #include <SDL3/SDL_events.h>
@@ -28,12 +29,11 @@
 
 #if defined(SDL_PLATFORM_ANDROID)
 #include <jni.h>
-extern "C" void Android_LockActivityMutex(void);
-extern "C" void Android_UnlockActivityMutex(void);
 #endif
 
 #include <algorithm>
 #include <atomic>
+#include <mutex>
 #include <vector>
 
 #include "dolphin/vi/vi_internal.hpp"
@@ -46,6 +46,7 @@ SDL_Window* g_window;
 SDL_Renderer* g_renderer;
 float g_frameBufferScale = 0.f;
 bool g_frameBufferAspectFit = true;
+std::mutex g_presentAspectMutex;
 bool g_presentSurfaceFill = false;
 int g_presentAspectWidth = 0;
 int g_presentAspectHeight = 0;
@@ -56,6 +57,7 @@ std::atomic_bool g_nativeResizePending = false;
 std::atomic<AuroraDisplayMode> g_displayMode{AURORA_DISPLAY_MODE_WINDOWED};
 #if defined(SDL_PLATFORM_ANDROID)
 std::atomic_bool g_surfaceReady = false;
+std::recursive_mutex g_surfaceMutex;
 #else
 std::atomic_bool g_surfaceReady = true;
 #endif
@@ -219,11 +221,20 @@ bool SDLCALL lifecycle_event_watch(void*, SDL_Event* event) {
     g_nativeResizePending.store(true, std::memory_order_release);
     break;
 #if defined(SDL_PLATFORM_ANDROID) || defined(SDL_PLATFORM_APPLE)
+  case SDL_EVENT_WILL_ENTER_BACKGROUND:
   case SDL_EVENT_WINDOW_MINIMIZED:
-    g_backgrounded.store(true, std::memory_order_relaxed);
+    g_backgrounded.store(true, std::memory_order_release);
+#if defined(SDL_PLATFORM_ANDROID)
+    input::set_standard_gamepads_active(false);
+#endif
     break;
+  case SDL_EVENT_DID_ENTER_FOREGROUND:
   case SDL_EVENT_WINDOW_RESTORED:
-    g_backgrounded.store(false, std::memory_order_relaxed);
+    g_backgrounded.store(false, std::memory_order_release);
+#if defined(SDL_PLATFORM_ANDROID)
+    input::set_standard_gamepads_active(
+        g_surfaceReady.load(std::memory_order_acquire));
+#endif
     break;
 #endif
   default:
@@ -311,6 +322,14 @@ void process_event(SDL_Event& event) {
     });
     break;
   }
+  case SDL_EVENT_GAMEPAD_BUTTON_DOWN:
+  case SDL_EVENT_GAMEPAD_BUTTON_UP:
+    input::update_standard_gamepad_button(event.gbutton.which, event.gbutton.button,
+                                          event.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN);
+    break;
+  case SDL_EVENT_GAMEPAD_AXIS_MOTION:
+    input::update_standard_gamepad_axis(event.gaxis.which, event.gaxis.axis, event.gaxis.value);
+    break;
   case SDL_EVENT_MOUSE_WHEEL:
     input::set_mouse_scroll(event.wheel.x, event.wheel.y);
     break;
@@ -357,6 +376,7 @@ const AuroraEvent* poll_events() {
   while (SDL_PollEvent(&event)) {
     process_event(event);
   }
+  input::flush_standard_gamepad_rumble();
   g_events.push_back(AuroraEvent{
       .type = AURORA_NONE,
   });
@@ -483,6 +503,12 @@ bool initialize() {
       SDL_GetError());
   TRY(SDL_InitSubSystem(SDL_INIT_EVENTS | SDL_INIT_VIDEO), "Error initializing SDL: {}", SDL_GetError());
 
+#if defined(SDL_PLATFORM_ANDROID)
+  input::set_standard_gamepads_active(
+      g_surfaceReady.load(std::memory_order_acquire) &&
+      !g_backgrounded.load(std::memory_order_acquire));
+#endif
+
 #if !defined(_WIN32) && !defined(__APPLE__)
   TRY(SDL_SetHint(SDL_HINT_VIDEO_X11_NET_WM_BYPASS_COMPOSITOR, "0"), "Error setting {}: {}",
       SDL_HINT_VIDEO_X11_NET_WM_BYPASS_COMPOSITOR, SDL_GetError());
@@ -582,10 +608,18 @@ bool is_presentable() noexcept {
 }
 
 void pump_events() noexcept {
+#if defined(SDL_PLATFORM_ANDROID)
+  // Wii guest fibers replace the SDLThread stack without changing its pthread.
+  // ART JNI transition frames remain bound to the original stack, so Android's
+  // Java-backed SDL event pump must run only through the scheduler-guarded
+  // poll_events() path in WiiCompiled.
+  return;
+#else
   if (g_window != nullptr) {
     SDL_SyncWindow(g_window);
   }
   SDL_PumpEvents();
+#endif
 }
 
 bool native_resize_pending() noexcept { return g_nativeResizePending.load(std::memory_order_acquire); }
@@ -603,17 +637,23 @@ bool native_window_size_matches(uint32_t width, uint32_t height) noexcept {
   return size.native_fb_width == width && size.native_fb_height == height;
 }
 
-void set_surface_ready(bool ready) noexcept { g_surfaceReady.store(ready, std::memory_order_release); }
+void set_surface_ready(bool ready) noexcept {
+  g_surfaceReady.store(ready, std::memory_order_release);
+#if defined(SDL_PLATFORM_ANDROID)
+  input::set_standard_gamepads_active(
+      ready && !g_backgrounded.load(std::memory_order_acquire));
+#endif
+}
 
 SurfaceLock::SurfaceLock() noexcept {
 #if defined(SDL_PLATFORM_ANDROID)
-  Android_LockActivityMutex();
+  g_surfaceMutex.lock();
 #endif
 }
 
 SurfaceLock::~SurfaceLock() {
 #if defined(SDL_PLATFORM_ANDROID)
-  Android_UnlockActivityMutex();
+  g_surfaceMutex.unlock();
 #endif
 }
 
@@ -760,6 +800,7 @@ void set_frame_buffer_aspect_fit(bool fit) {
 }
 
 void set_present_surface_fill(bool fill) {
+  std::lock_guard lock(g_presentAspectMutex);
   g_presentSurfaceFill = fill;
 }
 
@@ -768,6 +809,7 @@ void lock_present_aspect_ratio(int width, int height) {
     unlock_present_aspect_ratio();
     return;
   }
+  std::lock_guard lock(g_presentAspectMutex);
   if (g_presentAspectWidth == width && g_presentAspectHeight == height) {
     return;
   }
@@ -776,12 +818,22 @@ void lock_present_aspect_ratio(int width, int height) {
 }
 
 void unlock_present_aspect_ratio() {
+  std::lock_guard lock(g_presentAspectMutex);
   g_presentAspectWidth = 0;
   g_presentAspectHeight = 0;
 }
 
 bool get_present_aspect_ratio(float& aspect) noexcept {
-  if (g_presentSurfaceFill && g_window != nullptr) {
+  bool surfaceFill;
+  int aspectWidth, aspectHeight;
+  {
+    std::lock_guard lock(g_presentAspectMutex);
+    surfaceFill = g_presentSurfaceFill;
+    aspectWidth = g_presentAspectWidth;
+    aspectHeight = g_presentAspectHeight;
+  }
+  // The lock protects only the state copy, never SDL/native-window queries.
+  if (surfaceFill && g_window != nullptr) {
     // Queried once per presentation snapshot; use the cached native client size
     // instead of re-entering SDL for a value the window procedure already knows.
     uint32_t nativeWidth = 0;
@@ -797,11 +849,11 @@ bool get_present_aspect_ratio(float& aspect) noexcept {
       return true;
     }
   }
-  if (g_presentAspectWidth <= 0 || g_presentAspectHeight <= 0) {
+  if (aspectWidth <= 0 || aspectHeight <= 0) {
     aspect = 0.f;
     return false;
   }
-  aspect = (static_cast<float>(g_presentAspectWidth) / static_cast<float>(g_presentAspectHeight)) *
+  aspect = (static_cast<float>(aspectWidth) / static_cast<float>(aspectHeight)) *
            vi::present_aspect_correction();
   return aspect > 0.f;
 }
@@ -811,6 +863,19 @@ void set_background_input(bool value) { SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACK
 } // namespace aurora::window
 
 #if defined(SDL_PLATFORM_ANDROID)
+extern "C" JNIEXPORT void JNICALL
+Java_dev_kartpad_android_KartPadSurface_nativeBeginSurfaceMutation(JNIEnv*, jobject) {
+  aurora::window::g_surfaceMutex.lock();
+  aurora::window::set_surface_ready(false);
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_dev_kartpad_android_KartPadSurface_nativeEndSurfaceMutation(JNIEnv*, jobject,
+                                                                  jboolean ready) {
+  aurora::window::set_surface_ready(ready == JNI_TRUE);
+  aurora::window::g_surfaceMutex.unlock();
+}
+
 extern "C" JNIEXPORT void JNICALL Java_org_libsdl_app_SDLSurface_auroraNativeSetSurfaceReady(JNIEnv*, jclass,
                                                                                              jboolean ready) {
   aurora::window::set_surface_ready(ready == JNI_TRUE);

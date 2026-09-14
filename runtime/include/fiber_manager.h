@@ -58,6 +58,11 @@ public:
     
     // Check if fiber system is initialized
     static bool IsInitialized();
+
+    // True only while execution is on the original host stack. Android JNI
+    // transition frames are stack-bound, so Java-calling SDL work must stay
+    // on this fiber rather than a switched guest thread stack.
+    static bool IsOnSchedulerFiber();
     
     // Create a fiber for a guest thread (called from OSCreateThread HLE).
     // OSCreateThread's stackSize/priority are not passed: the host fiber models
