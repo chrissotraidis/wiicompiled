@@ -18,6 +18,7 @@ struct Descriptor {
 // this selection out of target-wide preprocessor definitions lets the native
 // runtime be compiled once and shared by every product.
 const Descriptor& Active() noexcept;
+bool Select(Kind kind) noexcept;
 
 inline bool IsRetroRewind() noexcept {
     return Active().kind == Kind::RetroRewind;

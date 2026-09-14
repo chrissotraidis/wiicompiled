@@ -2,6 +2,8 @@
 
 #include "console_identity.h"
 #include "hle/net/network.h"
+#include "kartpad/network/local_wfc_test_route.h"
+#include "kartpad/network/private_wfc.h"
 #include "runtime_config.h"
 #include "runtime_log.h"
 #include "runtime_product.h"
@@ -9,6 +11,35 @@
 namespace NetworkHle {
 
 bool RetroRewindProfileActive();
+
+bool LocalWfcTraceEnabled() {
+    return KartPad::Network::LocalWfcRouteEnabled(RetroRewindProfileActive());
+}
+
+void LocalWfcTrace(const char* format, ...) {
+    if (!LocalWfcTraceEnabled()) {
+        return;
+    }
+    char line[512];
+    std::va_list args;
+    va_start(args, format);
+    const int written = std::vsnprintf(line, sizeof(line), format, args);
+    va_end(args);
+    if (written >= 0) {
+        RT_LOGF(RT_TAG_NET, "local-wfc %s\n", line);
+    }
+}
+
+std::string RoutedWfcDnsNode(std::string_view requestedNode) {
+    if (KartPad::Network::PrivateWfcRoutesHost(requestedNode)) {
+        return KartPad::Network::RoutePrivateWfcHost(requestedNode);
+    }
+    return KartPad::Network::RouteLocalWfcHost(RetroRewindProfileActive(), requestedNode);
+}
+
+uint16_t RoutedWfcConnectPort(uint16_t requestedPort) {
+    return KartPad::Network::RouteLocalWfcPort(RetroRewindProfileActive(), requestedPort);
+}
 
 static std::mutex g_mutex;
 static std::map<int32_t, DeviceKind> g_devices;
@@ -427,7 +458,7 @@ int32_t ReconnectWiiSocket(WiiSocket& socket, uint16_t port) {
 
     SetNonBlocking(native, true);
     sockaddr_in addr = socket.peerAddr;
-    addr.sin_port = htons(port);
+    addr.sin_port = htons(RoutedWfcConnectPort(port));
     const int ret = connect(native, reinterpret_cast<sockaddr*>(&addr), sizeof(addr));
     const int nativeErr = ret < 0 ? NormalizeConnectError(NativeLastError()) : 0;
     int32_t result = 0;
@@ -648,9 +679,12 @@ extern "C" int32_t Network_HLE_OpenDevice(const char* path, uint32_t mode) {
     if (!path) {
         return -101;
     }
-    if (!RuntimeConfigFile::NetworkEnabled(true)) {
-        // The guest opens several /dev/net nodes at boot and retries; report the
-        // reason online will not work exactly once.
+    const bool isIpTop = std::strcmp(path, "/dev/net/ip/top") == 0;
+    const bool isSsl = std::strcmp(path, "/dev/net/ssl") == 0;
+    if ((isIpTop || isSsl) && !RuntimeConfigFile::NetworkEnabled(true)) {
+        // KD request/time and NCD are local Wii system services, not Internet
+        // access. They must remain available offline so first-run save and
+        // license initialization can complete. Gate only socket/TLS devices.
         static bool reported = false;
         if (!reported) {
             reported = true;
@@ -665,10 +699,10 @@ extern "C" int32_t Network_HLE_OpenDevice(const char* path, uint32_t mode) {
         kind = DeviceKind::KdTime;
     } else if (std::strcmp(path, "/dev/net/ncd/manage") == 0) {
         kind = DeviceKind::NcdManage;
-    } else if (std::strcmp(path, "/dev/net/ip/top") == 0) {
+    } else if (isIpTop) {
         kind = DeviceKind::IpTop;
         EnsureSocketRuntime();
-    } else if (std::strcmp(path, "/dev/net/ssl") == 0) {
+    } else if (isSsl) {
         kind = DeviceKind::Ssl;
         EnsureSocketRuntime();
     } else {

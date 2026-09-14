@@ -87,8 +87,8 @@ typedef struct {
   AuroraBackend desiredBackend;
   uint32_t msaa;
   uint16_t maxTextureAnisotropy;
-  // No vsync knob exists: the swapchain is always configured for a
-  // non-blocking present mode (Immediate, else Mailbox). See best_present_mode.
+  // macOS startup-only opt-in. False preserves the existing presentation policy.
+  bool vsync;
   bool startFullscreen;
   bool allowJoystickBackgroundEvents;
   bool pauseOnFocusLost;

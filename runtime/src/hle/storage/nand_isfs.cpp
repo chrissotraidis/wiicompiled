@@ -331,10 +331,10 @@ extern "C" int32_t NAND_IOS_Open_HLE(uint32_t pathPtr, uint32_t mode) {
     // It's a NAND file path
     std::string hostPath = TranslateNandPath(path);
     
-    // Seed FaceLib resources before the existence check so every open mode can
-    // still find them on a fresh managed NAND.
-    if (!PathExists(hostPath) && IsFaceLibResourcePath(path)) {
-        SeedFaceLibResource(hostPath);
+    // Seed FaceLib resources and a generic Mii database before the existence
+    // check so every open mode can still find them on a fresh managed NAND.
+    if (!PathExists(hostPath) && IsFaceLibSeedPath(path)) {
+        SeedFaceLibFile(path, hostPath);
     }
 
     // Determine file mode. IOS never creates files on open - creation happens
@@ -804,11 +804,10 @@ static void WriteGuestString(uint32_t address, const char* value) {
 int32_t ISFS_OpenLib_Initialize(CpuContext* ctx) {
     g_isfsInitialized = true;
     
-    // Create the title data directory if it doesn't exist
-    char titlePath[256];
-    const std::string& base = GetNandBasePath();
-    std::snprintf(titlePath, sizeof(titlePath), "%s\\title\\%08x\\%08x\\data",
-                  base.c_str(), kNandTitleIdHi, CurrentMkwTitleIdLo());
+    // Use the same platform-aware Wii-to-host path translation as every other
+    // NAND operation. A literal Windows separator creates one incorrectly
+    // named sibling directory on POSIX instead of the real title hierarchy.
+    const std::string titlePath = TranslateNandPath(CurrentNandDataDir().c_str());
     CreateDirectoryPath(titlePath);
 
     if (!ctx) {

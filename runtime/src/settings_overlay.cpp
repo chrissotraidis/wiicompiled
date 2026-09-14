@@ -1,4 +1,6 @@
 #include "settings_overlay.h"
+#include "kartpad/macos_settings_shortcut.hpp"
+extern "C" void KartPadOpenSettingsFromShortcut();
 #include "wup028_adapter.h"
 #include "audio_backend.h"
 #include "controller_mapping_wizard.h"
@@ -18,7 +20,6 @@
 #include <algorithm>
 #include <atomic>
 #include <cctype>
-#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <limits>
@@ -46,25 +47,23 @@ namespace AxDspHle {
 void SetMixWorkerEnabled(bool enabled);
 }
 
+#if defined(__APPLE__) && !defined(KARTPAD_IOS_RUNTIME)
+#include <TargetConditionals.h>
+#if TARGET_OS_OSX
+extern "C" void KartPadControllersTick();
+extern "C" bool KartPadControllersVisible();
+#endif
+#endif
+namespace {
+std::atomic_bool g_nativeSettingsReload{false};
+std::atomic_bool g_nativeCompatibilityRequest{false};
+}
+extern "C" void KartPadRequestSettingsReload() { g_nativeSettingsReload.store(true); }
+extern "C" void KartPadRequestControllerCompatibility() { g_nativeCompatibilityRequest.store(true); }
 namespace settings_overlay {
 namespace {
 
-const char* GraphicsApiDisplayName() {
-    switch (aurora_get_backend()) {
-    case BACKEND_D3D11: return "Direct3D 11";
-    case BACKEND_D3D12: return "Direct3D 12";
-    case BACKEND_METAL: return "Metal";
-    case BACKEND_VULKAN: return "Vulkan";
-    case BACKEND_OPENGL: return "OpenGL";
-    case BACKEND_OPENGLES: return "OpenGL ES";
-    case BACKEND_WEBGPU: return "WebGPU";
-    case BACKEND_NULL: return "Null";
-    case BACKEND_AUTO: return "Automatic";
-    }
-    return "Unknown";
-}
-
-bool g_topBarVisible = false;
+bool g_compatibilityVisible = false;
 int g_controllerPort = 0;
 float g_resolutionScale = RuntimeConfigFile::ResolutionMultiplier(1.0f);
 int g_audioVolumePercent = static_cast<int>(std::lround(RuntimeConfigFile::AudioVolume(1.0f) * 100.0f));
@@ -178,16 +177,22 @@ constexpr std::array<const char*, PAD_BUTTON_COUNT> kClassicProPreset = {
     "dpad_up", "dpad_down", "dpad_left", "dpad_right",
 };
 
-struct ResolutionItem {
-    const char* label;
-    float scale;
+// SDL presents an attached Nunchuk as the left stick, C as left shoulder, and
+// Z as the left-trigger axis. Leave Classic L without a digital binding so
+// Aurora's normal analog-trigger emulation turns Nunchuk Z into the item
+// button. Wii Remote B becomes Classic R (drift); button 1 provides Classic B
+// for menu-back/brake without making every drift press brake simultaneously.
+constexpr std::array<const char*, PAD_BUTTON_COUNT> kWiimoteNunchukPreset = {
+    "east",          // A: Wii Remote A
+    "west",          // B: Wii Remote 1
+    "left_shoulder", // X: Nunchuk C / look behind
+    "north",         // Y: Wii Remote 2
+    "start",         // Start: Plus
+    "back",          // Z: Minus
+    "unmapped",      // L: Nunchuk Z arrives on the left-trigger axis
+    "south",         // R: Wii Remote B / drift
+    "dpad_up", "dpad_down", "dpad_left", "dpad_right",
 };
-
-using Clock = std::chrono::steady_clock;
-
-constexpr auto kCursorAutoHideDelay = std::chrono::seconds(5);
-Clock::time_point g_lastMouseActivity{Clock::now()};
-bool g_cursorHidden = false;
 
 constexpr std::array<std::string_view, 3> kDisplayModeConfigNames = {
     "windowed", "borderless", "exclusive",
@@ -197,11 +202,6 @@ uint64_t g_presentedFrame = 0;
 std::atomic_bool g_strapInputAccepted = false;
 std::atomic_uint64_t g_startupDismissFrame = UINT64_MAX;
 constexpr uint64_t kStrapTransitionCoverFrames = 60;
-
-constexpr std::array<ResolutionItem, 8> kResolutions = {{
-    {"Auto (window size)", 0.0f}, {"Native (1x)", 1.0f}, {"1.5x", 1.5f}, {"2x", 2.0f},
-    {"3x", 3.0f}, {"4x", 4.0f}, {"6x", 6.0f}, {"8x", 8.0f},
-}};
 
 constexpr std::array<uint32_t, 3> kFrameInterpolationTargetFps{0, 120, 180};
 
@@ -261,14 +261,6 @@ const NativeButtonItem& NativeButtonForValue(uint32_t nativeButton) {
         return nativeButton == item.nativeButton;
     });
     return it == kNativeButtons.end() ? kNativeButtons.front() : *it;
-}
-
-void SetTopBarVisible(bool visible) {
-    if (g_topBarVisible == visible) {
-        return;
-    }
-    g_topBarVisible = visible;
-    PADBlockInput(visible);
 }
 
 void ApplyConfiguredMappings() {
@@ -476,6 +468,22 @@ void DrawControllerSettings() {
         PADSerializeMappings();
         mappings = PADGetButtonMappings(port, &mappingCount);
     }
+    ImGui::SameLine();
+    if (ImGui::Button("Wii Remote + Nunchuk (Experimental)")) {
+        const uint32_t port = static_cast<uint32_t>(g_controllerPort);
+        for (size_t i = 0; i < kControllerButtons.size(); ++i) {
+            if (const NativeButtonItem* native = FindNativeButton(kWiimoteNunchukPreset[i])) {
+                PADSetButtonMapping(port,
+                    PADButtonMapping{native->nativeButton, kControllerButtons[i].padButton});
+                PADSetAltButtonMapping(port,
+                    PADButtonMapping{PAD_NATIVE_BUTTON_INVALID, kControllerButtons[i].padButton});
+                RuntimeConfigFile::SetControllerButton(i, kWiimoteNunchukPreset[i]);
+            }
+        }
+        altRowExpanded.fill(false);
+        PADSerializeMappings();
+        mappings = PADGetButtonMappings(port, &mappingCount);
+    }
 
     ImGui::SeparatorText("Button mapping");
     for (size_t i = 0; i < kControllerButtons.size(); ++i) {
@@ -559,169 +567,42 @@ void DrawControllerSettings() {
     DrawGameCubeAdapterInfo();
 }
 
-void DrawAudioSettings() {
-    ImGui::SetNextItemWidth(220.0f);
-    if (ImGui::SliderInt("Master", &g_audioVolumePercent, 0, 100, "%d%%")) {
-        const float volume = static_cast<float>(g_audioVolumePercent) / 100.0f;
-        AudioBackend::Instance().SetMasterVolume(volume);
-        RuntimeConfigFile::SetAudioVolume(volume);
-    }
-    if (ImGui::SliderInt("Music", &g_musicVolumePercent, 0, 100, "%d%%")) {
-        const float volume = static_cast<float>(g_musicVolumePercent) / 100.0f;
-        MusicAttenuation::SetMusicVolume(volume);
-        RuntimeConfigFile::SetMusicVolume(volume);
-    }
-    if (ImGui::SliderInt("Sound Effects", &g_soundEffectsVolumePercent, 0, 100, "%d%%")) {
-        const float volume = static_cast<float>(g_soundEffectsVolumePercent) / 100.0f;
-        MusicAttenuation::SetSoundEffectsVolume(volume);
-        RuntimeConfigFile::SetSoundEffectsVolume(volume);
-    }
-    if (ImGui::SliderInt("UI", &g_uiVolumePercent, 0, 100, "%d%%")) {
-        const float volume = static_cast<float>(g_uiVolumePercent) / 100.0f;
-        MusicAttenuation::SetUiVolume(volume);
-        RuntimeConfigFile::SetUiVolume(volume);
-    }
-    if (ImGui::SliderInt("Voices", &g_voicesVolumePercent, 0, 100, "%d%%")) {
-        const float volume = static_cast<float>(g_voicesVolumePercent) / 100.0f;
-        MusicAttenuation::SetVoicesVolume(volume);
-        RuntimeConfigFile::SetVoicesVolume(volume);
-    }
-    if (ImGui::Checkbox("Mute", &g_audioMuted)) {
-        AudioBackend::Instance().SetMuted(g_audioMuted);
-        RuntimeConfigFile::SetAudioMuted(g_audioMuted);
-    }
-    ImGui::Separator();
-    if (ImGui::Checkbox("Mix audio on a worker thread", &g_audioMixWorker)) {
-        // Applies immediately: SetMixWorkerEnabled joins any in-flight mix
-        // before switching, so the change never lands mid-frame.
-        AxDspHle::SetMixWorkerEnabled(g_audioMixWorker);
-        RuntimeConfigFile::SetAudioMixWorker(g_audioMixWorker);
-    }
-    if (ImGui::IsItemHovered()) {
-        ImGui::SetTooltip(
-            "Runs the AX/DSP voice mix off the game thread. Turn this off if you "
-            "suspect an audio problem; the mix then runs inline as it used to.");
-    }
-    ImGui::Separator();
-    if (ImGui::Checkbox("Mute game music while external media is playing",
-                        &g_attenuateMusicWhenMediaPlays)) {
-        MusicAttenuation::SetEnabled(g_attenuateMusicWhenMediaPlays);
-        RuntimeConfigFile::SetAttenuateMusicWhenMediaPlays(g_attenuateMusicWhenMediaPlays);
-    }
-    if (g_attenuateMusicWhenMediaPlays) {
-        if (MusicAttenuation::IsExternalMediaPlaying()) {
-            ImGui::TextDisabled("External media is playing; game music is muted.");
-        } else if (!MusicAttenuation::IsMediaControlInitializationComplete()) {
-            ImGui::TextDisabled("Waiting for Windows Media Control...");
-        } else if (!MusicAttenuation::IsMediaControlAvailable()) {
-            ImGui::TextDisabled("Windows Media Control is unavailable.");
-        } else {
-            ImGui::TextDisabled("No external media is currently playing.");
-        }
-    }
-}
-
-void DrawGraphicsSettings() {
-    g_displayMode = static_cast<int>(aurora_get_display_mode());
-    struct EffectFlag {
-        const char* label;
-        uint32_t flag;
-    };
-    static constexpr std::array<EffectFlag, 1> kEffectFlags = {{
-        {"Disable bloom", 0x10u},
-    }};
-
-    for (const auto& effect : kEffectFlags) {
-        bool disabled = (g_disabledPostProcessingPaths & effect.flag) != 0;
-        if (ImGui::Checkbox(effect.label, &disabled)) {
-            if (disabled) {
-                g_disabledPostProcessingPaths |= effect.flag;
-            } else {
-                g_disabledPostProcessingPaths &= ~effect.flag;
-            }
-            RuntimeGameGraphicsOptions::SetDisabledPostProcessingPaths(g_disabledPostProcessingPaths);
-            RuntimeConfigFile::SetDisabledPostProcessingPaths(g_disabledPostProcessingPaths);
-        }
-    }
-    ImGui::TextDisabled("Applied when the next scene renderer is created.");
-    ImGui::Separator();
-    static constexpr const char* kDisplayModes[] = {
-        "Windowed",
-        "Borderless fullscreen",
-        "Exclusive fullscreen",
-    };
-    if (ImGui::Combo("Display mode", &g_displayMode, kDisplayModes, static_cast<int>(std::size(kDisplayModes)))) {
-        const auto mode = static_cast<AuroraDisplayMode>(g_displayMode);
-        aurora_set_display_mode(mode);
-        const AuroraDisplayMode activeMode = aurora_get_display_mode();
-        if (activeMode == mode) {
-            RuntimeConfigFile::SetDisplayMode(std::string(kDisplayModeConfigNames[static_cast<size_t>(g_displayMode)]));
-        } else {
-            g_displayMode = static_cast<int>(activeMode);
-        }
-    }
-    if (g_displayMode == AURORA_DISPLAY_MODE_EXCLUSIVE) {
-        ImGui::TextDisabled(
-            "Requests the closest native-resolution display mode to the output frame "
-            "rate (60 Hz, or the frame interpolation target).");
-    }
-    constexpr std::array<const char*, 3> kFrameInterpolationModes{
-        "Off", "120 FPS", "180 FPS",
-    };
-    const char* currentFrameInterpolationMode =
-        kFrameInterpolationModes[static_cast<size_t>(g_frameInterpolationMode)];
-    bool frameInterpolationModeChanged = false;
-    if (ImGui::BeginCombo("Race frame interpolation (experimental)", currentFrameInterpolationMode)) {
-        for (int mode = 0; mode < static_cast<int>(kFrameInterpolationModes.size()); ++mode) {
-            const bool selected = g_frameInterpolationMode == mode;
-            if (ImGui::Selectable(kFrameInterpolationModes[static_cast<size_t>(mode)], selected)) {
-                g_frameInterpolationMode = mode;
-                frameInterpolationModeChanged = true;
-            }
-            if (selected) {
-                ImGui::SetItemDefaultFocus();
-            }
-        }
-        ImGui::EndCombo();
-    }
-    if (frameInterpolationModeChanged) {
-        const uint32_t targetFps = kFrameInterpolationTargetFps[static_cast<size_t>(g_frameInterpolationMode)];
-        aurora_set_frame_interpolation_fps(targetFps);
-        RuntimeConfigFile::SetFrameInterpolationFps(targetFps);
-        LimitResolutionForFrameRate();
-        if (aurora_get_display_mode() == AURORA_DISPLAY_MODE_EXCLUSIVE) {
-            // Re-apply exclusive mode so the display refresh tracks the new target.
-            aurora_set_display_mode(AURORA_DISPLAY_MODE_EXCLUSIVE);
-        }
-    }
-    ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + 380.0f);
-    ImGui::TextDisabled("Frame interpolation is experimental, you might find visual artifacts");
-    ImGui::PopTextWrapPos();
-    if (ImGui::Checkbox("Disable copy filter", &g_disableCopyFilter)) {
-        aurora_set_disable_copy_filter(g_disableCopyFilter);
-        RuntimeConfigFile::SetDisableCopyFilter(g_disableCopyFilter);
-    }
-    if (ImGui::Checkbox("Skip draws while shaders compile", &g_skipUnreadyPipelines)) {
-        aurora_set_skip_unready_pipelines(g_skipUnreadyPipelines);
-        RuntimeConfigFile::SetSkipUnreadyPipelines(g_skipUnreadyPipelines);
-    }
-    if (ImGui::Checkbox("Show FPS", &g_showFps)) {
-        RuntimeConfigFile::SetShowFps(g_showFps);
-    }
-    ImGui::Separator();
-    ImGui::Text("Graphics API: %s", GraphicsApiDisplayName());
-}
+#if defined(__ANDROID__)
+float g_androidFpsOverlayScale = 1.0f;
+#endif
 
 void DrawFpsOverlay() {
+    static uint64_t lastTelemetryPresentCount = 0;
     AuroraPresentTiming presentTiming{};
     aurora_get_present_timing(&presentTiming);
+    if (presentTiming.sampleCount > 0 &&
+        presentTiming.totalPresentCount >= lastTelemetryPresentCount + 300) {
+        const AuroraStats* stats = aurora_get_stats();
+        RT_LOGF(RT_TAG_GX,
+                "present telemetry: total=%llu samples=%u avg-ms=%.3f p50-ms=%.3f "
+                "p95-ms=%.3f p99-ms=%.3f worst-ms=%.3f jitter-ms=%.3f fps=%.3f "
+                "effective-fps=%.3f pipelines-queued=%u pipelines-created=%u\n",
+                static_cast<unsigned long long>(presentTiming.totalPresentCount),
+                presentTiming.sampleCount,
+                presentTiming.averageFrameTimeMs,
+                presentTiming.p50FrameTimeMs,
+                presentTiming.p95FrameTimeMs,
+                presentTiming.p99FrameTimeMs,
+                presentTiming.worstFrameTimeMs,
+                presentTiming.jitterMs,
+                presentTiming.framesPerSecond,
+                presentTiming.effectiveFramesPerSecond,
+                stats != nullptr ? stats->queuedPipelines : 0,
+                stats != nullptr ? stats->createdPipelines : 0);
+        lastTelemetryPresentCount = presentTiming.totalPresentCount;
+    }
     if (!g_showFps) {
         return;
     }
 
     const ImGuiIO& io = ImGui::GetIO();
     constexpr float kMargin = 10.0f;
-    const float top = g_topBarVisible ? ImGui::GetFrameHeight() + kMargin : kMargin;
+    const float top = g_compatibilityVisible ? ImGui::GetFrameHeight() + kMargin : kMargin;
     ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x - kMargin, top), ImGuiCond_Always, ImVec2(1.0f, 0.0f));
     ImGui::SetNextWindowBgAlpha(0.55f);
     constexpr ImGuiWindowFlags kFlags = ImGuiWindowFlags_AlwaysAutoResize |
@@ -732,12 +613,25 @@ void DrawFpsOverlay() {
                                          ImGuiWindowFlags_NoNav |
                                          ImGuiWindowFlags_NoSavedSettings;
     if (ImGui::Begin("FPS Overlay", nullptr, kFlags)) {
+#if defined(__ANDROID__)
+        ImGui::SetWindowFontScale(g_androidFpsOverlayScale);
+#endif
         if (presentTiming.sampleCount == 0) {
             ImGui::TextUnformatted("FPS: --");
         } else {
             // Present timing includes the additional frames produced by
             // interpolation, so this remains the actual displayed FPS.
             ImGui::Text("FPS: %.1f", presentTiming.framesPerSecond);
+#if defined(__ANDROID__)
+            ImGui::Text("Frame ms: p50 %.1f  p95 %.1f",
+                        presentTiming.p50FrameTimeMs, presentTiming.p95FrameTimeMs);
+            ImGui::Text("p99 %.1f  worst %.1f",
+                        presentTiming.p99FrameTimeMs, presentTiming.worstFrameTimeMs);
+#else
+            ImGui::Text("Frame ms: p50 %.1f  p95 %.1f  p99 %.1f  worst %.1f",
+                        presentTiming.p50FrameTimeMs, presentTiming.p95FrameTimeMs,
+                        presentTiming.p99FrameTimeMs, presentTiming.worstFrameTimeMs);
+#endif
             // Replay-unsafe frames hold the presented cadence with duplicated
             // slots, so the counter alone reads 180 while the motion on screen
             // is 60 Hz. Surface the divergence instead of hiding it.
@@ -758,7 +652,7 @@ void DrawShaderCompilationStatus() {
     }
 
     constexpr float kMargin = 10.0f;
-    const float top = g_topBarVisible ? ImGui::GetFrameHeight() + kMargin : kMargin;
+    const float top = g_compatibilityVisible ? ImGui::GetFrameHeight() + kMargin : kMargin;
     ImGui::SetNextWindowPos(ImVec2(kMargin, top), ImGuiCond_Always);
     ImGui::SetNextWindowBgAlpha(0.55f);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(7.0f, 4.0f));
@@ -795,9 +689,9 @@ void DrawStartupScreen() {
                                         ImGuiWindowFlags_NoNav |
                                         ImGuiWindowFlags_NoSavedSettings |
                                         ImGuiWindowFlags_NoBringToFrontOnFocus;
-    if (ImGui::Begin("Wiicompiled Startup", nullptr, kFlags)) {
+    if (ImGui::Begin("KartPad Startup", nullptr, kFlags)) {
         ImGui::SetWindowFontScale(1.25f);
-        constexpr const char* kTitle = "WiiCompiled";
+        constexpr const char* kTitle = "KartPad";
         const ImVec2 titleSize = ImGui::CalcTextSize(kTitle);
         const float titleX = std::max(0.0f, (viewport->Size.x - titleSize.x) * 0.5f);
         const float startY = std::max(0.0f, (viewport->Size.y - titleSize.y) * 0.5f);
@@ -809,97 +703,70 @@ void DrawStartupScreen() {
     ImGui::PopStyleColor();
 }
 
-void DrawTopBar() {
-    if (!g_topBarVisible || !ImGui::BeginMainMenuBar()) {
-        return;
-    }
-
-    ImGui::TextUnformatted("WiiCompiled");
-    ImGui::Separator();
-    const auto resolutionIt = std::find_if(kResolutions.begin(), kResolutions.end(), [](const ResolutionItem& item) {
-        return std::fabs(item.scale - g_resolutionScale) < 0.001f;
-    });
-    const char* resolutionLabel = resolutionIt != kResolutions.end() ? resolutionIt->label : "Custom";
-    const std::string resolutionMenuLabel = std::string("Resolution: ") + resolutionLabel;
-    if (ImGui::BeginMenu(resolutionMenuLabel.c_str())) {
-        for (const auto& resolution : kResolutions) {
-            const bool selected = std::fabs(resolution.scale - g_resolutionScale) < 0.001f;
-            const bool disabled = IsHighFrameRateMode() && IsHighResolutionScale(resolution.scale);
-            ImGui::BeginDisabled(disabled);
-            const bool clicked = ImGui::MenuItem(resolution.label, nullptr, selected);
-            ImGui::EndDisabled();
-            if (clicked) {
-                SetResolutionScale(resolution.scale);
-            }
-        }
-        ImGui::EndMenu();
-    }
-
-    if (ImGui::BeginMenu("Graphics")) {
-        DrawGraphicsSettings();
-        ImGui::EndMenu();
-    }
-
-    if (ImGui::BeginMenu("Controller settings")) {
+void DrawControllerCompatibility() {
+    if (g_nativeCompatibilityRequest.exchange(false)) g_compatibilityVisible = true;
+    if (!g_compatibilityVisible) return;
+    ImGui::SetNextWindowSize(ImVec2(760, 680), ImGuiCond_FirstUseEver);
+    if (ImGui::Begin("Controller Compatibility Tools", &g_compatibilityVisible)) {
+        ImGui::TextWrapped("Legacy setup for unmapped devices, adapter ports and presets. "
+                           "Use KartPad Settings for standard controllers, graphics and audio.");
+        ImGui::Separator();
         DrawControllerSettings();
-        ImGui::EndMenu();
+        if (ImGui::Button("Close")) g_compatibilityVisible = false;
     }
-
-    const std::string audioLabel = g_audioMuted
-        ? "Audio: Muted"
-        : "Audio: " + std::to_string(g_audioVolumePercent) + "%";
-    // Keep the popup ID stable while the Master slider changes the visible
-    // label. Without the ### suffix, ImGui treats every new percentage as a
-    // different menu and closes the popup on the first drag update.
-    const std::string audioMenuLabel = audioLabel + "###AudioSettingsMenu";
-    if (ImGui::BeginMenu(audioMenuLabel.c_str())) {
-        DrawAudioSettings();
-        ImGui::EndMenu();
-    }
-
-    const float hideWidth = ImGui::CalcTextSize("Hide (F10)").x + ImGui::GetStyle().FramePadding.x * 2.0f;
-    ImGui::SetCursorPosX(std::max(ImGui::GetCursorPosX(), ImGui::GetWindowWidth() - hideWidth - 8.0f));
-    if (ImGui::MenuItem("Hide (F10)")) {
-        SetTopBarVisible(false);
-    }
-    ImGui::EndMainMenuBar();
+    ImGui::End();
 }
 
-bool IsToggleKey(const SDL_Event& event, SDL_Scancode code) {
-    return event.type == SDL_EVENT_KEY_DOWN && !event.key.repeat && event.key.scancode == code;
-}
-
-bool IsMouseActivity(const SDL_Event& event) {
-    switch (event.type) {
-    case SDL_EVENT_MOUSE_MOTION:
-    case SDL_EVENT_MOUSE_BUTTON_DOWN:
-    case SDL_EVENT_MOUSE_BUTTON_UP:
-    case SDL_EVENT_MOUSE_WHEEL:
-        return true;
-    default:
-        return false;
+void ReloadNativeSettings() {
+    if (!g_nativeSettingsReload.exchange(false)) return;
+    const auto c = RuntimeConfigFile::LoadConfigFile();
+    RuntimeConfigFile::Mutable() = c;
+    const float resolution = c.resolutionMultiplier.value_or(1.0f);
+    if (resolution != g_resolutionScale) {
+        g_resolutionScale = resolution;
+        VISetFrameBufferScale(resolution);
+    }
+    const uint32_t fps = c.frameInterpolationFps.value_or(0);
+    const int frameMode = fps == 120 ? 1 : fps == 180 ? 2 : 0;
+    const bool frameChanged = frameMode != g_frameInterpolationMode;
+    g_frameInterpolationMode = frameMode;
+    LimitResolutionForFrameRate();
+    if (frameChanged) aurora_set_frame_interpolation_fps(kFrameInterpolationTargetFps[frameMode]);
+    const auto mode = c.displayMode.value_or("windowed");
+    const int display = mode == "borderless" ? 1 : mode == "exclusive" ? 2 : 0;
+    if (display != g_displayMode || (frameChanged && display == AURORA_DISPLAY_MODE_EXCLUSIVE)) {
+        aurora_set_display_mode(static_cast<AuroraDisplayMode>(display));
+        g_displayMode = static_cast<int>(aurora_get_display_mode());
+        if (g_displayMode != display)
+            RuntimeConfigFile::SetDisplayMode(std::string(kDisplayModeConfigNames[g_displayMode]));
+    }
+    g_showFps = c.showFps.value_or(true);
+    g_disableCopyFilter = c.disableCopyFilter.value_or(true);
+    g_skipUnreadyPipelines = c.skipUnreadyPipelines.value_or(true);
+    aurora_set_disable_copy_filter(g_disableCopyFilter);
+    aurora_set_skip_unready_pipelines(g_skipUnreadyPipelines);
+    g_disabledPostProcessingPaths = c.disabledPostProcessingPaths.value_or(0);
+    RuntimeGameGraphicsOptions::SetDisabledPostProcessingPaths(g_disabledPostProcessingPaths);
+    const auto percent = [](float v) { return static_cast<int>(std::lround(std::clamp(v, 0.0f, 1.0f) * 100)); };
+    g_audioVolumePercent = percent(c.audioVolume.value_or(1));
+    g_musicVolumePercent = percent(c.audioMusicVolume.value_or(1));
+    g_soundEffectsVolumePercent = percent(c.audioSoundEffectsVolume.value_or(1));
+    g_uiVolumePercent = percent(c.audioUiVolume.value_or(1));
+    g_voicesVolumePercent = percent(c.audioVoicesVolume.value_or(1));
+    g_audioMuted = c.audioMuted.value_or(false);
+    AudioBackend::Instance().SetMasterVolume(g_audioVolumePercent / 100.0f);
+    AudioBackend::Instance().SetMuted(g_audioMuted);
+    MusicAttenuation::SetMusicVolume(g_musicVolumePercent / 100.0f);
+    MusicAttenuation::SetSoundEffectsVolume(g_soundEffectsVolumePercent / 100.0f);
+    MusicAttenuation::SetUiVolume(g_uiVolumePercent / 100.0f);
+    MusicAttenuation::SetVoicesVolume(g_voicesVolumePercent / 100.0f);
+    if (g_audioMixWorker != c.audioMixWorker.value_or(true)) {
+        g_audioMixWorker = c.audioMixWorker.value_or(true);
+        AxDspHle::SetMixWorkerEnabled(g_audioMixWorker);
     }
 }
 
-// Runs on the thread that pumps SDL events (the same one that calls Draw), so
-// the SDL cursor calls are safe here.
-void UpdateCursorAutoHide() {
-    const bool shouldHide =
-        !g_topBarVisible && Clock::now() - g_lastMouseActivity >= kCursorAutoHideDelay;
-    if (shouldHide == g_cursorHidden) {
-        return;
-    }
-    g_cursorHidden = shouldHide;
-    if (shouldHide) {
-        SDL_HideCursor();
-    } else {
-        SDL_ShowCursor();
-    }
-}
-
-// Alt+Enter toggles the display mode inside aurora without going through the
-// F10 combo, so the active mode is compared against the last persisted one
-// every frame and written back on change.
+// Persist display changes made by the platform fullscreen shortcut.
 void PersistDisplayModeIfChanged() {
     const int active = static_cast<int>(aurora_get_display_mode());
     if (active == g_displayMode) {
@@ -930,7 +797,8 @@ void InitializeRuntimeSettings() noexcept {
     aurora_set_skip_unready_pipelines(g_skipUnreadyPipelines);
     g_strapInputAccepted.store(false, std::memory_order_relaxed);
     g_startupDismissFrame.store(UINT64_MAX, std::memory_order_relaxed);
-    PADBlockInput(g_topBarVisible);
+    PADBlockInput(g_compatibilityVisible);
+    SDL_ShowCursor();
 }
 
 void HandleEvents(const AuroraEvent* events) noexcept {
@@ -944,13 +812,11 @@ void HandleEvents(const AuroraEvent* events) noexcept {
         if (ev->type != AURORA_SDL_EVENT) {
             continue;
         }
+        if (kartpad::IsMacSettingsShortcut(ev->sdl)) {
+            KartPadOpenSettingsFromShortcut();
+            continue;
+        }
         controller_mapping_wizard::HandleSdlEvent(ev->sdl);
-        if (IsToggleKey(ev->sdl, SDL_SCANCODE_F10)) {
-            SetTopBarVisible(!g_topBarVisible);
-        }
-        if (IsMouseActivity(ev->sdl)) {
-            g_lastMouseActivity = Clock::now();
-        }
     }
 }
 
@@ -958,18 +824,25 @@ void Draw() noexcept {
     // Wait for the frame worker's DONE phase: it has replayed the previous frame's ImGui draw lists
     // and started the next ImGui frame, so all overlay callers can now safely issue ImGui commands.
     aurora_wait_for_frame_worker();
+    ReloadNativeSettings();
     ApplyConfiguredMappings();
+#if defined(__APPLE__) && TARGET_OS_OSX
+    KartPadControllersTick();
+#endif
     PersistDisplayModeIfChanged();
-    UpdateCursorAutoHide();
     if (!StartupScreenVisible()) {
         DrawShaderCompilationStatus();
     }
     DrawFpsOverlay();
-    DrawTopBar();
+    DrawControllerCompatibility();
     controller_mapping_wizard::Draw();
     // The wizard captures raw presses; keep them out of the game even when the
-    // top bar is hidden mid-setup.
-    PADBlockInput(g_topBarVisible || controller_mapping_wizard::IsActive());
+    // compatibility window is closed mid-setup.
+    PADBlockInput(g_compatibilityVisible || controller_mapping_wizard::IsActive()
+#if defined(__APPLE__) && TARGET_OS_OSX
+                  || KartPadControllersVisible()
+#endif
+    );
     DrawStartupScreen();
 }
 

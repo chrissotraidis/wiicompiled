@@ -44,7 +44,7 @@ function(mkw_configure_object_target target)
         "${MKW_RUNTIME_SOURCE_DIR}/../aurora-main/include")
     target_compile_definitions(${target} PRIVATE
         TARGET_PC)
-    set_target_properties(${target} PROPERTIES CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON)
+    set_target_properties(${target} PROPERTIES CXX_STANDARD 20 CXX_STANDARD_REQUIRED ON)
 endfunction()
 
 # Translated shard TUs are the memory-hungry compiles; everything else in the build is
@@ -73,11 +73,12 @@ mkw_configure_object_target(mkw_runtime_common)
 target_compile_features(mkw_runtime_common PRIVATE cxx_std_20)
 target_compile_definitions(mkw_runtime_common PRIVATE
     SDL_MAIN_HANDLED
-    _DISABLE_STRING_ANNOTATION _DISABLE_VECTOR_ANNOTATION)
+    _DISABLE_STRING_ANNOTATION _DISABLE_VECTOR_ANNOTATION
+    $<$<PLATFORM_ID:Darwin,iOS>:_XOPEN_SOURCE>)
 target_link_libraries(mkw_runtime_common PRIVATE
     aurora::gx aurora::pad aurora::si aurora::vi aurora::mtx)
 target_link_libraries(mkw_runtime_common PRIVATE mkw::pugixml mkw::toml11 mkw::cryptopp)
-target_link_libraries(mkw_runtime_common PRIVATE shell32 windowsapp)
+target_link_libraries(mkw_runtime_common PRIVATE "-framework Foundation")
 if(MKW_CPPWINRT_INCLUDE_DIR)
     if(NOT EXISTS "${MKW_CPPWINRT_INCLUDE_DIR}/winrt/base.h")
         message(FATAL_ERROR
@@ -127,7 +128,7 @@ mkw_apply_common_compile_options(mkw_runtime_common)
 # check from a C initializer so an unsupported machine gets a readable error
 # instead of an illegal-instruction crash. Excluded from the unity build and the
 # precompiled header because both are produced with the owning target's flags.
-add_library(mkw_cpu_baseline OBJECT "${MKW_CPU_BASELINE_SOURCE}")
+add_library(mkw_cpu_baseline OBJECT "${MKW_RUNTIME_SOURCE_DIR}/src/apple/host_cpu_baseline_stub.cpp")
 target_compile_features(mkw_cpu_baseline PRIVATE cxx_std_17)
 set_target_properties(mkw_cpu_baseline PROPERTIES UNITY_BUILD OFF)
 target_compile_options(mkw_cpu_baseline PRIVATE -w)
@@ -205,10 +206,12 @@ function(mkw_configure_product target)
     endif()
 
     target_link_libraries(${target} PRIVATE
-        dbghelp user32 winmm ws2_32 iphlpapi secur32 crypt32 windowsapp setupapi winusb)
+        "-framework Foundation" "-framework CoreAudio" "-framework AudioToolbox"
+        "-framework Security")
 
-    set_target_properties(${target} PROPERTIES WIN32_EXECUTABLE TRUE)
-    foreach(runtime_dll libc++.dll libunwind.dll)
+    if(WIN32)
+      set_target_properties(${target} PROPERTIES WIN32_EXECUTABLE TRUE)
+      foreach(runtime_dll libc++.dll libunwind.dll)
         execute_process(
             COMMAND "${CMAKE_CXX_COMPILER}" "--print-file-name=${runtime_dll}"
             OUTPUT_VARIABLE runtime_dll_path
@@ -223,7 +226,8 @@ function(mkw_configure_product target)
         add_custom_command(TARGET ${target} POST_BUILD
             COMMAND ${CMAKE_COMMAND} -E copy_if_different
                 "${runtime_dll_path}" $<TARGET_FILE_DIR:${target}>)
-    endforeach()
+      endforeach()
+    endif()
 
     set(MKW_WII_BOOTSTRAP_SOURCE_DIR "${MKW_RUNTIME_SOURCE_DIR}/assets/wii")
     if(NOT EXISTS "${MKW_WII_BOOTSTRAP_SOURCE_DIR}/shared2/wc24")
@@ -265,6 +269,33 @@ if(TARGET mkw_base_sensitive)
     target_sources(WiiCompiled PRIVATE $<TARGET_OBJECTS:mkw_base_sensitive>)
 endif()
 
+set(MKW_KARTPAD_REPO_ROOT "" CACHE PATH
+    "KartPad repository root used to embed Apple product-shell sources")
+if(APPLE AND NOT CMAKE_SYSTEM_NAME STREQUAL "iOS" AND MKW_KARTPAD_REPO_ROOT)
+    set(MKW_KARTPAD_MACOS_DIR "${MKW_KARTPAD_REPO_ROOT}/apple/macos")
+    set(MKW_KARTPAD_MACOS_SHELL "${MKW_KARTPAD_MACOS_DIR}/KartPadMacShell.mm")
+    set(MKW_KARTPAD_WIIMOTE_PAIRING "${MKW_KARTPAD_MACOS_DIR}/KartPadWiimotePairing.mm")
+    set(MKW_KARTPAD_MII_MANAGER "${MKW_KARTPAD_REPO_ROOT}/apple/shared/KartPadMiiManager.mm")
+    set(MKW_KARTPAD_MACOS_SOURCES "${MKW_KARTPAD_MACOS_SHELL}"
+        "${MKW_KARTPAD_WIIMOTE_PAIRING}" "${MKW_KARTPAD_MII_MANAGER}")
+    if(NOT EXISTS "${MKW_KARTPAD_MACOS_SHELL}")
+        message(FATAL_ERROR "Missing KartPad macOS shell: ${MKW_KARTPAD_MACOS_SHELL}")
+    endif()
+    if(NOT EXISTS "${MKW_KARTPAD_MII_MANAGER}")
+        message(FATAL_ERROR "Missing KartPad Mii manager: ${MKW_KARTPAD_MII_MANAGER}")
+    endif()
+    target_sources(WiiCompiled PRIVATE ${MKW_KARTPAD_MACOS_SOURCES})
+    target_include_directories(WiiCompiled PRIVATE
+        "${MKW_KARTPAD_MACOS_DIR}" "${MKW_KARTPAD_REPO_ROOT}/apple/shared"
+        "${MKW_KARTPAD_REPO_ROOT}/runtime/include")
+    set_source_files_properties("${MKW_KARTPAD_MACOS_SHELL}"
+        "${MKW_KARTPAD_WIIMOTE_PAIRING}" "${MKW_KARTPAD_MII_MANAGER}"
+        PROPERTIES COMPILE_OPTIONS "-fobjc-arc" SKIP_PRECOMPILE_HEADERS TRUE)
+    target_link_libraries(WiiCompiled PRIVATE
+        "-framework AppKit" "-framework UniformTypeIdentifiers"
+        "-framework IOBluetooth" "-framework IOKit")
+endif()
+
 if(MKW_HAVE_RETRO_REWIND)
     add_executable(RetroRewind "${MKW_RETRO_REWIND_PRODUCT_SOURCE}" ${MKW_RETRO_REGISTRATION_SOURCES})
     mkw_configure_product(RetroRewind)
@@ -276,17 +307,161 @@ if(MKW_HAVE_RETRO_REWIND)
     if(MKW_RETRO_BLOB_OBJECTS)
         target_sources(RetroRewind PRIVATE ${MKW_RETRO_BLOB_OBJECTS})
     endif()
+    if(APPLE AND NOT CMAKE_SYSTEM_NAME STREQUAL "iOS" AND
+       DEFINED MKW_KARTPAD_MACOS_SHELL AND MKW_KARTPAD_MACOS_SHELL)
+        target_sources(RetroRewind PRIVATE ${MKW_KARTPAD_MACOS_SOURCES})
+        target_include_directories(RetroRewind PRIVATE
+            "${MKW_KARTPAD_MACOS_DIR}" "${MKW_KARTPAD_REPO_ROOT}/apple/shared"
+            "${MKW_KARTPAD_REPO_ROOT}/runtime/include")
+        target_link_libraries(RetroRewind PRIVATE
+            "-framework AppKit" "-framework UniformTypeIdentifiers"
+            "-framework IOBluetooth" "-framework IOKit")
+    endif()
+    if(CMAKE_SYSTEM_NAME STREQUAL "iOS" AND
+       DEFINED MKW_KARTPAD_MOBILE_SOURCES AND MKW_KARTPAD_MOBILE_SOURCES)
+        # The base Apple patch also emits WiiCompiled as KartPad.app. Give the
+        # unselected base product its own bundle path so Ninja does not see two
+        # asset-catalog rules generating KartPad.app/Assets.xcassets.
+        set_target_properties(WiiCompiled PROPERTIES OUTPUT_NAME WiiCompiledBase)
+        target_sources(RetroRewind PRIVATE ${MKW_KARTPAD_MOBILE_SOURCES}
+            "${MKW_KARTPAD_ICON_CATALOG}" "${MKW_KARTPAD_PRIVACY_MANIFEST}")
+        target_include_directories(RetroRewind PRIVATE
+            "${MKW_KARTPAD_IOS_DIR}"
+            "${MKW_KARTPAD_MOBILE_DIR}"
+            "${MKW_KARTPAD_SHARED_DIR}"
+            "${MKW_KARTPAD_SUNPAD_DIR}"
+            "${MKW_KARTPAD_REPO_ROOT}/runtime/include"
+            "${MKW_KARTPAD_DISCIO_SOURCE_DIR}/Source/Core"
+            "${MKW_KARTPAD_DISCIO_SOURCE_DIR}/Externals/fmt/fmt/include"
+            "${MKW_KARTPAD_DISCIO_SOURCE_DIR}/Externals/minizip-ng/minizip-ng"
+            "${CMAKE_CURRENT_LIST_DIR}/../third_party/kartpad-profile")
+        target_link_options(RetroRewind PRIVATE "-ObjC")
+        target_link_libraries(RetroRewind PRIVATE
+            ${MKW_KARTPAD_DISCIO_ARCHIVES}
+            "-framework UIKit" "-framework CoreGraphics" "-framework QuartzCore"
+            "-framework Metal" "-framework GameController"
+            "-framework CoreMotion" "-framework UniformTypeIdentifiers"
+            "-framework SystemConfiguration" "-framework CoreFoundation"
+            "-framework CoreServices" "-framework Foundation" "-framework SafariServices"
+            "-lcompression" "-lresolv")
+        set_target_properties(RetroRewind PROPERTIES
+            OUTPUT_NAME KartPad
+            MACOSX_BUNDLE TRUE
+            MACOSX_BUNDLE_INFO_PLIST "${MKW_KARTPAD_IOS_DIR}/RuntimeInfo.plist"
+            XCODE_ATTRIBUTE_ARCHS arm64
+            XCODE_ATTRIBUTE_ASSETCATALOG_COMPILER_APPICON_NAME AppIcon
+            XCODE_ATTRIBUTE_CLANG_CXX_LANGUAGE_STANDARD "c++20"
+            XCODE_ATTRIBUTE_CURRENT_PROJECT_VERSION 3
+            XCODE_ATTRIBUTE_GENERATE_INFOPLIST_FILE NO
+            XCODE_ATTRIBUTE_IPHONEOS_DEPLOYMENT_TARGET 16.0
+            XCODE_ATTRIBUTE_MARKETING_VERSION 0.2.0
+            XCODE_ATTRIBUTE_PRODUCT_BUNDLE_IDENTIFIER dev.kartpad.app
+            XCODE_ATTRIBUTE_SUPPORTED_PLATFORMS "iphonesimulator iphoneos"
+            XCODE_ATTRIBUTE_SUPPORTS_MACCATALYST NO
+            XCODE_ATTRIBUTE_TARGETED_DEVICE_FAMILY "1,2")
+    endif()
     add_custom_target(mkw_release DEPENDS WiiCompiled RetroRewind)
 else()
     add_custom_target(mkw_release DEPENDS WiiCompiled)
     message(STATUS "RetroRewind target disabled (run translate-mod and emit-build-shards)")
 endif()
 
+if(MKW_HAVE_RETRO_REWIND)
+    if(ANDROID)
+        add_library(KartPadDual SHARED
+            "${MKW_KARTPAD_DUAL_PRODUCT_SOURCE}"
+            ${MKW_BASE_REGISTRATION_SOURCES}
+            ${MKW_RETRO_REGISTRATION_SOURCES})
+        set_target_properties(KartPadDual PROPERTIES OUTPUT_NAME main)
+    else()
+        add_executable(KartPadDual
+            "${MKW_KARTPAD_DUAL_PRODUCT_SOURCE}"
+            ${MKW_BASE_REGISTRATION_SOURCES}
+            ${MKW_RETRO_REGISTRATION_SOURCES})
+    endif()
+    mkw_configure_product(KartPadDual)
+    if(ANDROID)
+        target_precompile_headers(KartPadDual PRIVATE
+            "${MKW_RUNTIME_SOURCE_DIR}/include/mkw_pch.h")
+    else()
+        target_precompile_headers(KartPadDual REUSE_FROM WiiCompiled)
+    endif()
+    if(TARGET mkw_base_sensitive)
+        target_sources(KartPadDual PRIVATE $<TARGET_OBJECTS:mkw_base_sensitive>)
+    endif()
+    if(TARGET mkw_retro_sensitive)
+        target_sources(KartPadDual PRIVATE $<TARGET_OBJECTS:mkw_retro_sensitive>)
+    endif()
+    target_sources(KartPadDual PRIVATE $<TARGET_OBJECTS:mkw_retro_rewind_functions>)
+    if(MKW_RETRO_BLOB_OBJECTS)
+        target_sources(KartPadDual PRIVATE ${MKW_RETRO_BLOB_OBJECTS})
+    endif()
+    if(APPLE AND NOT CMAKE_SYSTEM_NAME STREQUAL "iOS" AND
+       DEFINED MKW_KARTPAD_MACOS_SHELL AND MKW_KARTPAD_MACOS_SHELL)
+        target_sources(KartPadDual PRIVATE ${MKW_KARTPAD_MACOS_SOURCES})
+        target_include_directories(KartPadDual PRIVATE
+            "${MKW_KARTPAD_MACOS_DIR}" "${MKW_KARTPAD_REPO_ROOT}/apple/shared"
+            "${MKW_KARTPAD_REPO_ROOT}/runtime/include"
+            "${CMAKE_CURRENT_LIST_DIR}/../third_party/kartpad-profile")
+        target_compile_definitions(KartPadDual PRIVATE KARTPAD_RUNTIME_PRODUCT_DUAL=1)
+        target_link_libraries(KartPadDual PRIVATE
+            "-framework AppKit" "-framework UniformTypeIdentifiers"
+            "-framework IOBluetooth" "-framework IOKit")
+    endif()
+    if(CMAKE_SYSTEM_NAME STREQUAL "iOS" AND
+       DEFINED MKW_KARTPAD_MOBILE_SOURCES AND MKW_KARTPAD_MOBILE_SOURCES)
+        set_target_properties(WiiCompiled PROPERTIES OUTPUT_NAME WiiCompiledBase)
+        set_target_properties(RetroRewind PROPERTIES OUTPUT_NAME RetroRewindStandalone)
+        target_sources(KartPadDual PRIVATE ${MKW_KARTPAD_MOBILE_SOURCES}
+            "${MKW_KARTPAD_ICON_CATALOG}" "${MKW_KARTPAD_PRIVACY_MANIFEST}")
+        target_include_directories(KartPadDual PRIVATE
+            "${MKW_KARTPAD_IOS_DIR}"
+            "${MKW_KARTPAD_MOBILE_DIR}"
+            "${MKW_KARTPAD_SHARED_DIR}"
+            "${MKW_KARTPAD_SUNPAD_DIR}"
+            "${MKW_KARTPAD_REPO_ROOT}/runtime/include"
+            "${MKW_KARTPAD_DISCIO_SOURCE_DIR}/Source/Core"
+            "${MKW_KARTPAD_DISCIO_SOURCE_DIR}/Externals/fmt/fmt/include"
+            "${MKW_KARTPAD_DISCIO_SOURCE_DIR}/Externals/minizip-ng/minizip-ng"
+            "${CMAKE_CURRENT_LIST_DIR}/../third_party/kartpad-profile")
+        target_link_options(KartPadDual PRIVATE "-ObjC")
+        target_link_libraries(KartPadDual PRIVATE
+            ${MKW_KARTPAD_DISCIO_ARCHIVES}
+            "-framework UIKit" "-framework CoreGraphics" "-framework QuartzCore"
+            "-framework Metal" "-framework GameController"
+            "-framework CoreMotion" "-framework UniformTypeIdentifiers"
+            "-framework SystemConfiguration" "-framework CoreFoundation"
+            "-framework CoreServices" "-framework Foundation" "-framework SafariServices"
+            "-lcompression" "-lresolv")
+        set_target_properties(KartPadDual PROPERTIES
+            OUTPUT_NAME KartPad
+            MACOSX_BUNDLE TRUE
+            MACOSX_BUNDLE_INFO_PLIST "${MKW_KARTPAD_IOS_DIR}/RuntimeInfo.plist"
+            XCODE_ATTRIBUTE_ARCHS arm64
+            XCODE_ATTRIBUTE_ASSETCATALOG_COMPILER_APPICON_NAME AppIcon
+            XCODE_ATTRIBUTE_CLANG_CXX_LANGUAGE_STANDARD "c++20"
+            XCODE_ATTRIBUTE_CURRENT_PROJECT_VERSION 43
+            XCODE_ATTRIBUTE_GENERATE_INFOPLIST_FILE NO
+            XCODE_ATTRIBUTE_IPHONEOS_DEPLOYMENT_TARGET 16.0
+            XCODE_ATTRIBUTE_MARKETING_VERSION 0.4.21
+            XCODE_ATTRIBUTE_PRODUCT_BUNDLE_IDENTIFIER dev.kartpad.app
+            XCODE_ATTRIBUTE_SUPPORTED_PLATFORMS "iphonesimulator iphoneos"
+            XCODE_ATTRIBUTE_SUPPORTS_MACCATALYST NO
+            XCODE_ATTRIBUTE_TARGETED_DEVICE_FAMILY "1,2")
+    endif()
+    add_dependencies(mkw_release KartPadDual)
+endif()
+
 set(MKW_ALL_BUILD_TARGETS
     mkw_runtime_common mkw_base_shared mkw_base_sensitive mkw_retro_sensitive
-    mkw_retro_rewind_functions WiiCompiled RetroRewind)
+    mkw_retro_rewind_functions WiiCompiled RetroRewind KartPadDual)
 foreach(target IN LISTS MKW_ALL_BUILD_TARGETS)
     if(TARGET ${target})
-        target_compile_options(${target} PRIVATE -march=x86-64-v3)
+        if(CMAKE_SYSTEM_NAME STREQUAL "tvOS")
+            target_compile_options(${target} PRIVATE
+                "SHELL:-mcpu=generic -Xclang -target-feature -Xclang -rcpc")
+        else()
+            target_compile_options(${target} PRIVATE -mcpu=apple-m2)
+        endif()
     endif()
 endforeach()

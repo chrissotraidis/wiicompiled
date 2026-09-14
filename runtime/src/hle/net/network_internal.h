@@ -138,6 +138,9 @@ struct WiiSocket {
     // fd is recycled, so a new socket reports its own failures again.
     int32_t lastLoggedSendError = 0;
     int32_t lastLoggedRecvError = 0;
+    uint64_t localTestUdpSendCalls = 0;
+    uint64_t localTestUdpRecvCalls = 0;
+    uint64_t localTestUdpPacketsReceived = 0;
 };
 
 extern std::array<WiiSocket, kWiiSocketMax> g_sockets;
@@ -188,6 +191,10 @@ enum NetIoctl {
 
 // network_core.cpp
 bool RetroRewindProfileActive();
+bool LocalWfcTraceEnabled();
+void LocalWfcTrace(const char* format, ...);
+std::string RoutedWfcDnsNode(std::string_view requestedNode);
+uint16_t RoutedWfcConnectPort(uint16_t requestedPort);
 const std::array<uint8_t, 6>& RuntimeMacAddress();
 uint64_t RuntimeGeneratedUserId();
 void ZeroMemoryRange(uint32_t addr, uint32_t size);

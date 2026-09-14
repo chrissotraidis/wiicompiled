@@ -385,6 +385,16 @@ SDL_JoystickID add_controller(SDL_JoystickID which) noexcept {
     g_GameControllers[instance] = controller;
     ensure_player_index(g_GameControllers[instance]);
     apply_port_preferences();
+#if defined(SDL_PLATFORM_MACOS)
+    // First-use convenience only: never override a saved assignment or None.
+    if (g_portPreferences[0].state == PortPreferenceState::Unset &&
+        get_controller_for_player(0) == nullptr) {
+      assign_player_index(g_GameControllers[instance], 0);
+      persist_controller_for_player(0, &g_GameControllers[instance]);
+    }
+#endif
+    Log.info("Controller connected: {} (instance {}, player {})", SDL_GetGamepadName(ctrl),
+             instance, player_index(instance) + 1);
     return instance;
   }
 
@@ -406,6 +416,7 @@ bool refresh_controller(SDL_JoystickID instance) noexcept {
 
 void remove_controller(Uint32 instance) noexcept {
   if (auto it = g_GameControllers.find(instance); it != g_GameControllers.end()) {
+    Log.info("Controller disconnected: instance {}", instance);
     SDL_CloseGamepad(it->second.m_controller);
     g_GameControllers.erase(it);
     apply_port_preferences();

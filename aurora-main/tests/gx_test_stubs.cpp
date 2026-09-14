@@ -25,6 +25,7 @@
 #include <fmt/format.h>
 
 namespace {
+aurora::Module Log("aurora::gx::test");
 aurora::Vec2<uint32_t> s_logicalFbSize{640, 480};
 aurora::Vec2<uint32_t> s_renderTargetSize{640, 480};
 uint32_t s_currentFrame = 0;
@@ -59,6 +60,7 @@ void Module::show_fatal_dialog(const char*, std::string_view) noexcept {}
 } // namespace aurora
 
 namespace aurora::window {
+SDL_Window* get_sdl_window() { return nullptr; }
 void set_present_surface_fill(bool) {}
 } // namespace aurora::window
 

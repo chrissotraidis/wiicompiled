@@ -12,6 +12,7 @@ struct CpuContext;
 namespace RecompMod {
 
 using InitializerFn = void (*)();
+using ProfileInitializerFn = void (*)();
 
 struct MemoryReservation {
     uint32_t start = 0;
@@ -67,6 +68,12 @@ void RunMemoryInitializers();
 void RegisterPostRelInitializer(InitializerFn fn);
 void RunPostRelInitializers();
 
+// Generated mod products queue their registration behind a profile name so a
+// dual-product executable can link every profile without applying inactive
+// memory patches, overlays, or Riivolution settings.
+void RegisterProfileInitializer(std::string_view profile, ProfileInitializerFn fn);
+void ActivateProfile(std::string_view profile);
+
 void RegisterDvdOverlayRoot(std::string root);
 const std::vector<std::string>& DvdOverlayRoots();
 
@@ -88,6 +95,12 @@ void RegisterMemoryReservation(uint32_t start, uint32_t end, std::string name);
 const std::vector<MemoryReservation>& MemoryReservations();
 
 uint32_t CurrentTranslatedExecutionAddress() noexcept;
+
+// Validate the StaticR.rel section-table pointer before translated error
+// reporting dereferences it. A malformed or overwritten REL must be logged
+// and returned to the caller, not allowed to turn an error report into a
+// native flat-memory crash.
+bool TryGetRelReportSectionTable(uint32_t relAddress, uint32_t& tableAddress) noexcept;
 
 void RegisterExecutableRange(uint32_t start, uint32_t end, std::string name);
 bool HandleExecutableWrite(uint32_t address, size_t length, uint64_t value);

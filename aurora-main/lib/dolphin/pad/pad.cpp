@@ -1,3 +1,4 @@
+#include "dolphin/controller_binding.h"
 #include "../../input.hpp"
 #include "../../internal.hpp"
 #include <dolphin/pad.h>
@@ -359,19 +360,20 @@ const char* PADGetNameForControllerIndex(const u32 idx) {
 }
 
 void PADSetPortForIndex(const u32 idx, const u32 port) {
+  if (port >= PAD_MAX_CONTROLLERS) return;
   const auto* ctrl = __PADGetControllerForIndex(idx);
   if (ctrl == nullptr) {
     return;
   }
 
-  const int32_t oldPort = SDL_GetGamepadPlayerIndex(ctrl->m_controller);
+  const int32_t oldPort = aurora::input::player_index(ctrl->m_index);
   if (const auto* dest = aurora::input::get_controller_for_player(port); dest != nullptr && dest != ctrl) {
-    SDL_SetGamepadPlayerIndex(dest->m_controller, -1);
+    aurora::input::set_player_index(dest->m_index, -1);
   }
-  if (oldPort >= 0 && oldPort != port) {
+  if (oldPort >= 0 && oldPort != static_cast<int32_t>(port)) {
     aurora::input::persist_controller_for_player(oldPort, nullptr);
   }
-  SDL_SetGamepadPlayerIndex(ctrl->m_controller, static_cast<Sint32>(port));
+  aurora::input::set_player_index(ctrl->m_index, static_cast<Sint32>(port));
   aurora::input::persist_controller_for_player(port, ctrl);
 }
 
@@ -397,7 +399,7 @@ void PADClearPort(const u32 port) {
   if (ctrl == nullptr) {
     return;
   }
-  SDL_SetGamepadPlayerIndex(ctrl->m_controller, -1);
+  aurora::input::set_player_index(ctrl->m_index, -1);
 }
 
 // Secondary bindings live only in memory; the runtime re-applies them from its
@@ -747,7 +749,8 @@ u32 PADRead(PADStatus* status) {
       bool rightTriggerSet = false;
       std::ranges::for_each(controller->m_buttonMapping, [&controller, &i, &status, &leftTriggerSet,
                                                           &rightTriggerSet](const auto& mapping) {
-        if (SDL_GetGamepadButton(controller->m_controller, static_cast<SDL_GamepadButton>(mapping.nativeButton))) {
+        if (kartpad::binding::pressed(controller->m_controller, mapping.nativeButton,
+              controller->m_deadZones.leftTriggerActivationZone, controller->m_deadZones.rightTriggerActivationZone)) {
           status[i].button |= mapping.padButton;
         }
 
@@ -764,7 +767,8 @@ u32 PADRead(PADStatus* status) {
         if (mapping.nativeButton == PAD_NATIVE_BUTTON_INVALID) {
           return;
         }
-        if (SDL_GetGamepadButton(controller->m_controller, static_cast<SDL_GamepadButton>(mapping.nativeButton))) {
+        if (kartpad::binding::pressed(controller->m_controller, mapping.nativeButton,
+              controller->m_deadZones.leftTriggerActivationZone, controller->m_deadZones.rightTriggerActivationZone)) {
           status[i].button |= mapping.padButton;
         }
 
@@ -867,6 +871,8 @@ u32 PADRead(PADStatus* status) {
       }
       tl /= 128;
       tr /= 128;
+      if (leftTriggerSet) tl = 0;
+      if (rightTriggerSet) tr = 0;
 
       status[i].triggerLeft = static_cast<int8_t>(tl);
       status[i].triggerRight = static_cast<int8_t>(tr);

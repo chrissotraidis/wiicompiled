@@ -119,6 +119,7 @@ struct DeferredConnectWork {
     NativeSocket nativeFd = kInvalidSocket;
     uint64_t socketGeneration = 0;
     sockaddr_in peerAddress{};
+    uint16_t requestedPeerPort = 0;
     std::optional<int32_t> initialResult;
 };
 
@@ -233,7 +234,8 @@ static DeferredDnsCompletion ResolveDeferredDns(DeferredDnsWork work) {
     }
 
     addrinfo* nativeResults = nullptr;
-    const char* node = completion.work.node.empty() ? nullptr : completion.work.node.c_str();
+    const std::string routedNode = RoutedWfcDnsNode(completion.work.node);
+    const char* node = routedNode.empty() ? nullptr : routedNode.c_str();
     const char* service = completion.work.service.empty() ? nullptr : completion.work.service.c_str();
     const int gai = getaddrinfo(node, service, hintPtr, &nativeResults);
     if (gai != 0 || !nativeResults) {
@@ -452,6 +454,8 @@ static DeferredConnectPreparation PrepareDeferredConnect(
     work.nativeFd = socket->native;
     work.socketGeneration = socket->generation;
     work.peerAddress = ReadWiiSockAddr(inBuf + 8u);
+    work.requestedPeerPort = ntohs(work.peerAddress.sin_port);
+    work.peerAddress.sin_port = htons(RoutedWfcConnectPort(work.requestedPeerPort));
     work.timeout = NetworkPollContract::Timeout::FromMilliseconds(
         NetworkConnectContract::kGuestBlockingTimeoutMilliseconds);
     return DeferredConnectPreparation::Ready(std::move(work), -SO_EINVAL);
@@ -1044,7 +1048,7 @@ bool Network_HLE_ProcessCompletions(CpuContext* cpu) {
         if (result == 0) {
             if (DeferredConnectSocketIsStillValid(work)) {
                 WiiSocket& socket = g_sockets[work.wiiFd];
-                socket.peerPort = ntohs(work.peerAddress.sin_port);
+                socket.peerPort = work.requestedPeerPort;
                 socket.peerAddr = work.peerAddress;
                 socket.hasPeerAddr = true;
             } else {

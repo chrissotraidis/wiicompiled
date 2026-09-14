@@ -79,6 +79,9 @@ bool AudioBackend::EnsureInitializedLocked(uint32_t sampleRate, uint32_t channel
     m_sampleRate = sampleRate;
     m_channels = channels;
     m_initialized = true;
+    RT_LOG(RT_TAG_AUDIO) << "host playback active: " << sampleRate << " Hz, "
+                         << channels << " channels, gain=" << EffectiveGainLocked()
+                         << std::endl;
     return true;
 }
 
@@ -89,6 +92,10 @@ bool AudioBackend::Init(uint32_t sampleRate, uint32_t channels) {
 
 void AudioBackend::Shutdown() {
     std::lock_guard<std::mutex> lock(m_mutex);
+    if (m_queueChecks != 0) {
+        const int queued = m_stream ? SDL_GetAudioStreamQueued(m_stream) : -1;
+        LogQueueTelemetryLocked(queued, true);
+    }
     if (m_stream) {
         SDL_DestroyAudioStream(m_stream);
         m_stream = nullptr;
@@ -100,6 +107,14 @@ void AudioBackend::Shutdown() {
     m_sampleRate = 0;
     m_channels = 0;
     m_reportedDroppedBlock = false;
+    m_reportedAudibleBlock = false;
+    m_queueChecks = 0;
+    m_emptyQueueChecks = 0;
+    m_droppedBlocks = 0;
+    m_droppedBytes = 0;
+    m_submittedBytes = 0;
+    m_minQueuedBytes = -1;
+    m_maxQueuedBytes = 0;
     m_convertBuffer.clear();
 }
 
@@ -120,6 +135,12 @@ bool AudioBackend::QueueHasCapacityLocked(int incomingBytes) {
     if (queued < 0) {
         return true;
     }
+    ++m_queueChecks;
+    if (m_queueChecks > 1 && queued == 0) {
+        ++m_emptyQueueChecks;
+    }
+    m_minQueuedBytes = m_minQueuedBytes < 0 ? queued : std::min(m_minQueuedBytes, queued);
+    m_maxQueuedBytes = std::max(m_maxQueuedBytes, queued);
     const uint32_t maxQueued = QueueLimitBytesLocked();
     if (static_cast<uint64_t>(queued) + static_cast<uint64_t>(std::max(incomingBytes, 0)) > maxQueued) {
         // Match Dolphin's FIFO overflow behavior: preserve the continuous audio
@@ -132,9 +153,30 @@ bool AudioBackend::QueueHasCapacityLocked(int incomingBytes) {
             RT_LOG(RT_TAG_AUDIO) << "output queue full (" << queued << "/" << maxQueued
                       << " bytes); dropping blocks to preserve continuity" << std::endl;
         }
+        ++m_droppedBlocks;
+        m_droppedBytes += static_cast<uint64_t>(std::max(incomingBytes, 0));
+        LogQueueTelemetryLocked(queued);
         return false;
     }
+    LogQueueTelemetryLocked(queued);
     return true;
+}
+
+void AudioBackend::LogQueueTelemetryLocked(int queued, bool final) {
+    constexpr uint64_t reportEveryChecks = 8192;
+    if (!final && (m_queueChecks == 0 || (m_queueChecks % reportEveryChecks) != 0)) {
+        return;
+    }
+    RT_LOG(RT_TAG_AUDIO) << (final ? "final " : "")
+                         << "queue telemetry: checks=" << m_queueChecks
+                         << ", empty-before-push=" << m_emptyQueueChecks
+                         << ", dropped-blocks=" << m_droppedBlocks
+                         << ", dropped-bytes=" << m_droppedBytes
+                         << ", submitted-bytes=" << m_submittedBytes
+                         << ", queued=" << queued
+                         << ", observed-range=[" << m_minQueuedBytes << ","
+                         << m_maxQueuedBytes << "] bytes, limit="
+                         << QueueLimitBytesLocked() << " bytes" << std::endl;
 }
 
 bool AudioBackend::PushWiiAiSamplesBE16(const uint8_t* data, size_t bytes) {
@@ -176,6 +218,19 @@ bool AudioBackend::PushWiiAiSamplesBE16(const uint8_t* data, size_t bytes) {
         RT_LOG(RT_TAG_AUDIO) << "SDL_PutAudioStreamData failed: " << SDL_GetError() << std::endl;
         return false;
     }
+    m_submittedBytes += static_cast<uint64_t>(lenBytes);
+    if (!m_reportedAudibleBlock) {
+        const auto peak = std::max_element(
+            m_convertBuffer.begin(), m_convertBuffer.begin() + sampleCount,
+            [](int16_t a, int16_t b) { return std::abs(static_cast<int>(a)) < std::abs(static_cast<int>(b)); });
+        if (peak != m_convertBuffer.begin() + sampleCount && *peak != 0) {
+            m_reportedAudibleBlock = true;
+            RT_LOG(RT_TAG_AUDIO) << "non-silent PCM reached host playback: peak="
+                                 << std::abs(static_cast<int>(*peak))
+                                 << ", queued=" << SDL_GetAudioStreamQueued(m_stream)
+                                 << " bytes" << std::endl;
+        }
+    }
 
     return true;
 }
@@ -197,6 +252,20 @@ bool AudioBackend::PushSamplesLE16(const int16_t* samples, size_t sampleCount) {
     if (!SDL_PutAudioStreamData(m_stream, samples, lenBytes)) {
         RT_LOG(RT_TAG_AUDIO) << "SDL_PutAudioStreamData failed: " << SDL_GetError() << std::endl;
         return false;
+    }
+    m_submittedBytes += static_cast<uint64_t>(lenBytes);
+    if (!m_reportedAudibleBlock) {
+        int peak = 0;
+        for (size_t i = 0; i < sampleCount; ++i) {
+            peak = std::max(peak, std::abs(static_cast<int>(samples[i])));
+        }
+        if (peak != 0) {
+            m_reportedAudibleBlock = true;
+            RT_LOG(RT_TAG_AUDIO) << "non-silent PCM reached host playback: peak="
+                                 << peak << ", queued="
+                                 << SDL_GetAudioStreamQueued(m_stream) << " bytes"
+                                 << std::endl;
+        }
     }
 
     return true;

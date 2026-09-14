@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -17,6 +18,11 @@
 #include <utility>
 #include <vector>
 #include <toml.hpp>
+#ifdef __APPLE__
+#include <mach-o/dyld.h>
+#include <pwd.h>
+#include <unistd.h>
+#endif
 #ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -34,6 +40,7 @@ struct RuntimeUserConfig {
     std::optional<float> resolutionMultiplier;
     std::optional<std::string> graphicsApi;
     std::optional<std::string> displayMode;
+    std::optional<bool> vsync;
     std::optional<uint32_t> frameInterpolationFps;
     std::optional<bool> skipUnreadyPipelines;
     std::optional<bool> disableCopyFilter;
@@ -155,6 +162,15 @@ inline std::optional<std::filesystem::path> ExecutableDirectory() {
         }
         buffer.resize(buffer.size() * 2);
     }
+#elif defined(__APPLE__)
+    uint32_t size = 0;
+    _NSGetExecutablePath(nullptr, &size);
+    std::vector<char> buffer(size + 1, '\0');
+    if (_NSGetExecutablePath(buffer.data(), &size) != 0)
+        return std::nullopt;
+    std::error_code ec;
+    const auto canonical = std::filesystem::weakly_canonical(buffer.data(), ec);
+    return (ec ? std::filesystem::path(buffer.data()) : canonical).parent_path();
 #else
     return std::nullopt;
 #endif
@@ -197,8 +213,39 @@ inline std::filesystem::path ApplicationDataDirectory() {
         CoTaskMemFree(rawPath);
         return directory;
     }
+#elif defined(__APPLE__)
+    // A normal app bundle must never write saves, caches, configuration, or
+    // logs into its signed resources. HOME is container-aware for a future
+    // sandboxed build; the account database is a defensive non-sandboxed
+    // fallback for unusual launch environments that omit HOME.
+    if (const char* home = std::getenv("HOME"); home && *home) {
+        return std::filesystem::path(home) / "Library" / "Application Support" / "KartPad";
+    }
+    if (const passwd* account = getpwuid(getuid());
+        account && account->pw_dir && *account->pw_dir) {
+        return std::filesystem::path(account->pw_dir) / "Library" / "Application Support" / "KartPad";
+    }
 #endif
     return std::filesystem::current_path() / kApplicationDirectoryName;
+}
+
+inline std::filesystem::path CacheDataDirectory() {
+    if (const auto& portableRoot = PortableRootDirectory()) {
+        return *portableRoot / kPortableUserDataDirectoryName / "Cache";
+    }
+#ifdef __APPLE__
+    // Installed Apple apps keep regenerable renderer/texture caches out of
+    // durable Application Support. HOME is container-aware for a future
+    // sandboxed build; use the account database only when HOME is unavailable.
+    if (const char* home = std::getenv("HOME"); home && *home) {
+        return std::filesystem::path(home) / "Library" / "Caches" / "KartPad";
+    }
+    if (const passwd* account = getpwuid(getuid());
+        account && account->pw_dir && *account->pw_dir) {
+        return std::filesystem::path(account->pw_dir) / "Library" / "Caches" / "KartPad";
+    }
+#endif
+    return ApplicationDataDirectory() / "Cache";
 }
 
 inline std::filesystem::path ResolveConfigPath() {
@@ -364,6 +411,7 @@ inline RuntimeUserConfig ParseConfigDocument(const toml::value& document) {
             config.frameInterpolationFps = migrated;
         }
     }
+    config.vsync = FindConfigValue<bool>(document, "video", "vsync");
     config.skipUnreadyPipelines = FindConfigValue<bool>(document, "video", "skip_unready_pipelines");
     config.disableCopyFilter = FindConfigValue<bool>(document, "video", "disable_copy_filter");
     config.showFps = FindConfigValue<bool>(document, "video", "show_fps");
@@ -425,6 +473,9 @@ inline RuntimeUserConfig LoadConfigFile() {
 inline const RuntimeUserConfig& Get() {
     static RuntimeUserConfig config = LoadConfigFile();
     return config;
+}
+inline void Reload() {
+    const_cast<RuntimeUserConfig&>(Get()) = LoadConfigFile();
 }
 
 inline RuntimeUserConfig& Mutable() {

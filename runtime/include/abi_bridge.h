@@ -59,6 +59,7 @@ struct TranslatedFunctionInfo {
     void (*rawCpuInvoker)(CpuContext*) = nullptr;
     bool mustRemainDynamicallyDispatchable = true;
     FunctionKind kind = FunctionKind::BaseTranslated;
+    const char* profileName = nullptr;
 };
 
 struct RawDispatchRecord {
@@ -326,6 +327,7 @@ inline thread_local IndirectRawDispatchMemoEntry
 class TranslatedFunctionRegistry {
 public:
     static void Register(TranslatedFunctionInfo info);
+    static void SelectProfile(const char* profileName);
     static void Finalize();
     static inline bool IsLookupPublished() noexcept {
         return lookupPublished_.load(std::memory_order_acquire);
@@ -409,12 +411,16 @@ struct BulkTranslatedFunctionRecord {
     bool mustRemainDynamicallyDispatchable;
 };
 
-void RegisterBulkTranslatedFunctions(const BulkTranslatedFunctionRecord* records, size_t count);
+void RegisterBulkTranslatedFunctions(const char* profileName,
+                                     const BulkTranslatedFunctionRecord* records,
+                                     size_t count);
 
 class BulkTranslatedFunctionRegistrar {
 public:
-    BulkTranslatedFunctionRegistrar(const BulkTranslatedFunctionRecord* records, size_t count) {
-        RegisterBulkTranslatedFunctions(records, count);
+    BulkTranslatedFunctionRegistrar(const char* profileName,
+                                    const BulkTranslatedFunctionRecord* records,
+                                    size_t count) {
+        RegisterBulkTranslatedFunctions(profileName, records, count);
     }
 };
 

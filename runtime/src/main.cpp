@@ -59,6 +59,11 @@
 #include <dolphin/gx/GXAurora.h>
 #include <dolphin/vi.h>
 
+#if defined(__APPLE__)
+extern "C" void KartPadMacShellInstall(void);
+extern "C" bool KartPadMacShellPrepareGameData(void);
+#endif
+
 // Defined in `runtime/src/hle/vi.cpp` (used by GX/VI HLE).
 extern std::atomic_bool g_auroraFrameActive;
 extern "C" int g_gxFrameCount;
@@ -1170,6 +1175,29 @@ int RuntimeMain(int argc, char** argv) {
             throw std::invalid_argument("The game runtime does not accept command-line options; use Config.toml through the installed host.");
         }
         RuntimeConfigFile::LogLoadedConfig();
+#if defined(__APPLE__) && TARGET_OS_IOS
+        if (const char* requestedProfile = KartPadMobileSelectedRuntimeProfile()) {
+            const bool selected = std::string_view(requestedProfile) == "retro_rewind"
+                ? RuntimeProduct::Select(RuntimeProduct::Kind::RetroRewind)
+                : RuntimeProduct::Select(RuntimeProduct::Kind::BaseGame);
+            if (!selected) {
+                throw std::runtime_error(std::string("selected profile is not linked: ") + requestedProfile);
+            }
+        }
+#else
+        if (const char* requestedProfile = std::getenv("KARTPAD_RUNTIME_PROFILE")) {
+            const bool selected = std::string_view(requestedProfile) == "retro_rewind"
+                ? RuntimeProduct::Select(RuntimeProduct::Kind::RetroRewind)
+                : std::string_view(requestedProfile) == "base" &&
+                      RuntimeProduct::Select(RuntimeProduct::Kind::BaseGame);
+            if (!selected) {
+                throw std::runtime_error(std::string("selected profile is not linked: ") + requestedProfile);
+            }
+        }
+#endif
+        const char* activeProfile = RuntimeProduct::IsRetroRewind() ? "retro_rewind" : "base";
+        RecompMod::ActivateProfile(activeProfile);
+        TranslatedFunctionRegistry::SelectProfile(activeProfile);
         SystemBridge::Initialize();
         TranslatedFunctionRegistry::Finalize();
 
@@ -1177,9 +1205,11 @@ int RuntimeMain(int argc, char** argv) {
         // We use auto backend (or specific if needed) and set a default window size.
         // This is required for GX commands (like texture loading) to work.
         AuroraConfig auroraConfig = {};
+        // macOS opt-in presentation preference; changes apply on the next launch.
+        auroraConfig.vsync = RuntimeConfigFile::Get().vsync.value_or(false);
         auroraConfig.appName = RuntimeProduct::Active().displayName.data();
         const auto applicationDataDirectory = RuntimeConfigFile::ApplicationDataDirectory();
-        const auto rendererCacheDirectory = applicationDataDirectory / "Cache";
+        const auto rendererCacheDirectory = RuntimeConfigFile::CacheDataDirectory();
         std::error_code rendererPathError;
         std::filesystem::create_directories(rendererCacheDirectory, rendererPathError);
         if (rendererPathError) {
@@ -1333,6 +1363,10 @@ int RuntimeMain(int argc, char** argv) {
 }
 
 int main(int argc, char** argv) {
+#if defined(__APPLE__)
+    if (!KartPadMacShellPrepareGameData()) return 0;
+    KartPadMacShellInstall();
+#endif
     return RuntimeMain(argc, argv);
 }
 extern "C" bool g_dynamicAspectRatioEnabled = false;
