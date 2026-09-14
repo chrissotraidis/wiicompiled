@@ -10,4 +10,8 @@ const Descriptor& Active() noexcept {
     return descriptor;
 }
 
+bool Select(Kind kind) noexcept {
+    return kind == Kind::RetroRewind;
+}
+
 } // namespace RuntimeProduct

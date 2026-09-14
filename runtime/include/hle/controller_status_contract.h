@@ -51,6 +51,7 @@ inline constexpr int32_t kErrorNoController = -1;
 inline constexpr int32_t kErrorNotReady = -2;
 inline constexpr int32_t kErrorBadChannel = -6;
 inline constexpr int32_t kExtensionCore = 0;
+inline constexpr int32_t kExtensionClassic = 2;
 
 class State {
 public:
@@ -72,7 +73,8 @@ public:
         if (chan >= kChannelCount) {
             return kErrorBadChannel;
         }
-        return m_initialized ? kErrorNoController : kErrorNotReady;
+        return m_initialized && chan == 0 ? 0 :
+               (m_initialized ? kErrorNoController : kErrorNotReady);
     }
 
 private:

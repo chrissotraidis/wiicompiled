@@ -206,8 +206,15 @@ AuroraPresentTiming snapshot_present_timing() noexcept {
   }
   result.jitterMs = std::sqrt(result.jitterMs / static_cast<double>(milliseconds.size()));
   std::sort(milliseconds.begin(), milliseconds.end());
-  result.p95FrameTimeMs =
-      milliseconds[static_cast<size_t>(std::floor(static_cast<double>(milliseconds.size() - 1) * 0.95))];
+  const auto percentile = [&milliseconds](double fraction) {
+    const auto index = static_cast<size_t>(
+        std::floor(static_cast<double>(milliseconds.size() - 1) * fraction));
+    return milliseconds[index];
+  };
+  result.p50FrameTimeMs = percentile(0.50);
+  result.p95FrameTimeMs = percentile(0.95);
+  result.p99FrameTimeMs = percentile(0.99);
+  result.worstFrameTimeMs = milliseconds.back();
   return result;
 }
 
@@ -1183,6 +1190,7 @@ void encode_presentation_snapshot(const wgpu::CommandEncoder& encoder,
             .view = image.texture.view,
             .loadOp = wgpu::LoadOp::Clear,
             .storeOp = wgpu::StoreOp::Store,
+            .clearValue = {.r = 0.0, .g = 0.0, .b = 0.0, .a = 1.0},
         },
     };
     const wgpu::RenderPassDescriptor renderPassDescriptor{

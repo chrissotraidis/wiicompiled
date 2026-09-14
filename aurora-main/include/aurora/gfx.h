@@ -37,7 +37,10 @@ typedef struct {
   uint32_t sampleCount;
   double framesPerSecond;
   double averageFrameTimeMs;
+  double p50FrameTimeMs;
   double p95FrameTimeMs;
+  double p99FrameTimeMs;
+  double worstFrameTimeMs;
   double jitterMs;
   // framesPerSecond with duplicated presentation slots scaled out, so this is the rate of frames
   // that carried new motion. Equal to framesPerSecond when every slot replayed real interpolation.

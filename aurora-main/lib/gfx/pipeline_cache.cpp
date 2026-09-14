@@ -16,6 +16,10 @@
 #include <thread>
 #include <vector>
 
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#endif
+
 #include <SDL3/SDL_iostream.h>
 #include <absl/container/flat_hash_map.h>
 #include <absl/container/flat_hash_set.h>
@@ -1040,6 +1044,10 @@ static void build_synchronous_pipelines_for_frame() {
 }
 
 static size_t pipeline_worker_count() {
+#if defined(__APPLE__) && TARGET_OS_SIMULATOR
+  // Avoid an observed Metal Simulator compiler-scheduler crash under parallel submissions.
+  return 1;
+#endif
   const size_t logicalProcessors = std::thread::hardware_concurrency();
   if (logicalProcessors == 0) {
     return 1;
@@ -1177,7 +1185,7 @@ void initialize_pipeline_cache() {
       g_pipelineThreads.emplace_back(pipeline_worker);
     }
     Log.info("Enabled {} priority pipeline compilation workers ({} background prewarm)",
-             workerCount, MaxBackgroundPipelineWorkers);
+             workerCount, std::min(workerCount, MaxBackgroundPipelineWorkers));
   }
 
   load_pipeline_cache();

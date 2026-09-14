@@ -7,6 +7,13 @@
 #include <aurora/event.h>
 #include <dolphin/gx/GXAurora.h>
 
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#if TARGET_OS_IOS
+#include "kartpad_mobile_runtime_host.h"
+#endif
+#endif
+
 #include <cstdlib>
 #include <atomic>
 #include <chrono>
@@ -17,6 +24,8 @@
 
 extern "C" bool g_dynamicAspectRatioEnabled;
 void ConfigureMkwDynamicAspect(bool widescreen, uint32_t surfaceWidth, uint32_t surfaceHeight);
+void ConfigureMkwMobileAspectMode(int aspectMode, uint32_t surfaceWidth,
+                                  uint32_t surfaceHeight);
 void UpdateMkwDynamicAspectSurface(uint32_t surfaceWidth, uint32_t surfaceHeight);
 // Arms the "keep EGG::Frustum's projection scale" flag on every screen that
 // renders to a fixed-size offscreen target. Cheap and idempotent; called from
@@ -139,4 +148,7 @@ inline bool BeginAuroraFrame() {
 // Poll Aurora events and update cached window/framebuffer dimensions.
 inline void UpdateAuroraAndProcessEvents() {
     ProcessAuroraEvents(aurora_update());
+#if defined(__APPLE__) && TARGET_OS_IOS
+    KartPadMobileServiceMainMenu();
+#endif
 }

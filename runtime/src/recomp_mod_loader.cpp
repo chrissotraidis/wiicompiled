@@ -7,6 +7,7 @@
 #include <mutex>
 #include <optional>
 #include <sstream>
+#include <stdexcept>
 #include <filesystem>
 
 #include "memory.h"
@@ -22,6 +23,21 @@ struct ExecutableRange {
     uint32_t end = 0;
     std::string name;
 };
+
+struct ProfileInitializer {
+    std::string profile;
+    RecompMod::ProfileInitializerFn fn = nullptr;
+};
+
+std::vector<ProfileInitializer>& ProfileInitializers() {
+    static std::vector<ProfileInitializer> initializers;
+    return initializers;
+}
+
+std::string& ActiveProfile() {
+    static std::string profile;
+    return profile;
+}
 
 std::vector<RecompMod::InitializerFn>& MemoryInitializers() {
     static std::vector<RecompMod::InitializerFn> initializers;
@@ -211,6 +227,41 @@ std::atomic<uint8_t> g_executableWriteGuardPages[kExecutableWriteGuardPageCount]
 std::atomic<uint8_t> g_executableWriteGuardCoarsePages[kExecutableWriteGuardCoarsePageCount]{};
 std::atomic<uint8_t> g_executableWriteGuardMidPages[kExecutableWriteGuardMidPageCount]{};
 
+void RegisterProfileInitializer(std::string_view profile, ProfileInitializerFn fn) {
+    if (profile.empty() || !fn) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(ModMutex());
+    if (!ActiveProfile().empty()) {
+        throw std::runtime_error("mod profile initializer registered after activation");
+    }
+    ProfileInitializers().push_back({std::string(profile), fn});
+}
+
+void ActivateProfile(std::string_view profile) {
+    std::vector<ProfileInitializerFn> pending;
+    {
+        std::lock_guard<std::mutex> lock(ModMutex());
+        if (!ActiveProfile().empty()) {
+            if (ActiveProfile() != profile) {
+                throw std::runtime_error("cannot change the active mod profile after activation");
+            }
+            return;
+        }
+        ActiveProfile() = profile;
+        for (const auto& initializer : ProfileInitializers()) {
+            if (initializer.profile == profile) {
+                pending.push_back(initializer.fn);
+            }
+        }
+    }
+    for (auto* fn : pending) {
+        fn();
+    }
+    RT_LOG(RT_TAG_MOD) << "Activated profile '" << profile << "' with "
+                       << pending.size() << " deferred mod registration(s)" << std::endl;
+}
+
 void RegisterMemoryInitializer(InitializerFn fn) {
     if (!fn) {
         return;
@@ -354,6 +405,49 @@ const std::vector<MemoryReservation>& MemoryReservations() {
 
 uint32_t CurrentTranslatedExecutionAddress() noexcept {
     return g_currentTranslatedExecutionAddress;
+}
+
+bool TryGetRelReportSectionTable(uint32_t relAddress, uint32_t& tableAddress) noexcept {
+    tableAddress = 0;
+    // The generated report function reads offsets 0, 12, 16, 20, 24 and 28
+    // before it reaches the section-table loop. Validate the complete header
+    // and the guest-address arithmetic before any of those FlatRead32 calls.
+    if ((relAddress & 3u) != 0 ||
+        static_cast<uint64_t>(relAddress) + 32u > (uint64_t{1} << 32) ||
+        !Memory::Contains(relAddress, 32)) {
+        RT_LOG(RT_TAG_MOD) << "StaticR.rel report header is outside guest memory at 0x"
+                           << std::hex << std::uppercase << relAddress << std::dec << std::endl;
+        return false;
+    }
+
+    uint32_t sectionCount = 0;
+    uint32_t table = 0;
+    if (!Memory::TryRead32(relAddress + 12u, sectionCount) ||
+        !Memory::TryRead32(relAddress + 16u, table)) {
+        RT_LOG(RT_TAG_MOD) << "StaticR.rel report header could not be read at 0x"
+                           << std::hex << std::uppercase << relAddress << std::dec << std::endl;
+        return false;
+    }
+
+    // A zero-entry report never dereferences the table pointer.
+    if (sectionCount == 0) {
+        tableAddress = table;
+        return true;
+    }
+
+    const uint64_t tableBytes = static_cast<uint64_t>(sectionCount) * 8u;
+    if ((table & 3u) != 0 ||
+        static_cast<uint64_t>(table) + tableBytes > (uint64_t{1} << 32) ||
+        tableBytes > static_cast<uint64_t>(SIZE_MAX) ||
+        !Memory::Contains(table, static_cast<size_t>(tableBytes))) {
+        RT_LOG(RT_TAG_MOD) << "StaticR.rel report section table is outside guest memory: rel=0x"
+                           << std::hex << std::uppercase << relAddress << " table=0x"
+                           << table << " count=" << std::dec << sectionCount << std::endl;
+        return false;
+    }
+
+    tableAddress = table;
+    return true;
 }
 
 void RegisterExecutableRange(uint32_t start, uint32_t end, std::string name) {

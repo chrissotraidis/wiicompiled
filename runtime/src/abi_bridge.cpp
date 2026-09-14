@@ -8,6 +8,9 @@
 #include <iostream>
 #include <mutex>
 #include <sstream>
+#include <stdexcept>
+#include <string>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 #include "generated/RuntimeConfig.h"
@@ -61,6 +64,16 @@ std::vector<RawDispatchRecord>& DynamicRawDispatchEntries() {
 const StaticIndirectDispatchTable*& GeneratedIndirectDispatchTable() {
     static const StaticIndirectDispatchTable* table = nullptr;
     return table;
+}
+
+std::vector<const StaticIndirectDispatchTable*>& GeneratedIndirectDispatchTables() {
+    static std::vector<const StaticIndirectDispatchTable*> tables;
+    return tables;
+}
+
+std::string& SelectedProfileName() {
+    static std::string profile;
+    return profile;
 }
 
 std::unordered_map<uint32_t, std::vector<size_t>>& AddressEntries() {
@@ -143,7 +156,9 @@ bool IsSameRegistration(const TranslatedFunctionInfo& a, const TranslatedFunctio
     return a.address == b.address &&
            a.kind == b.kind &&
            EffectivePriority(a) == EffectivePriority(b) &&
-           a.moduleId == b.moduleId;
+           a.moduleId == b.moduleId &&
+           std::string_view(a.profileName ? a.profileName : "") ==
+               std::string_view(b.profileName ? b.profileName : "");
 }
 
 void RebuildIndicesLocked() {
@@ -162,6 +177,10 @@ void RebuildIndicesLocked() {
 
     for (size_t i = 0; i < entries.size(); ++i) {
         const auto& entry = entries[i];
+        if (entry.profileName &&
+            (SelectedProfileName().empty() || SelectedProfileName() != entry.profileName)) {
+            continue;
+        }
         addressEntries[entry.address].push_back(i);
         auto addressIt = addrIndex.find(entry.address);
         if (addressIt == addrIndex.end() || IsBetterCandidate(entry, entries[addressIt->second])) {
@@ -261,20 +280,36 @@ void RegisterStaticIndirectDispatchTable(const StaticIndirectDispatchTable* tabl
                               "A generated indirect-dispatch table was registered after the function registry was finalized.");
         std::abort();
     }
-    auto*& registered = GeneratedIndirectDispatchTable();
-    if (registered && registered != table) {
-        RT_LOG(RT_TAG_RUNTIME) << "ERROR: Multiple generated indirect dispatch profiles were linked" << std::endl;
-        ShowRuntimeFatalPopup("translated dispatch initialization failed",
-                              "Multiple generated indirect-dispatch profiles were linked into the same product.");
+    if (!table || !table->profileName || table->profileName[0] == '\0') {
+        RT_LOG(RT_TAG_RUNTIME) << "ERROR: Generated indirect dispatch table has no profile" << std::endl;
         std::abort();
     }
-    registered = table;
-    // Mirror into the header-visible atomic under the same lock, so the
-    // inlined miss path and this owning static can never disagree.
-    g_publishedStaticIndirectDispatchTable.store(table, std::memory_order_release);
+    auto& tables = GeneratedIndirectDispatchTables();
+    const auto duplicate = std::find_if(tables.begin(), tables.end(), [&](const auto* candidate) {
+        return std::string_view(candidate->profileName) == table->profileName;
+    });
+    if (duplicate != tables.end() && *duplicate != table) {
+        RT_LOG(RT_TAG_RUNTIME) << "ERROR: Duplicate generated indirect dispatch profile '"
+                               << table->profileName << "'" << std::endl;
+        std::abort();
+    }
+    if (duplicate == tables.end()) {
+        tables.push_back(table);
+    }
+    if (tables.size() == 1) {
+        GeneratedIndirectDispatchTable() = table;
+        SelectedProfileName() = table->profileName;
+        g_publishedStaticIndirectDispatchTable.store(table, std::memory_order_release);
+    } else {
+        GeneratedIndirectDispatchTable() = nullptr;
+        SelectedProfileName().clear();
+        g_publishedStaticIndirectDispatchTable.store(nullptr, std::memory_order_release);
+    }
 }
 
-void RegisterBulkTranslatedFunctions(const BulkTranslatedFunctionRecord* records, size_t count) {
+void RegisterBulkTranslatedFunctions(const char* profileName,
+                                     const BulkTranslatedFunctionRecord* records,
+                                     size_t count) {
     for (size_t i = 0; i < count; ++i) {
         const auto& record = records[i];
         TranslatedFunctionInfo info;
@@ -289,8 +324,31 @@ void RegisterBulkTranslatedFunctions(const BulkTranslatedFunctionRecord* records
         info.rawCpuInvoker = record.entry;
         info.mustRemainDynamicallyDispatchable = record.mustRemainDynamicallyDispatchable;
         info.kind = record.kind;
+        info.profileName = profileName;
         TranslatedFunctionRegistry::Register(std::move(info));
     }
+}
+
+void TranslatedFunctionRegistry::SelectProfile(const char* profileName) {
+    if (!profileName || profileName[0] == '\0') {
+        throw std::invalid_argument("translated function profile is empty");
+    }
+    std::lock_guard<std::mutex> lock(RegistryMutex());
+    if (RegistryFrozen().load(std::memory_order_acquire)) {
+        throw std::runtime_error("cannot change translated function profile after finalization");
+    }
+    const auto& tables = GeneratedIndirectDispatchTables();
+    const auto selected = std::find_if(tables.begin(), tables.end(), [&](const auto* table) {
+        return table && table->profileName && std::string_view(table->profileName) == profileName;
+    });
+    if (selected == tables.end()) {
+        throw std::runtime_error(std::string("translated function profile is not linked: ") + profileName);
+    }
+    SelectedProfileName() = profileName;
+    GeneratedIndirectDispatchTable() = *selected;
+    g_publishedStaticIndirectDispatchTable.store(*selected, std::memory_order_release);
+    RebuildIndicesLocked();
+    RT_LOG(RT_TAG_RUNTIME) << "Selected translated function profile '" << profileName << "'" << std::endl;
 }
 
 void TranslatedFunctionRegistry::Register(TranslatedFunctionInfo info) {
