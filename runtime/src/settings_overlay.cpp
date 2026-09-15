@@ -1074,7 +1074,7 @@ void RefreshHostSettings() noexcept {
                                          surfaceHeight);
         }
         const float resolutionScale =
-            std::clamp(settings.resolution_scale, 1.0f, 4.0f);
+            std::clamp(settings.resolution_scale, 0.5f, 4.0f);
         g_resolutionScale = resolutionScale;
         VISetFrameBufferScale(resolutionScale);
         RT_LOG(RT_TAG_CONFIG) << "android runtime aspectMode=" << aspectMode
