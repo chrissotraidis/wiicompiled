@@ -1,3 +1,5 @@
+#include "kartpad_draw_inputs.hpp"
+#include <chrono>
 #include "command_processor.hpp"
 
 #include "../gfx/common.hpp"
@@ -2080,6 +2082,47 @@ static const CachedPipelineState& resolve_pipeline_state(GXPrimitive prim, GXVtx
   return state;
 }
 
+// Opt-in CPU-side evidence from the actual submitted GX stream, including merged draws.
+static void kartpad_audit_draw(GXPrimitive prim, GXVtxFmt fmt, const uint8_t* vertices,
+                               uint16_t count, uint32_t stride, uint32_t bytes) {
+  static const bool enabled = [] {
+    const char* value = std::getenv("KARTPAD_RENDERER_VALIDATION");
+    return value && std::strcmp(value, "1") == 0;
+  }();
+  if (!enabled || g_gxState.vtxDesc[GX_VA_PNMTXIDX] != GX_DIRECT) return;
+  // Periodic windows cover scenes reached after startup. Sample every 128th
+  // eligible draw, no more than 2048 checks/window and 20 windows/launch.
+  using Clock = std::chrono::steady_clock;
+  static auto windowStart = Clock::now();
+  static unsigned window = 0, ordinal = 0, inspected = 0;
+  static kartpad::diagnostics::DrawReportBudget budget;
+  const auto now = Clock::now();
+  if (now-windowStart >= std::chrono::seconds(30)) {
+    if (window < 20) Log.info("KartPadDrawWindow window={} eligible={} inspected={} sampled_every=128 max_checks=2048 final={}", window, ordinal, inspected, window==19);
+    ++window; windowStart=now; ordinal=0; inspected=0; budget={};
+  }
+  if (window >= 20 || (++ordinal % 128) != 1 || inspected >= 2048) return;
+  ++inspected;
+  const auto selection = kartpad::diagnostics::inspect_matrix_selection(vertices, bytes, count, stride);
+  unsigned nonfinitePosition = 0;
+  unsigned nonfiniteNormal = 0;
+  for (unsigned slot = 0; slot < MaxPnMtx; ++slot) {
+    if ((selection.used_mask & (1u << slot)) == 0) continue;
+    nonfinitePosition += kartpad::diagnostics::count_nonfinite(
+        &g_gxState.pnMtx[slot].pos, sizeof(g_gxState.pnMtx[slot].pos));
+    nonfiniteNormal += kartpad::diagnostics::count_nonfinite(
+        &g_gxState.pnMtx[slot].nrm, sizeof(g_gxState.pnMtx[slot].nrm));
+  }
+  const auto& pipeline = resolve_pipeline_state(prim, fmt);
+  const bool anomaly = !selection.complete || selection.outside_palette || nonfinitePosition || nonfiniteNormal;
+  if (!budget.take(pipeline.configHash, anomaly)) return;
+  Log.info("KartPadDrawCheck window={} draw={} pipeline={:016x} anomaly={} vertices={} stride={} complete={} pn_mask={} pn_max_raw={} pn_outside={} pn_nonmultiple={} pos_nonfinite={} nrm_nonfinite={} postex_count={} nrm_count={} absolute={}",
+           window, ordinal, pipeline.configHash, anomaly, count, stride, selection.complete,
+           selection.used_mask, selection.max_raw, selection.outside_palette, selection.non_row_multiple,
+           nonfinitePosition, nonfiniteNormal, pipeline.shaderInfo.matrixLayout.postexCount,
+           pipeline.shaderInfo.matrixLayout.nrmCount, pipeline.shaderInfo.matrixLayout.absolutePosRegion);
+}
+
 bool submit_raw_draw(GXPrimitive prim, GXVtxFmt fmt, const uint8_t* vertices, uint16_t vtxCount,
                      uint32_t vertexBytes) {
   ZoneScoped;
@@ -2114,6 +2157,7 @@ bool submit_raw_draw(GXPrimitive prim, GXVtxFmt fmt, const uint8_t* vertices, ui
 
   // This entry point bypasses process(), so it owns the renderer lock itself.
   std::lock_guard gpuLock(aurora::renderer_gpu_mutex());
+  kartpad_audit_draw(prim, fmt, vertices, vtxCount, vtxSize, vertexBytes);
   const gfx::Range vertRange = gfx::push_verts(vertices, vertexBytes);
   const bool interpolationIdentityActive = frame_interpolation_identity_needed();
   const PnMtxUsage matrixUsage = interpolationIdentityActive
@@ -2153,6 +2197,7 @@ static bool handle_draw(u8 cmd, const u8* data, u32& pos, u32 size, bool bigEndi
 
   // Push raw vertex data to buffer
   const uint8_t* vertices = data + pos;
+  kartpad_audit_draw(prim, fmt, vertices, vtxCount, vtxSize, totalVtxBytes);
   gfx::Range vertRange = gfx::push_verts(vertices, totalVtxBytes);
   pos += totalVtxBytes;
 

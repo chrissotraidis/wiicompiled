@@ -317,6 +317,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "iOS" AND MKW_KARTPAD_REPO_ROOT)
     endforeach()
     set(MKW_KARTPAD_MOBILE_SOURCES
         "${MKW_KARTPAD_IOS_DIR}/KartPadRuntimeOverlayHost.mm"
+        "${MKW_KARTPAD_IOS_DIR}/KartPadSystemDiagnostics.mm"
         "${MKW_KARTPAD_SHARED_DIR}/KartPadMiiManager.mm"
         "${MKW_KARTPAD_IOS_DIR}/KartPadDiscExtractor.mm"
         "${MKW_KARTPAD_IOS_DIR}/KartPadDiscFormats.cpp"
@@ -374,7 +375,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "iOS" AND MKW_KARTPAD_REPO_ROOT)
         "-framework Metal" "-framework GameController"
         "-framework CoreMotion" "-framework UniformTypeIdentifiers"
         "-framework SystemConfiguration" "-framework CoreFoundation"
-        "-framework CoreServices" "-framework Foundation" "-framework SafariServices"
+        "-framework CoreServices" "-framework Foundation" "-framework SafariServices" "-framework MetricKit"
         "-lcompression" "-lresolv")
     set_target_properties(WiiCompiled PROPERTIES
         OUTPUT_NAME KartPad
@@ -439,7 +440,7 @@ if(MKW_HAVE_RETRO_REWIND)
             "-framework Metal" "-framework GameController"
             "-framework CoreMotion" "-framework UniformTypeIdentifiers"
             "-framework SystemConfiguration" "-framework CoreFoundation"
-            "-framework CoreServices" "-framework Foundation" "-framework SafariServices"
+            "-framework CoreServices" "-framework Foundation" "-framework SafariServices" "-framework MetricKit"
             "-lcompression" "-lresolv")
         set_target_properties(RetroRewind PROPERTIES
             OUTPUT_NAME KartPad
@@ -528,7 +529,7 @@ if(MKW_HAVE_RETRO_REWIND)
             "-framework Metal" "-framework GameController"
             "-framework CoreMotion" "-framework UniformTypeIdentifiers"
             "-framework SystemConfiguration" "-framework CoreFoundation"
-            "-framework CoreServices" "-framework Foundation" "-framework SafariServices"
+            "-framework CoreServices" "-framework Foundation" "-framework SafariServices" "-framework MetricKit"
             "-lcompression" "-lresolv")
         set_target_properties(KartPadDual PROPERTIES
             OUTPUT_NAME KartPad
@@ -537,10 +538,11 @@ if(MKW_HAVE_RETRO_REWIND)
             XCODE_ATTRIBUTE_ARCHS arm64
             XCODE_ATTRIBUTE_ASSETCATALOG_COMPILER_APPICON_NAME AppIcon
             XCODE_ATTRIBUTE_CLANG_CXX_LANGUAGE_STANDARD "c++20"
-            XCODE_ATTRIBUTE_CURRENT_PROJECT_VERSION 43
+            XCODE_ATTRIBUTE_CURRENT_PROJECT_VERSION 50
+            XCODE_ATTRIBUTE_KARTPAD_DIAGNOSTIC_CANDIDATE YES
             XCODE_ATTRIBUTE_GENERATE_INFOPLIST_FILE NO
             XCODE_ATTRIBUTE_IPHONEOS_DEPLOYMENT_TARGET 16.0
-            XCODE_ATTRIBUTE_MARKETING_VERSION 0.4.21
+            XCODE_ATTRIBUTE_MARKETING_VERSION 0.4.25
             XCODE_ATTRIBUTE_PRODUCT_BUNDLE_IDENTIFIER dev.kartpad.app
             XCODE_ATTRIBUTE_SUPPORTED_PLATFORMS "iphonesimulator iphoneos"
             XCODE_ATTRIBUTE_SUPPORTS_MACCATALYST NO

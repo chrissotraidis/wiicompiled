@@ -1167,10 +1167,15 @@ int RuntimeMain(int argc, char** argv) {
     WindowsTimerResolutionGuard timerResolutionGuard;
 #endif
     InitializeProcessTranscript(argc, argv);
+    // Mobile OS crash collectors must see the original fatal signal. The desktop
+    // handler allocates, locks and calls _Exit, which can deadlock and suppress
+    // Android tombstones / Apple native crash reports. Keep the C++ default
+    // terminate -> abort path on mobile; ordinary explicit exits keep atexit.
+#if !defined(__ANDROID__) && !(defined(__APPLE__) && TARGET_OS_IOS)
     std::signal(SIGABRT, AbortSignalHandler);
-    // Install exit/terminate handlers to ensure we get crash info
-    std::atexit(AtExitHandler);
     std::set_terminate(TerminateHandler);
+#endif
+    std::atexit(AtExitHandler);
     
     std::string currentEntryLabel;
 

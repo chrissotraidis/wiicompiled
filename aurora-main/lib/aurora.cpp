@@ -1,3 +1,4 @@
+#include "kartpad_function_timing.h"
 #include <aurora/aurora.h>
 
 #ifdef AURORA_ENABLE_GX
@@ -1584,6 +1585,7 @@ void record_frame_telemetry() {
 // One complete frame-worker cycle. The scene encode only leaves the renderer mutex when
 // interpolation actually inserts slots; otherwise both phases publish together.
 bool run_frame_worker_cycle(gfx::SealedFrame& sealedFrame) noexcept {
+  KARTPAD_FUNCTION_SCOPE("aurora::run_frame_worker_cycle");
   ZoneScopedN("Frame worker cycle");
   webgpu::fail_if_device_lost();
   SealedFrameContext ctx;
@@ -1652,6 +1654,7 @@ bool run_frame_worker_cycle(gfx::SealedFrame& sealedFrame) noexcept {
 // Synchronous frame submission: seal, encode and present inline on the calling thread. Used when
 // the frame worker is disabled (RenderDoc captures) and on the boot path.
 void end_frame_impl(bool pumpEvents, bool drainFifo) noexcept {
+  KARTPAD_FUNCTION_SCOPE("aurora::end_frame_impl");
   ZoneScoped;
 #ifdef AURORA_ENABLE_GX
   webgpu::fail_if_device_lost();
