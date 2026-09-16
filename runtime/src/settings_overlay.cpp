@@ -1,4 +1,5 @@
 #include "settings_overlay.h"
+extern "C" float KartPadMobileFpsOverlayScale();
 #include "wup028_adapter.h"
 #include "audio_backend.h"
 #include "controller_mapping_wizard.h"
@@ -801,6 +802,8 @@ void DrawFpsOverlay() {
     if (ImGui::Begin("FPS Overlay", nullptr, kFlags)) {
 #if defined(__ANDROID__)
         ImGui::SetWindowFontScale(g_androidFpsOverlayScale);
+#elif defined(__APPLE__) && TARGET_OS_IOS
+        ImGui::SetWindowFontScale(KartPadMobileFpsOverlayScale());
 #endif
         if (presentTiming.sampleCount == 0) {
             ImGui::TextUnformatted("FPS: --");
