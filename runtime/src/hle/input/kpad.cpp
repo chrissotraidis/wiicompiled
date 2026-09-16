@@ -705,12 +705,14 @@ kartpad::android::ClassicInputState ReadAndroidClassicInput(uint32_t chan)
 
     raw.connected = snapshot.connected;
     raw.buttons = kartpad::android::ApplyControllerButtonMapping(
-        snapshot.buttons,
+        snapshot.buttons |
+            (snapshot.leftTrigger >= kartpad::android::kTriggerThreshold ? kartpad::android::kGamepadLeftTrigger : 0u) |
+            (snapshot.rightTrigger >= kartpad::android::kTriggerThreshold ? kartpad::android::kGamepadRightTrigger : 0u),
         kartpad::android::ReadControllerButtonMapping());
     raw.left_x = snapshot.leftX;
     raw.left_y = snapshot.leftY;
-    raw.left_trigger = snapshot.leftTrigger;
-    raw.right_trigger = snapshot.rightTrigger;
+    raw.left_trigger = 0; // Trigger presses are part of the remapping above.
+    raw.right_trigger = 0;
     return MapGamepadToClassic(raw);
 }
 

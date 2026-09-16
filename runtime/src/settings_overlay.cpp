@@ -2,6 +2,7 @@
 #include <android/log.h>
 #include <time.h>
 extern "C" void KartPadAndroidLogMetric(const char*, const char*, ...);
+extern "C" void KartPadLogDisplayListCacheMetrics();
 #include "wup028_adapter.h"
 #include "audio_backend.h"
 #include "controller_mapping_wizard.h"
@@ -792,13 +793,19 @@ void DrawFpsOverlay() {
         // Bounded, content-free diagnostics remain available in release builds.
         KartPadAndroidLogMetric("KartPadPerf",
                 "frames=%llu fps=%.2f effective=%.2f p50_ms=%.2f p95_ms=%.2f "
-                "p99_ms=%.2f pipelines_queued=%u pipelines_created=%u",
+                "p99_ms=%.2f pipelines_queued=%u pipelines_created=%u "
+                "window_samples=%u worst_ms=%.2f jitter_ms=%.2f resolution_scale=%.2f",
                 static_cast<unsigned long long>(presentTiming.totalPresentCount),
                 presentTiming.framesPerSecond, presentTiming.effectiveFramesPerSecond,
                 presentTiming.p50FrameTimeMs, presentTiming.p95FrameTimeMs,
                 presentTiming.p99FrameTimeMs,
                 stats != nullptr ? stats->queuedPipelines : 0,
-                stats != nullptr ? stats->createdPipelines : 0);
+                stats != nullptr ? stats->createdPipelines : 0,
+                presentTiming.sampleCount, presentTiming.worstFrameTimeMs,
+                presentTiming.jitterMs, g_resolutionScale);
+        KartPadLogDisplayListCacheMetrics();
+        const uint64_t intervalPresents =
+            presentTiming.totalPresentCount - lastTelemetryPresentCount;
         lastTelemetryPresentCount = presentTiming.totalPresentCount;
         // Once per telemetry interval, not per instruction/frame. CPU occupancy
         // distinguishes producer work from off-thread/GPU/presentation waiting;
@@ -811,9 +818,13 @@ void DrawFpsOverlay() {
             const double cpuSeconds = cpu.tv_sec + cpu.tv_nsec * 1e-9;
             if (previousWall > 0 && wallSeconds > previousWall)
                 KartPadAndroidLogMetric("KartPadCPU",
-                    "main_thread_occupancy_pct=%.1f interval_s=%.3f",
+                    "main_thread_occupancy_pct=%.1f interval_s=%.3f "
+                    "interval_presents=%llu main_cpu_ms_per_present=%.3f",
                     100.0 * (cpuSeconds - previousCpu) / (wallSeconds - previousWall),
-                    wallSeconds - previousWall);
+                    wallSeconds - previousWall,
+                    static_cast<unsigned long long>(intervalPresents),
+                    intervalPresents > 0 ?
+                        1000.0 * (cpuSeconds - previousCpu) / intervalPresents : 0.0);
             previousWall = wallSeconds;
             previousCpu = cpuSeconds;
         }

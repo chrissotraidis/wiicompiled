@@ -486,9 +486,18 @@ struct DlScanCacheRecord {
     std::vector<uint8_t> flattened{};
 };
 
+struct DlScanCacheFrontEntry {
+    uint64_t key = 0;
+    DlScanCacheRecord* record = nullptr;
+};
+
 struct DlScanCacheState {
+    // unordered_map rehash preserves element addresses. Clear is the only
+    // removal path and must invalidate this front cache before freeing records.
+    std::array<DlScanCacheFrontEntry, 256> front{};
     std::unordered_map<uint64_t, DlScanCacheRecord> entries{};
     size_t storedCommandBytes = 0;
+    uint64_t probes = 0, frontHits = 0, validatedHits = 0, evictions = 0;
 };
 
 static uint64_t HashScanLayoutState() {
@@ -544,9 +553,19 @@ static DlScanCacheProbe ProbeDlScanCache(const uint8_t* list, uint32_t listAddr,
 
     auto& s_cache = DlScanCache();
     const uint64_t key = DlScanCacheKey(listAddr, nbytes, layoutHash);
-    const auto it = s_cache.entries.find(key);
-    if (it != s_cache.entries.end()) {
-        auto& record = it->second;
+    ++s_cache.probes;
+    auto& front = s_cache.front[(key ^ (key >> 32)) & 255u];
+    DlScanCacheRecord* found = front.key == key ? front.record : nullptr;
+    if (found != nullptr) ++s_cache.frontHits;
+    if (found == nullptr) {
+        const auto it = s_cache.entries.find(key);
+        if (it != s_cache.entries.end()) {
+            found = &it->second;
+            front = {key, found};
+        }
+    }
+    if (found != nullptr) {
+        auto& record = *found;
         const auto& entry = record.result;
         const bool identityMatches = entry.listAddr == CanonicalizeGxMainRamAddress(listAddr) &&
                                      entry.nbytes == nbytes && entry.layoutHash == layoutHash;
@@ -570,6 +589,7 @@ static DlScanCacheProbe ProbeDlScanCache(const uint8_t* list, uint32_t listAddr,
             }
         }
     }
+    if (probe.record != nullptr) ++s_cache.validatedHits;
     return probe;
 }
 
@@ -591,6 +611,8 @@ static void StoreDlScanCache(uint32_t listAddr, uint32_t nbytes, uint64_t layout
                                  cpWrites.size() * sizeof(DlCpWrite);
     if ((!replacing && s_cache.entries.size() >= kDlScanCacheMaxEntries) ||
         s_cache.storedCommandBytes - replacedBytes + incomingBytes > kDlScanCacheMaxStoredBytes) {
+        ++s_cache.evictions;
+        s_cache.front.fill({});
         s_cache.entries.clear();
         s_cache.storedCommandBytes = 0;
         replacing = false;
@@ -1288,6 +1310,21 @@ static bool ApplyAuroraIndexedXFArraysForDisplayList(const std::array<uint32_t, 
 extern "C" void GxNotifyDisplayListMemoryWrite(uint32_t addr, uint32_t size) {
     GxGuestWrite::NotifyWrite(addr, size);
 }
+
+#if defined(__ANDROID__)
+extern "C" void KartPadAndroidLogMetric(const char*, const char*, ...);
+extern "C" void KartPadLogDisplayListCacheMetrics() {
+    auto& cache = DlScanCache();
+    KartPadAndroidLogMetric("KartPadDLCache",
+        "probes=%llu front_hits=%llu validated_hits=%llu evictions=%llu entries=%zu command_bytes=%zu",
+        static_cast<unsigned long long>(cache.probes),
+        static_cast<unsigned long long>(cache.frontHits),
+        static_cast<unsigned long long>(cache.validatedHits),
+        static_cast<unsigned long long>(cache.evictions),
+        cache.entries.size(), cache.storedCommandBytes);
+    cache.probes = cache.frontHits = cache.validatedHits = cache.evictions = 0;
+}
+#endif
 
 extern "C" void GX__CallDisplayList_80172f64(uint32_t listAddr, uint32_t nbytes) {
     if (nbytes == 0 || listAddr == 0) return;

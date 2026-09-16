@@ -28,6 +28,9 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#if defined(__ANDROID__)
+#include <pthread.h>
+#endif
 
 namespace AxDspHle {
 namespace {
@@ -1365,6 +1368,11 @@ private:
     }
 
     void MixWorkerMain() {
+#if defined(__ANDROID__)
+        // std::thread inherits its creator's name on Android. Give profiler
+        // reports a distinct label instead of merging audio with SDLThread.
+        pthread_setname_np(pthread_self(), "KartPadAXMix");
+#endif
         t_onMixWorker = true;
         for (;;) {
             {
