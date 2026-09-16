@@ -860,6 +860,45 @@ extern "C" bool KPAD_IsKeyboardChannelConnected(uint32_t chan)
            g_keyboardConnected[chan].load(std::memory_order_acquire);
 }
 
+static void ConfigureFullRaceCpuBenchmark()
+{
+#if defined(__ANDROID__)
+    // Opt-in private benchmark: retain offline VS simulation and let the game's
+    // own CPU driver control the first slot. No time-trial/online/save mutation.
+    static const bool fullRaceCpu = [] {
+        const char* value = std::getenv("KARTPAD_FULL_RACE_CPU");
+        return value != nullptr && std::strcmp(value, "1") == 0;
+    }();
+    if (fullRaceCpu) {
+        try {
+            const uint32_t config = Memory::Read32(0x809bd728);
+            static uint32_t probe = 0;
+            if (config != 0 && (++probe % 600) == 1) {
+                std::fprintf(stderr, "[full-race-probe] mode=%u course=%u p0=%u p1=%u p11=%u\n",
+                    Memory::Read32(config + 5984), Memory::Read32(config + 5976),
+                    Memory::Read32(config + 0xc28), Memory::Read32(config + 0xd18),
+                    Memory::Read32(config + 0x1678));
+            }
+            if (config != 0 && Memory::Read32(config + 5984) == 1) {
+                // RMCP01 RaceConfig: menu scenario, 12 Player records of 0xf0
+                // bytes. Only convert a normal 1-human/11-CPU offline lineup.
+                bool lineup = Memory::Read32(config + 0xc28) == 0;
+                for (uint32_t i = 1; i < 12 && lineup; ++i) {
+                    lineup = Memory::Read32(config + 0xc28 + i * 0xf0) == 1;
+                }
+                if (lineup) {
+                    Memory::Write32(config + 0xc28, 1);
+                    std::fprintf(stderr, "[full-race-cpu] offline VS: first slot CPU, all 12 slots active, course=%u\n",
+                                 Memory::Read32(config + 5976));
+                }
+            }
+        } catch (const Memory::AccessViolation&) {
+            // Configuration is absent during early boot and scene teardown.
+        }
+    }
+#endif
+}
+
 extern "C" int32_t KPAD__Read_HLE(uint32_t chan, uint32_t statusPtr, uint32_t count)
 {
     static bool logged = false;
@@ -871,6 +910,7 @@ extern "C" int32_t KPAD__Read_HLE(uint32_t chan, uint32_t statusPtr, uint32_t co
         return 0;
     }
     EnsureKeyboardWatch();
+    if (chan == 0) ConfigureFullRaceCpuBenchmark();
 
 #if defined(__APPLE__) && TARGET_OS_IOS
     KartPadMobileClassicInputSnapshot mobileInput{};
@@ -976,6 +1016,9 @@ extern "C" int32_t KPAD__GetUnifiedWpadStatus_HLE(uint32_t chan, uint32_t status
         return 0;
     }
     EnsureKeyboardWatch();
+    if (chan == 0) ConfigureFullRaceCpuBenchmark();
+
+
 
     if (chan == 0 && ForceFixtureMetadataEnabled()) {
         try {
