@@ -1,3 +1,4 @@
+#include "kartpad_function_timing.h"
 #include "ax_dsp.h"
 #include "kartpad/android/trace_scope.h"
 
@@ -657,6 +658,7 @@ private:
     }
 
     void ProcessPBList(uint32_t pbAddr, bool newFilter, bool oldAxLayout) {
+        KARTPAD_FUNCTION_SCOPE("AxDspHle::ProcessPBList");
         uint32_t guard = 0;
         while (pbAddr && guard++ < 256) {
             AXPBWii pb{};

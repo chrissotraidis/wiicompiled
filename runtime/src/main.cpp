@@ -428,6 +428,14 @@ void InitializeProcessTranscript(int argc, char** argv) {
         state.file << "[runtime] WiiCompiled "
                    << (setupVersion.empty() ? "version unknown" : setupVersion) << "\n";
         state.file << "[runtime] process transcript started\n";
+#if defined(__ANDROID__)
+        // Supplied by the host before SDL starts; portable characters only.
+        if (const char* build = std::getenv("KARTPAD_DIAGNOSTIC_BUILD")) {
+            const std::string value(build);
+            if (value.size() <= 96 && value.find_first_not_of("0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz._-/") == std::string::npos)
+                state.file << "[KartPadSession] build=" << value << "\n";
+        }
+#endif
         state.file << "[runtime] pid=" << pid << "\n";
         state.file << "[runtime] argv=";
         for (int i = 0; i < argc; ++i) {
@@ -1170,10 +1178,15 @@ int RuntimeMain(int argc, char** argv) {
     WindowsTimerResolutionGuard timerResolutionGuard;
 #endif
     InitializeProcessTranscript(argc, argv);
+    // Mobile OS crash collectors must see the original fatal signal. The desktop
+    // handler allocates, locks and calls _Exit, which can deadlock and suppress
+    // Android tombstones / Apple native crash reports. Keep the C++ default
+    // terminate -> abort path on mobile; ordinary explicit exits keep atexit.
+#if !defined(__ANDROID__) && !(defined(__APPLE__) && TARGET_OS_IOS)
     std::signal(SIGABRT, AbortSignalHandler);
-    // Install exit/terminate handlers to ensure we get crash info
-    std::atexit(AtExitHandler);
     std::set_terminate(TerminateHandler);
+#endif
+    std::atexit(AtExitHandler);
     
     std::string currentEntryLabel;
 
