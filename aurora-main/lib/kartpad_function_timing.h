@@ -5,6 +5,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <time.h>
+#include <unistd.h>
 
 namespace kartpad::diagnostics {
 // Opt-in coarse function probes. Inclusive elapsed/thread CPU, never GPU timing
@@ -44,7 +45,10 @@ class FunctionScope {
     if (cpu_ >= 0 && cpu >= cpu_) w.cpu += cpu-cpu_; else ++w.unavailable;
     if (end-w.last < std::chrono::seconds(5)) return;
     ++w.windows;
-    std::fprintf(stderr,"[KartPadFunction] function=%s window=%u calls=%u inclusive_wall_ms=%.3f inclusive_cpu_ms=%.3f max_wall_ms=%.3f interval_ms=%.3f cpu_missing=%u final=%u\n",
+    std::fprintf(stderr,"[KartPadFunction] pid=%d unix_ms=%lld steady_ms=%lld function=%s window=%u calls=%u inclusive_wall_ms=%.3f inclusive_cpu_ms=%.3f max_wall_ms=%.3f interval_ms=%.3f cpu_missing=%u final=%u\n",
+      getpid(),
+      static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count()),
+      static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(end.time_since_epoch()).count()),
       w.name, w.windows, w.calls, w.wall/1e6, w.unavailable ? -1.0 : w.cpu/1e6, w.maximum/1e6,
       std::chrono::duration<double,std::milli>(end-w.last).count(), w.unavailable, w.windows==120);
     w.last=end; w.calls=0; w.wall=0; w.cpu=0; w.maximum=0; w.unavailable=0;

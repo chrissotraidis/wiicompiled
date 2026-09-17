@@ -2135,12 +2135,15 @@ static void kartpad_audit_draw(GXPrimitive prim, GXVtxFmt fmt, const uint8_t* ve
   static auto windowStart = Clock::now();
   static unsigned window = 0, ordinal = 0, inspected = 0;
   static kartpad::diagnostics::DrawReportBudget budget;
+  static kartpad::diagnostics::DrawSamplingBudget sampling;
+  static unsigned anomalous = 0;
   const auto now = Clock::now();
   if (now-windowStart >= std::chrono::seconds(30)) {
-    if (window < 20) Log.info("KartPadDrawWindow window={} eligible={} inspected={} sampled_every=128 max_checks=2048 final={}", window, ordinal, inspected, window==19);
-    ++window; windowStart=now; ordinal=0; inspected=0; budget={};
+    if (window < 20) Log.info("KartPadDrawWindow window={} eligible={} inspected={} sampled_every=128 max_checks=2048 time_slices=32 anomalous_inspections={} final={}", window, ordinal, inspected, anomalous, window==19);
+    ++window; windowStart=now; ordinal=0; inspected=0; anomalous=0; budget={}; sampling={};
   }
-  if (window >= 20 || (++ordinal % 128) != 1 || inspected >= 2048) return;
+  if (window >= 20 || (++ordinal % 128) != 1 ||
+      !sampling.take(std::chrono::duration_cast<std::chrono::milliseconds>(now-windowStart).count())) return;
   ++inspected;
   const auto selection = kartpad::diagnostics::inspect_matrix_selection(vertices, bytes, count, stride);
   unsigned nonfinitePosition = 0;
@@ -2154,9 +2157,11 @@ static void kartpad_audit_draw(GXPrimitive prim, GXVtxFmt fmt, const uint8_t* ve
   }
   const auto& pipeline = resolve_pipeline_state(prim, fmt);
   const bool anomaly = !selection.complete || selection.outside_palette || nonfinitePosition || nonfiniteNormal;
+  if (anomaly) ++anomalous;
   if (!budget.take(pipeline.configHash, anomaly)) return;
-  Log.info("KartPadDrawCheck window={} draw={} pipeline={:016x} anomaly={} vertices={} stride={} complete={} pn_mask={} pn_max_raw={} pn_outside={} pn_nonmultiple={} pos_nonfinite={} nrm_nonfinite={} postex_count={} nrm_count={} absolute={}",
-           window, ordinal, pipeline.configHash, anomaly, count, stride, selection.complete,
+  Log.info("KartPadDrawCheck window={} draw={} pipeline={:016x} window_elapsed_ms={} anomaly={} vertices={} stride={} complete={} pn_mask={} pn_max_raw={} pn_outside={} pn_nonmultiple={} pos_nonfinite={} nrm_nonfinite={} postex_count={} nrm_count={} absolute={}",
+           window, ordinal, pipeline.configHash,
+           std::chrono::duration_cast<std::chrono::milliseconds>(now-windowStart).count(), anomaly, count, stride, selection.complete,
            selection.used_mask, selection.max_raw, selection.outside_palette, selection.non_row_multiple,
            nonfinitePosition, nonfiniteNormal, pipeline.shaderInfo.matrixLayout.postexCount,
            pipeline.shaderInfo.matrixLayout.nrmCount, pipeline.shaderInfo.matrixLayout.absolutePosRegion);
