@@ -1746,6 +1746,7 @@ bool begin_frame() noexcept {
 }
 
 void end_frame() noexcept {
+  KARTPAD_FUNCTION_SCOPE("aurora::end_frame");
 #ifdef AURORA_ENABLE_GX
   webgpu::fail_if_device_lost();
 #endif
@@ -1757,11 +1758,15 @@ void end_frame() noexcept {
   ensure_frame_worker_started();
   // DONE: this seals another frame, which means reusing the worker's encoder
   // state and its SealedFrame. The previous cycle must be completely finished.
-  wait_for_frame_worker_private(FrameWorkerPhase::Done);
+  {
+    KARTPAD_FUNCTION_SCOPE("aurora::producer_wait_previous_frame");
+    wait_for_frame_worker_private(FrameWorkerPhase::Done);
+  }
 
   // Seal all current GX work on the CPU while the renderer is known ready.
   // Later FIFO writes belong exclusively to the next frame.
   {
+    KARTPAD_FUNCTION_SCOPE("aurora::producer_drain_with_lock");
     std::lock_guard gpuLock(g_rendererGpuMutex);
     gx::fifo::drain();
   }

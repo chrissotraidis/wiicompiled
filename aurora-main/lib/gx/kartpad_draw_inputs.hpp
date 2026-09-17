@@ -41,6 +41,20 @@ inline unsigned count_nonfinite(const void* bytes, size_t size) {
   }
   return count;
 }
+// Spread the 2048 inspections across 32 time slices, rather than exhausting
+// them at the beginning of a busy 30-second window. Unused slots are not banked.
+class DrawSamplingBudget {
+ public:
+  bool take(uint64_t elapsedMs) {
+    if (elapsedMs >= 30000) return false; // Caller resets each window.
+    const unsigned slice = unsigned(elapsedMs * 32 / 30000);
+    if (used_[slice] >= 64) return false;
+    ++used_[slice];
+    return true;
+  }
+ private:
+  std::array<unsigned, 32> used_{};
+};
 // Caller serializes on the renderer's existing mutex. Separate budgets keep normal
 // startup samples from consuming the anomaly allowance. No dynamic allocation.
 class DrawReportBudget {
