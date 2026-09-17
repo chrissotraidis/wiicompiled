@@ -707,10 +707,18 @@ bool initialize(AuroraBackend auroraBackend) {
       "enable_immediate_error_handling",
         /* clang-format on */
     };
+    const char* rendererValidationFlag = std::getenv("KARTPAD_RENDERER_VALIDATION");
+    const bool rendererValidation = rendererValidationFlag != nullptr &&
+                                    std::strcmp(rendererValidationFlag, "1") == 0;
 #ifdef NDEBUG
-    enableToggles.push_back("skip_validation");
-    enableToggles.push_back("disable_robustness");
+    if (!rendererValidation) {
+      enableToggles.push_back("skip_validation");
+      enableToggles.push_back("disable_robustness");
+    }
 #endif
+    const std::array<const char*, 2> validationDisabledToggles = {
+        "skip_validation", "disable_robustness"};
+    Log.info("KartPad renderer diagnostic mode: {}", rendererValidation ? "validation-and-robustness" : "normal");
     if (g_backendType == wgpu::BackendType::Vulkan) {
       enableToggles.push_back("vulkan_monolithic_pipeline_cache");
     }
@@ -718,6 +726,8 @@ bool initialize(AuroraBackend auroraBackend) {
         .nextInChain = &cacheDescriptor,
         .enabledToggleCount = enableToggles.size(),
         .enabledToggles = enableToggles.data(),
+        .disabledToggleCount = rendererValidation ? validationDisabledToggles.size() : 0,
+        .disabledToggles = rendererValidation ? validationDisabledToggles.data() : nullptr,
     });
 #endif
     wgpu::DeviceDescriptor deviceDescriptor;
