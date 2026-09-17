@@ -35,7 +35,7 @@ static u32 prepare_idx_template(IndexBuffer& buf, GXPrimitive prim, u16 vtxCount
     // Retain the existing incomplete-quad behavior: every started group emits a complete six-index quad.
     buf.resize(((static_cast<u32>(vtxCount) + 3u) / 4u) * 6u);
 
-    for (u16 v = 0; v < vtxCount; v += 4) {
+    for (u32 v = 0; v < vtxCount; v += 4) {
       const u16 idx0 = v;
       const u16 idx1 = static_cast<u16>(v + 1);
       const u16 idx2 = static_cast<u16>(v + 2);
@@ -553,6 +553,10 @@ void process(const u8* data, u32 size, bool bigEndian) {
       for (int i = GX_VA_POS; i <= GX_VA_TEX7; ++i) {
         g_gxState.arrays[i].cachedRange = {};
       }
+      // A merged draw retains its previous array uploads. Force a new draw so
+      // handle_draw_unmerged observes the invalidation and uploads fresh data.
+      // Pipeline configuration itself did not change.
+      g_gxState.stateDirty = true;
       break;
     }
 
@@ -2209,9 +2213,12 @@ static bool handle_draw(u8 cmd, const u8* data, u32& pos, u32 size, bool bigEndi
   // Try to merge with previous draw call
   if (!g_gxState.stateDirty) LIKELY {
     auto* lastDraw = gfx::get_last_draw_command<DrawData>();
-    // Only if the previous draw call was a single instance draw (no lines/points handling)
+    // Merge only single-instance draws whose offset indices still fit uint16_t.
+    // Overflow would address earlier vertices instead of the appended geometry.
     if (lastDraw != nullptr && prim != GX_LINES && prim != GX_LINESTRIP && prim != GX_POINTS &&
-        lastDraw->instanceCount == 1) LIKELY {
+        lastDraw->instanceCount == 1 &&
+        uint64_t(lastDraw->vtxCount) +
+            (prim == GX_QUADS ? ((uint32_t(vtxCount) + 3u) & ~3u) : vtxCount) <= 65536u) LIKELY {
       const auto& indexTemplate = cached_index_template(prim, vtxCount);
       const auto indices = offset_index_template(indexTemplate, lastDraw->vtxCount);
       const u32 numIndices = indexTemplate.indexCount;
