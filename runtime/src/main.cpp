@@ -1,3 +1,4 @@
+#include <aurora/kartpad_diagnostics.h>
 #include <algorithm>
 #include <atomic>
 #include <cctype>
@@ -1178,6 +1179,7 @@ int RuntimeMain(int argc, char** argv) {
     WindowsTimerResolutionGuard timerResolutionGuard;
 #endif
     InitializeProcessTranscript(argc, argv);
+    kartpad::diagnostics::event(kartpad::diagnostics::Boundary::Runtime,"begin");
     // Mobile OS crash collectors must see the original fatal signal. The desktop
     // handler allocates, locks and calls _Exit, which can deadlock and suppress
     // Android tombstones / Apple native crash reports. Keep the C++ default
@@ -1365,6 +1367,7 @@ int RuntimeMain(int argc, char** argv) {
                   << std::endl;
         g_auroraInitialized.store(true, std::memory_order_release);
 
+        kartpad::diagnostics::event(kartpad::diagnostics::Boundary::Guest,"resolve_entry");
         auto entry = ResolveEntry();
         InitializePersistentCpuContext();
         auto& cpu = GetPersistentCpuContext();
@@ -1384,7 +1387,9 @@ int RuntimeMain(int argc, char** argv) {
         currentEntryLabel = label;
         g_lastEntryLabel = currentEntryLabel;
 
+        kartpad::diagnostics::event(kartpad::diagnostics::Boundary::Guest,"begin");
         InvokeIndirectCpu(entry->address, &cpu);
+        kartpad::diagnostics::event(kartpad::diagnostics::Boundary::Guest,"returned");
         const uint32_t result = cpu.gpr[3];
         RT_LOG(RT_TAG_RUNTIME) << label << " => 0x" << std::hex << result << std::dec << " (" << result << ")" << std::endl;
         

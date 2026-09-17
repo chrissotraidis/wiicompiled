@@ -1,3 +1,4 @@
+#include <aurora/kartpad_diagnostics.h>
 #include "settings_overlay.h"
 #include <android/log.h>
 #include <time.h>
@@ -774,6 +775,10 @@ void DrawFpsOverlay() {
     if (presentTiming.sampleCount > 0 &&
         presentTiming.totalPresentCount >= lastTelemetryPresentCount + 300) {
         const AuroraStats* stats = aurora_get_stats();
+        kartpad::diagnostics::frame(presentTiming.totalPresentCount,
+            presentTiming.framesPerSecond, presentTiming.p95FrameTimeMs,
+            presentTiming.p99FrameTimeMs, presentTiming.worstFrameTimeMs,
+            stats ? stats->queuedPipelines : 0, g_resolutionScale);
         RT_LOGF(RT_TAG_GX,
                 "present telemetry: total=%llu samples=%u avg-ms=%.3f p50-ms=%.3f "
                 "p95-ms=%.3f p99-ms=%.3f worst-ms=%.3f jitter-ms=%.3f fps=%.3f "
