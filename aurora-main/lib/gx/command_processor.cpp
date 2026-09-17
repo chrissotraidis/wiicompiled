@@ -2379,6 +2379,8 @@ static void handle_draw_unmerged(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount,
       .instanceCount = instanceCount,
       .bindGroups = bindGroups,
       .dstAlpha = pipelineState.dstAlpha,
+      .diagnosticOriginalPipeline = kartpad_pnmtx_target(pipelineState.originalConfigHash)
+                                       ? pipelineState.originalConfigHash : 0,
   });
   g_gxState.stateDirty = false;
 }
