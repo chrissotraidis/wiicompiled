@@ -1,3 +1,7 @@
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#endif
+#include <aurora/kartpad_diagnostics.h>
 #include "gpu.hpp"
 
 #include <array>
@@ -519,6 +523,16 @@ static bool create_surface() {
 }
 
 bool initialize(AuroraBackend auroraBackend) {
+  using kartpad::diagnostics::Boundary;
+  using kartpad::diagnostics::event;
+  event(Boundary::Backend, "begin", static_cast<int>(auroraBackend));
+#if defined(__ANDROID__) || (defined(__APPLE__) && TARGET_OS_IOS)
+  if (auroraBackend == BACKEND_NULL) {
+    event(Boundary::Backend, "rejected", static_cast<int>(auroraBackend), "Null cannot present a mobile game; no rendering backend was selected");
+    return false;
+  }
+#endif
+
   if (!g_instance) {
     Log.info("Creating WebGPU instance");
     const std::array requiredInstanceFeatures{
@@ -533,9 +547,15 @@ bool initialize(AuroraBackend auroraBackend) {
     // descriptor only restates Dawn's defaults, so use the public WebGPU descriptor here.
     dawn::native::DawnInstanceDescriptor dawnInstanceDescriptor;
     dawnInstanceDescriptor.backendValidationLevel = dawn::native::BackendValidationLevel::Disabled;
+    dawnInstanceDescriptor.SetLoggingCallback([](wgpu::LoggingType type, wgpu::StringView message) {
+      kartpad::diagnostics::event(kartpad::diagnostics::Boundary::Instance,
+          "driver_message", static_cast<int>(type), std::string_view(message));
+    });
     instanceDescriptor.nextInChain = &dawnInstanceDescriptor;
 #endif
+    event(Boundary::Instance, "begin");
     g_instance = wgpu::CreateInstance(&instanceDescriptor);
+    event(Boundary::Instance, g_instance ? "ready" : "failed");
     if (!g_instance) {
       Log.error("Failed to create WebGPU instance");
       return false;
@@ -554,6 +574,7 @@ bool initialize(AuroraBackend auroraBackend) {
   {
     window::SurfaceLock surfaceLock;
     if (!create_surface()) {
+      event(Boundary::Surface, "create_failed");
       return false;
     }
   }
@@ -563,9 +584,12 @@ bool initialize(AuroraBackend auroraBackend) {
         .backendType = backend,
         .compatibleSurface = g_surface,
     };
+    event(Boundary::Adapter, "begin", static_cast<int>(backend));
     const auto future = g_instance.RequestAdapter(
         &options, wgpu::CallbackMode::WaitAnyOnly,
         [](wgpu::RequestAdapterStatus status, wgpu::Adapter adapter, wgpu::StringView message) {
+          event(Boundary::Adapter, status == wgpu::RequestAdapterStatus::Success ? "ready" : "rejected",
+                static_cast<int>(status), std::string_view(message));
           if (status == wgpu::RequestAdapterStatus::Success) {
             g_adapter = std::move(adapter);
           } else {
@@ -574,6 +598,7 @@ bool initialize(AuroraBackend auroraBackend) {
         });
     const auto status = g_instance.WaitAny(future, 5000000000);
     if (status != wgpu::WaitStatus::Success) {
+      event(Boundary::Adapter, "wait_failed", static_cast<int>(status));
       Log.error("Failed to create {} adapter: {}", magic_enum::enum_name(backend),
                 magic_enum::enum_name(status));
       return false;
@@ -704,6 +729,8 @@ bool initialize(AuroraBackend auroraBackend) {
     deviceDescriptor.requiredLimits = &requiredLimits;
     deviceDescriptor.SetUncapturedErrorCallback(
         [](const wgpu::Device& device, wgpu::ErrorType type, wgpu::StringView message) {
+          kartpad::diagnostics::event(kartpad::diagnostics::Boundary::Device, "uncaptured_error",
+              static_cast<int>(type), std::string_view(message));
           if (g_initialized.load(std::memory_order_acquire)) {
             FATAL("WebGPU error {}: {}", underlying(type), message);
           } else {
@@ -734,6 +761,8 @@ bool initialize(AuroraBackend auroraBackend) {
     const auto future =
         g_adapter.RequestDevice(&deviceDescriptor, wgpu::CallbackMode::WaitAnyOnly,
                                 [](wgpu::RequestDeviceStatus status, wgpu::Device device, wgpu::StringView message) {
+                                  event(Boundary::Device, status == wgpu::RequestDeviceStatus::Success ? "ready" : "rejected",
+                                        static_cast<int>(status), std::string_view(message));
                                   if (status == wgpu::RequestDeviceStatus::Success) {
                                     g_device = std::move(device);
                                   } else {
@@ -772,6 +801,7 @@ bool initialize(AuroraBackend auroraBackend) {
   g_queue = g_device.GetQueue();
 
   const wgpu::Status status = g_surface.GetCapabilities(g_adapter, &g_surfaceCapabilities);
+  event(Boundary::Surface, status == wgpu::Status::Success ? "capabilities_ready" : "capabilities_failed", static_cast<int>(status));
   if (status != wgpu::Status::Success) {
     Log.error("Failed to get surface capabilities: {}", magic_enum::enum_name(status));
     return false;
@@ -782,6 +812,11 @@ bool initialize(AuroraBackend auroraBackend) {
   }
   if (g_surfaceCapabilities.presentModeCount == 0) {
     Log.error("Surface has no present modes");
+    return false;
+  }
+  const auto neededUsage = wgpu::TextureUsage::RenderAttachment | wgpu::TextureUsage::CopySrc;
+  if ((g_surfaceCapabilities.usages & neededUsage) != neededUsage) {
+    event(Boundary::Surface, "required_usage_missing", static_cast<long long>(g_surfaceCapabilities.usages), "requires RenderAttachment and CopySrc");
     return false;
   }
   auto surfaceFormat = best_surface_format();
@@ -808,6 +843,7 @@ bool initialize(AuroraBackend auroraBackend) {
     window::SurfaceLock surfaceLock;
     resize_swapchain(size.fb_width, size.fb_height, size.native_fb_width, size.native_fb_height, true);
   }
+  event(Boundary::Backend, "ready", static_cast<int>(auroraBackend));
   g_initialized.store(true, std::memory_order_release);
   return true;
 }
