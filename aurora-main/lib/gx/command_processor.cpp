@@ -1854,6 +1854,10 @@ static u32 calculate_last_vtx_size(GXVtxFmt fmt) {
 
   g_gxState.lastVtxFmt = fmt;
   g_gxState.lastVtxSize = vtxSize;
+  // The format is selected by the draw opcode, without a register write.
+  // Even equal-stride formats may decode bytes differently, so do not merge
+  // into a draw using the previous format's shader and uniform layout.
+  g_gxState.stateDirty = true;
 
   return vtxSize;
 }
