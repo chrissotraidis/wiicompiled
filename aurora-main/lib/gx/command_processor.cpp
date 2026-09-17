@@ -2330,6 +2330,9 @@ static void handle_draw_unmerged(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount,
       .instanceCount = instanceCount,
       .bindGroups = bindGroups,
       .dstAlpha = pipelineState.dstAlpha,
+      .diagnosticOriginalPipeline = (pipelineState.configHash == 0x58866e32bada1f83ULL ||
+                                     pipelineState.configHash == 0x33c5ff18d5c180e0ULL)
+                                       ? pipelineState.configHash : 0,
   });
   g_gxState.stateDirty = false;
 }

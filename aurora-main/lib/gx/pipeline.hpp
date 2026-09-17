@@ -15,6 +15,7 @@ struct DrawData {
   uint32_t instanceCount;
   GXBindGroups bindGroups;
   uint32_t dstAlpha;
+  gfx::PipelineRef diagnosticOriginalPipeline = 0;
 };
 
 constexpr uint32_t GXPipelineConfigVersion = 19;

@@ -76,3 +76,26 @@ class DrawReportBudget {
   unsigned anomalies_ = 0;
 };
 }
+
+namespace kartpad::diagnostics {
+// One render-thread window per targeted pipeline. Report the first occurrence
+// of each outcome, then every five seconds. Encoded means an API draw command,
+// not GPU completion or correct pixels. No geometry or buffer contents logged.
+struct DrawOutcomeWindow {
+  uint64_t encoded = 0, skipped = 0, lastMs = 0;
+  unsigned reports = 0;
+  bool seenEncoded = false, seenSkipped = false;
+  bool record(bool issued, uint64_t nowMs) {
+    if (reports >= 120) return false;
+    bool& seen = issued ? seenEncoded : seenSkipped;
+    const bool first = !seen;
+    seen = true;
+    if (issued) ++encoded; else ++skipped;
+    if (!first && (nowMs < lastMs || nowMs - lastMs < 5000)) return false;
+    lastMs = nowMs;
+    ++reports;
+    return true;
+  }
+  void clearCounts() { encoded = skipped = 0; }
+};
+}
