@@ -814,8 +814,8 @@ bool initialize(AuroraBackend auroraBackend) {
     Log.error("Surface has no present modes");
     return false;
   }
-  const auto neededUsage = wgpu::TextureUsage::RenderAttachment | wgpu::TextureUsage::CopySrc;
-  if ((g_surfaceCapabilities.usages & neededUsage) != neededUsage) {
+  const wgpu::TextureUsage neededUsage = wgpu::TextureUsage::RenderAttachment | wgpu::TextureUsage::CopySrc;
+  if ((static_cast<uint64_t>(g_surfaceCapabilities.usages) & static_cast<uint64_t>(neededUsage)) != static_cast<uint64_t>(neededUsage)) {
     event(Boundary::Surface, "required_usage_missing", static_cast<long long>(g_surfaceCapabilities.usages), "requires RenderAttachment and CopySrc");
     return false;
   }
