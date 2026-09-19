@@ -73,8 +73,13 @@ constexpr size_t MaxQueuedPipelineBuilds = 256;
 // render and game threads, and cap large hosts to limit driver submissions and memory use.
 constexpr size_t ReservedLogicalProcessors = 2;
 constexpr size_t MaxPipelineWorkers = 22;
-// Cached clear and GX pipelines are prewarmed using the full worker pool.
-constexpr size_t MaxBackgroundPipelineWorkers = MaxPipelineWorkers;
+// Speculative cache replay must leave compilation capacity for the current frame.
+// A cold Dawn/driver cache can make each job expensive in both CPU and memory.
+constexpr size_t MaxBackgroundPipelineWorkers = 1;
+// Replay only the earliest-use recipes. Rebuilding every course ever visited
+// retains thousands of unused driver pipelines and can exhaust mobile memory.
+// The disk cache remains intact; omitted recipes compile normally on first use.
+constexpr size_t MaxPrewarmPipelineBuilds = 128;
 // For synchronous pipeline fallback (OpenGL)
 #ifdef NDEBUG
 constexpr size_t BuildPipelinesPerFrame = 5;
@@ -1072,7 +1077,8 @@ static size_t pipeline_worker_count() {
 }
 
 template <typename PipelineConfig, typename CreateFn>
-static void load_pipeline_cache_entries(ShaderType type, uint32_t configVersion, CreateFn&& create) {
+static void load_pipeline_cache_entries(ShaderType type, uint32_t configVersion, CreateFn&& create,
+                                        size_t& prewarmRemaining) {
   if (!prepare_pipeline_cache_db()) {
     return;
   }
@@ -1090,7 +1096,7 @@ static void load_pipeline_cache_entries(ShaderType type, uint32_t configVersion,
     return;
   }
 
-  while ((ret = sqlite3_step(g_pipelineCacheLoadStmt)) == SQLITE_ROW) {
+  while (prewarmRemaining > 0 && (ret = sqlite3_step(g_pipelineCacheLoadStmt)) == SQLITE_ROW) {
     const auto storedHash = static_cast<PipelineRef>(sqlite3_column_int64(g_pipelineCacheLoadStmt, 0));
     const auto* configBlob = static_cast<const uint8_t*>(sqlite3_column_blob(g_pipelineCacheLoadStmt, 1));
     const auto configSize = sqlite3_column_bytes(g_pipelineCacheLoadStmt, 1);
@@ -1115,9 +1121,10 @@ static void load_pipeline_cache_entries(ShaderType type, uint32_t configVersion,
     }
 
     find_pipeline_impl(type, config, [=] { return create(config); }, false, firstFrameUsed);
+    --prewarmRemaining;
   }
 
-  if (ret != SQLITE_DONE) {
+  if (ret != SQLITE_DONE && prewarmRemaining != 0) {
     Log.error("Failed to read pipeline cache rows: {}", sqlite3_errmsg(g_pipelineCacheDb));
     pipeline_cache_abort();
   }
@@ -1134,10 +1141,11 @@ static void load_pipeline_cache() {
   if (g_pipelineCacheBroken) {
     return;
   }
+  size_t prewarmRemaining = MaxPrewarmPipelineBuilds;
   load_pipeline_cache_entries<clear::PipelineConfig>(ShaderType::Clear, clear::ClearPipelineConfigVersion,
-                                                     clear::create_pipeline);
+                                                     clear::create_pipeline, prewarmRemaining);
   load_pipeline_cache_entries<gx::PipelineConfig>(ShaderType::GX, gx::GXPipelineConfigVersion,
-                                                  gx::create_pipeline);
+                                                  gx::create_pipeline, prewarmRemaining);
   const auto queued = queuedPipelines.load();
   if (queued > 0) {
     g_prewarmCount = queued;
