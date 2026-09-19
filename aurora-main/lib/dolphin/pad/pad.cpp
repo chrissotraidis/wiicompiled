@@ -1,3 +1,4 @@
+#include <aurora/input.hpp>
 #include "../../input.hpp"
 #include "../../internal.hpp"
 #include <dolphin/pad.h>
@@ -364,15 +365,9 @@ void PADSetPortForIndex(const u32 idx, const u32 port) {
     return;
   }
 
-  const int32_t oldPort = SDL_GetGamepadPlayerIndex(ctrl->m_controller);
-  if (const auto* dest = aurora::input::get_controller_for_player(port); dest != nullptr && dest != ctrl) {
-    SDL_SetGamepadPlayerIndex(dest->m_controller, -1);
-  }
-  if (oldPort >= 0 && oldPort != port) {
-    aurora::input::persist_controller_for_player(oldPort, nullptr);
-  }
-  SDL_SetGamepadPlayerIndex(ctrl->m_controller, static_cast<Sint32>(port));
-  aurora::input::persist_controller_for_player(port, ctrl);
+  // Both settings surfaces must update the cached Classic assignment together
+  // with SDL and the persisted port preference.
+  aurora::input::assign_standard_gamepad(ctrl->m_index, port);
 }
 
 int32_t PADGetIndexForPort(const u32 port) {
@@ -392,12 +387,7 @@ int32_t PADGetIndexForPort(const u32 port) {
 }
 
 void PADClearPort(const u32 port) {
-  aurora::input::persist_controller_for_player(port, nullptr);
-  const auto* ctrl = aurora::input::get_controller_for_player(port);
-  if (ctrl == nullptr) {
-    return;
-  }
-  SDL_SetGamepadPlayerIndex(ctrl->m_controller, -1);
+  aurora::input::clear_standard_gamepad_player(port);
 }
 
 // Secondary bindings live only in memory; the runtime re-applies them from its

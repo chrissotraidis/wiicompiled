@@ -3,6 +3,10 @@
 #include "hle/controller_status_contract.h"
 #include "wup028_adapter.h"
 
+#if defined(__ANDROID__)
+#include <aurora/input.hpp>
+#endif
+
 #include <algorithm>
 #include <cstdio>
 #include <cstdint>
@@ -90,6 +94,19 @@ extern "C" uint32_t PAD__Read_HLE(uint32_t statusPtr)
     PADStatus statuses[PAD_CHANMAX]{};
     std::array<PADStatus, PAD_CHANMAX> adapterStatuses{};
     uint32_t rumbleMask = PADRead(statuses);
+#if defined(__ANDROID__)
+    // Android's SDL controllers already feed KPAD's mapped Classic channels.
+    // Exposing the same device as a GameCube pad lets game-side selection use
+    // the unmapped buttons instead. Preserve keyboard-only ports and let the
+    // separate USB GameCube adapter override below retain its native route.
+    const uint32_t classicOwners = aurora::input::standard_gamepad_assigned_mask();
+    for (uint32_t port = 0; port < PAD_CHANMAX; ++port) {
+        if ((classicOwners & (1u << port)) == 0) continue;
+        statuses[port] = {};
+        statuses[port].err = PAD_ERR_NO_CONTROLLER;
+        rumbleMask &= ~(PAD_CHAN0_BIT >> port);
+    }
+#endif
     if (Wup028Adapter::Read(adapterStatuses) && !PADIsInputBlocked()) {
         for (uint32_t port = 0; port < PAD_CHANMAX; ++port) {
             if (adapterStatuses[port].err == PAD_ERR_NONE) {

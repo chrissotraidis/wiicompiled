@@ -366,7 +366,9 @@ static GameController* resolve_standard_gamepad(
       break;
     }
   }
+  // First-use convenience must not undo an explicit Unassigned choice.
   if (controller == nullptr && player == 0 && allowSingleUnassigned &&
+      g_portPreferences[0].state == PortPreferenceState::Unset &&
       g_GameControllers.size() == 1) {
     auto& [instance, candidate] = *g_GameControllers.begin();
     (void)instance;
@@ -375,6 +377,18 @@ static GameController* resolve_standard_gamepad(
     }
   }
   return controller;
+}
+
+uint32_t standard_gamepad_assigned_mask() noexcept {
+  std::scoped_lock lock(g_standardGamepadBridgeMutex);
+  uint32_t mask = 0;
+  for (const auto& [instance, controller] : g_GameControllers) {
+    (void)instance;
+    if (controller.m_controller != nullptr && controller.m_playerIndex >= 0 &&
+        controller.m_playerIndex < PAD_MAX_CONTROLLERS)
+      mask |= 1u << controller.m_playerIndex;
+  }
+  return mask;
 }
 
 bool standard_gamepad_connected(uint32_t player, bool allowSingleUnassigned) noexcept {
