@@ -1012,6 +1012,7 @@ static bool begin_frame_impl(bool clearEfb) {
         return false;
       }
       g_instance.ProcessEvents();
+      webgpu::fail_if_device_lost();
       s_mappingState.wait_for_progress();
     }
   }
