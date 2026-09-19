@@ -258,7 +258,7 @@ enum class ImGuiFramePolicy {
 bool begin_frame_impl(bool pumpEvents, ImGuiFramePolicy imguiPolicy = ImGuiFramePolicy::Immediate,
                       bool* imguiNewFrameOwed = nullptr) noexcept;
 bool begin_frame_render_state_impl(ImGuiFramePolicy imguiPolicy, bool* imguiNewFrameOwed) noexcept;
-void end_frame_impl(bool pumpEvents, bool drainFifo) noexcept;
+void end_frame_impl(bool pumpEvents, bool drainFifo);
 
 // The two publication points of a frame-worker cycle, cleared together under `mutex`. Sealed:
 // producer-shared renderer state is free again. Done: slots encoded, presented, ImGui restarted.
@@ -1727,7 +1727,7 @@ bool run_frame_worker_cycle(gfx::SealedFrame& sealedFrame) noexcept {
 
 // Synchronous frame submission: seal, encode and present inline on the calling thread. Used when
 // the frame worker is disabled (RenderDoc captures) and on the boot path.
-void end_frame_impl(bool pumpEvents, bool drainFifo) noexcept {
+void end_frame_impl(bool pumpEvents, bool drainFifo) {
   KARTPAD_FUNCTION_SCOPE("aurora::end_frame_impl");
   ZoneScoped;
 #ifdef AURORA_ENABLE_GX
@@ -1738,11 +1738,9 @@ void end_frame_impl(bool pumpEvents, bool drainFifo) noexcept {
   gfx::SealedFrame sealedFrame;
   SealedFrameContext ctx;
   std::vector<PresentationJob> presentationJobs;
+  if (drainFifo) gx::fifo::drain();
   {
     std::lock_guard gpuLock(g_rendererGpuMutex);
-    if (drainFifo) {
-      gx::fifo::drain();
-    }
     seal_frame_locked(sealedFrame, ctx);
     presentationJobs = encode_sealed_frame(sealedFrame, ctx);
   }
@@ -1819,7 +1817,7 @@ bool begin_frame() noexcept {
   return prepared;
 }
 
-void end_frame() noexcept {
+void end_frame() {
   KARTPAD_FUNCTION_SCOPE("aurora::end_frame");
 #ifdef AURORA_ENABLE_GX
   webgpu::fail_if_device_lost();
@@ -1840,8 +1838,7 @@ void end_frame() noexcept {
   // Seal all current GX work on the CPU while the renderer is known ready.
   // Later FIFO writes belong exclusively to the next frame.
   {
-    KARTPAD_FUNCTION_SCOPE("aurora::producer_drain_with_lock");
-    std::lock_guard gpuLock(g_rendererGpuMutex);
+    KARTPAD_FUNCTION_SCOPE("aurora::producer_drain");
     gx::fifo::drain();
   }
   {
@@ -1869,6 +1866,10 @@ bool wait_for_frame_worker_for(std::chrono::microseconds timeout) noexcept {
   return wait_for_frame_worker_private_for(FrameWorkerPhase::Done, timeout);
 }
 std::recursive_mutex& renderer_gpu_mutex() noexcept { return g_rendererGpuMutex; }
+void submit_staging_commands(const wgpu::CommandBuffer& commands) {
+  std::lock_guard submitLock(g_queueSubmitMutex);
+  webgpu::g_queue.Submit(1, &commands);
+}
 } // namespace aurora
 
 // C API bindings
@@ -1931,10 +1932,6 @@ bool aurora_flush_efb_copies_to_ram() {
   if (!aurora::gfx::efb_ram::has_pending()) {
     return true;
   }
-  if (!aurora::gfx::efb_ram::prepare_downloads()) {
-    return false;
-  }
-
   // This finalizes the frame still being recorded, on the producer thread, so join the whole cycle
   // first: the encode phase owns the previous passes, EFB targets and image pool.
   aurora::wait_for_frame_worker();
@@ -1942,6 +1939,7 @@ bool aurora_flush_efb_copies_to_ram() {
   // suffix cannot safely be replayed against the same mutable EFB resources.
   aurora::gx::mark_frame_interpolation_replay_unsafe();
   aurora::gx::fifo::drain();
+  if (!aurora::gfx::efb_ram::prepare_downloads()) return false;
   const wgpu::CommandEncoderDescriptor encoderDescriptor{
       .label = "GX CPU-visible EFB copy encoder",
   };
@@ -1967,8 +1965,7 @@ bool aurora_flush_efb_copies_to_ram() {
 }
 bool aurora_flush_efb_copy_to_ram(void* dest) {
 #ifdef AURORA_ENABLE_GX
-  if (dest == nullptr || !aurora::gfx::efb_ram::has_pending(dest) ||
-      !aurora::gfx::efb_ram::prepare_downloads(dest)) {
+  if (dest == nullptr || !aurora::gfx::efb_ram::has_pending(dest)) {
     return false;
   }
 
@@ -1979,6 +1976,7 @@ bool aurora_flush_efb_copy_to_ram(void* dest) {
   // image instead of replaying this split frame.
   aurora::gx::mark_frame_interpolation_replay_unsafe();
   aurora::gx::fifo::drain();
+  if (!aurora::gfx::efb_ram::prepare_downloads(dest)) return false;
   const wgpu::CommandEncoderDescriptor encoderDescriptor{
       .label = "GX demanded EFB copy encoder",
   };

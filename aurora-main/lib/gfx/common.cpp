@@ -251,6 +251,51 @@ static std::atomic_bool g_inOffscreen{false};
 static std::optional<RenderPass> g_suspendedEfbPass;
 static Viewport g_suspendedEfbViewport;
 static ClipRect g_suspendedEfbScissor;
+// Prefix referenced by a suspended EFB pass. Preserve its offsets across an
+// offscreen split, without rendering it before the bake it may sample finishes.
+static StagingSizes g_suspendedEfbBytes{};
+static constexpr StagingSizes PhysicalStagingCapacity{
+    VertexBufferSize, UniformBufferSize, IndexBufferSize, StorageBufferSize};
+static StagingSizes g_stagingCapacity = PhysicalStagingCapacity;
+static uint64_t g_stagingEpoch = 0;
+static uint64_t g_stagingSplitCount = 0;
+static StagingSizes g_stagingHighWater{};
+
+StagingSizes staging_usage() noexcept {
+  return {g_verts.size(), g_uniforms.size(), g_indices.size(), g_storage.size()};
+}
+StagingSizes staging_high_water() noexcept { return g_stagingHighWater; }
+uint64_t staging_epoch() noexcept { return g_stagingEpoch; }
+uint64_t staging_split_count() noexcept { return g_stagingSplitCount; }
+uint64_t staging_uniform_bytes(uint64_t bytes) {
+  return staging_padded(bytes, g_cachedLimits.minUniformBufferOffsetAlignment);
+}
+uint64_t staging_storage_bytes(uint64_t bytes) {
+  return staging_padded(bytes, g_cachedLimits.minStorageBufferOffsetAlignment);
+}
+void set_staging_capacity_limits_for_testing(const StagingSizes& limits) {
+  for (unsigned i = 0; i < limits.size(); ++i) {
+    if (limits[i] > PhysicalStagingCapacity[i])
+      throw StagingCapacityError("Test staging capacity exceeds physical buffer");
+  }
+  g_stagingCapacity = limits;
+  g_stagingHighWater = {};
+}
+bool staging_has_space(const StagingSizes& demand) {
+  // Async readback preparation runs in the worker's noexcept seal prologue.
+  // Reserve all 32 slots plus the uniform binding's 3840-byte trailing window.
+  const StagingSizes tail{0, gx::MaxUniformSize + efb_ram::MaxAsyncReadbackSlots * staging_uniform_bytes(48), 0, 0};
+  const StagingSizes retained = g_suspendedEfbPass ? g_suspendedEfbBytes : StagingSizes{};
+  if (!staging_fits(retained, demand, tail, g_stagingCapacity))
+    throw StagingCapacityError("GPU operation exceeds staging capacity including retained EFB data");
+  return staging_fits(staging_usage(), demand, tail, g_stagingCapacity);
+}
+void ensure_staging_space(const StagingSizes& demand) {
+  if (staging_has_space(demand)) return;
+  split_staging_batch();
+  if (!staging_has_space(demand))
+    throw StagingCapacityError("GPU operation still exceeds staging capacity after submission");
+}
 
 static void discard_suspended_efb_pass() noexcept {
   if (g_suspendedEfbPass) {
@@ -482,6 +527,7 @@ void set_scissor(const ClipRect& cmd) noexcept {
 template <>
 void push_draw_command(clear::DrawData data) {
   if (data.uniformRange.size == 0) {
+    ensure_staging_space({0, staging_uniform_bytes(16), 0, 0});
     const std::array clearUniform{
         std::clamp(data.depth, 0.f, 1.f),
         0.f,
@@ -508,6 +554,7 @@ void resolve_pass(TextureHandle texture, ClipRect rect, bool clearColor, bool cl
     Log.warn("Dropping resolve pass without an active render pass");
     return;
   }
+  ensure_staging_space({0, 2 * staging_uniform_bytes(48), 0, 0});
   auto& prevPass = g_renderPasses[g_currentRenderPass];
   const auto targetWidth = static_cast<int32_t>(prevPass.targetSize.width);
   const auto targetHeight = static_cast<int32_t>(prevPass.targetSize.height);
@@ -736,6 +783,7 @@ void begin_offscreen(uint32_t width, uint32_t height) {
   if (!g_inOffscreen) {
     auto& currentPass = g_renderPasses[g_currentRenderPass];
     if (!currentPass.resolveTarget) {
+      g_suspendedEfbBytes = staging_usage();
       g_suspendedEfbPass = std::move(currentPass);
       g_renderPasses.pop_back();
       --g_currentRenderPass;
@@ -995,7 +1043,7 @@ void map_staging_buffer() {
       });
 }
 
-static bool begin_frame_impl(bool clearEfb) {
+static bool begin_frame_impl(bool clearEfb, bool capacityResume = false) {
   ZoneScoped;
   {
     ZoneScopedN("Wait for buffer map");
@@ -1021,6 +1069,7 @@ static bool begin_frame_impl(bool clearEfb) {
       s_mappingState.wait_for_progress();
     }
   }
+  ++g_stagingEpoch;
   g_recordingSnapshotSlot = currentStagingBuffer;
   size_t bufferOffset = 0;
   const auto& stagingBuf = g_stagingBuffers[currentStagingBuffer];
@@ -1045,7 +1094,7 @@ static bool begin_frame_impl(bool clearEfb) {
     gx::begin_frame_interpolation();
   }
   discard_suspended_efb_pass();
-  webgpu::clear_present_source_override();
+  if (!capacityResume) webgpu::clear_present_source_override();
 
   push_render_pass(RenderPass{});
   set_efb_targets(g_renderPasses[0]);
@@ -1106,7 +1155,7 @@ void abort_frame() noexcept {
 
 static void end_batch_impl(const wgpu::CommandEncoder& cmd, bool advanceFrame) {
   ZoneScoped;
-  ASSERT(!g_inOffscreen, "end_frame called while offscreen rendering is active");
+  ASSERT(!advanceFrame || !g_inOffscreen, "end_frame called while offscreen rendering is active");
   if (advanceFrame) {
     gx::finalize_frame_interpolation();
   } else {
@@ -1115,6 +1164,8 @@ static void end_batch_impl(const wgpu::CommandEncoder& cmd, bool advanceFrame) {
     gx::drop_pending_frame_interpolation_uniforms();
   }
   g_uniforms.append_zeroes(gx::MaxUniformSize); // Pad the end of the buffer
+  const auto used = staging_usage();
+  for (unsigned i = 0; i < used.size(); ++i) g_stagingHighWater[i] = std::max(g_stagingHighWater[i], used[i]);
   uint64_t bufferOffset = 0;
   const auto writeBuffer = [&](ByteBuffer& buf, wgpu::Buffer& out, uint64_t size, std::string_view label) {
     const auto writeSize = buf.size(); // Only need to copy this many bytes
@@ -1168,6 +1219,66 @@ static void end_batch_impl(const wgpu::CommandEncoder& cmd, bool advanceFrame) {
 void end_frame(const wgpu::CommandEncoder& cmd) { end_batch_impl(cmd, true); }
 
 void end_batch(const wgpu::CommandEncoder& cmd) { end_batch_impl(cmd, false); }
+
+void split_staging_batch() {
+  // Never called under the decoder's renderer lock: the worker needs that lock
+  // to reach DONE. FIFO admission yields its unconsumed command first.
+  aurora::wait_for_frame_worker();
+  std::lock_guard gpuLock(aurora::renderer_gpu_mutex());
+  if (!has_current_render_pass())
+    throw StagingCapacityError("Cannot split staging outside an active render pass");
+  gx::mark_frame_interpolation_replay_unsafe();
+  const bool offscreen = g_inOffscreen;
+  const auto viewport = g_cachedViewport;
+  const auto scissor = g_cachedScissor;
+  const auto renderViewport = gx::g_gxState.renderViewport;
+  const auto renderScissor = gx::g_gxState.renderScissor;
+  const auto& active = g_renderPasses[g_currentRenderPass];
+  RenderPass continuation{
+      .colorView = active.colorView, .resolveView = active.resolveView,
+      .depthView = active.depthView, .copySourceTexture = active.copySourceTexture,
+      .copySourceView = active.copySourceView, .copySourceDepthView = active.copySourceDepthView,
+      .targetSize = active.targetSize, .msaaSamples = active.msaaSamples,
+      .clearColor = false, .clearDepth = false,
+      .requireReadyPipelines = active.requireReadyPipelines || offscreen,
+  };
+  auto suspended = std::move(g_suspendedEfbPass);
+  g_suspendedEfbPass.reset();
+  std::array<std::vector<uint8_t>, 4> retained;
+  std::array<ByteBuffer*, 4> buffers{&g_verts, &g_uniforms, &g_indices, &g_storage};
+  if (suspended) {
+    for (unsigned i = 0; i < buffers.size(); ++i) {
+      if (g_suspendedEfbBytes[i])
+        retained[i].assign(buffers[i]->data(), buffers[i]->data() + g_suspendedEfbBytes[i]);
+    }
+  }
+  // A future resolve can make any offscreen prefix permanent. Do not skip its
+  // unfinished pipelines just because that resolve is in the next batch.
+  if (offscreen) for (auto& pass : g_renderPasses) pass.requireReadyPipelines = true;
+  auto encoder = g_device.CreateCommandEncoder();
+  end_batch(encoder);
+  render(encoder);
+  aurora::submit_staging_commands(encoder.Finish());
+  after_submit();
+  if (!begin_frame_impl(false, true))
+    throw StagingCapacityError("Staging remap failed after capacity submission");
+  recycle_render_passes(g_renderPasses);
+  push_render_pass(std::move(continuation));
+  g_currentRenderPass = 0;
+  g_suspendedEfbPass = std::move(suspended);
+  for (unsigned i = 0; i < buffers.size(); ++i) {
+    if (!retained[i].empty()) buffers[i]->append(retained[i].data(), retained[i].size());
+  }
+  g_inOffscreen = offscreen;
+  g_cachedViewport = viewport;
+  g_cachedScissor = scissor;
+  gx::g_gxState.renderViewport = renderViewport;
+  gx::g_gxState.renderScissor = renderScissor;
+  gx::g_gxState.stateDirty = true;
+  push_command(CommandType::SetViewport, Command::Data{.setViewport = viewport});
+  push_command(CommandType::SetScissor, Command::Data{.setScissor = scissor});
+  ++g_stagingSplitCount;
+}
 
 uint32_t current_frame() noexcept { return g_frameIndex; }
 
