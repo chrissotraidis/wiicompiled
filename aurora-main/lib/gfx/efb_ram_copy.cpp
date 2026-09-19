@@ -29,7 +29,7 @@ using webgpu::g_instance;
 constexpr size_t kAsyncReadbackMaxBytes = 256;
 // Each destination keeps its readback buffer forever. Only a handful are expected, and the cap
 // stops an unexpected pattern of one-shot destinations from leaking GPU buffers.
-constexpr size_t kMaxAsyncSlots = 32;
+constexpr size_t kMaxAsyncSlots = MaxAsyncReadbackSlots;
 
 struct PendingCopy {
   void* dest = nullptr;
@@ -39,6 +39,7 @@ struct PendingCopy {
   TextureHandle texture;
   TextureHandle nativeTexture;
   Range nativeBlitUniform;
+  uint64_t nativeUniformEpoch = 0;
 };
 
 struct Download {
@@ -93,10 +94,10 @@ void ensure_native_texture(PendingCopy& pending, TextureHandle* cache = nullptr)
   if (pending.texture->size.width == pending.width && pending.texture->size.height == pending.height) {
     return;
   }
+  if (pending.nativeTexture && pending.nativeUniformEpoch == staging_epoch()) return;
   if (pending.nativeTexture) {
-    return;
-  }
-  if (cache != nullptr && *cache && (*cache)->size.width == pending.width &&
+    // Keep the texture; its old staging range belongs to a submitted batch.
+  } else if (cache != nullptr && *cache && (*cache)->size.width == pending.width &&
       (*cache)->size.height == pending.height) {
     pending.nativeTexture = *cache;
   } else {
@@ -110,6 +111,7 @@ void ensure_native_texture(PendingCopy& pending, TextureHandle* cache = nullptr)
       0.0f, 0.0f, 1.0f, 1.0f, 0.0f, 64.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 1.0f,
   };
   pending.nativeBlitUniform = push_uniform(nativeBlitUniform);
+  pending.nativeUniformEpoch = staging_epoch();
 }
 
 void encode_native_blit(const wgpu::CommandEncoder& encoder, const PendingCopy& pending) noexcept {
@@ -232,7 +234,14 @@ bool has_pending(void* dest) noexcept {
                      [dest](const Download& download) { return download.copy.dest == dest; });
 }
 
-bool prepare_downloads(void* dest) noexcept {
+bool prepare_downloads(void* dest) {
+  uint64_t copies = 0;
+  for (const auto& pending : g_pending) {
+    if (dest != nullptr && pending.dest != dest) continue;
+    if (pending.texture->size.width != pending.width || pending.texture->size.height != pending.height) ++copies;
+  }
+  // Reserve all copies, even already-prepared ones: a split retires their ranges.
+  ensure_staging_space({0, copies * staging_uniform_bytes(48), 0, 0});
   bool found = false;
   for (auto& pending : g_pending) {
     if (dest != nullptr && pending.dest != dest) continue;

@@ -480,13 +480,14 @@ static void handle_xf(const u8* data, u32& pos, u32 size, bool bigEndian);
 static bool handle_draw(u8 cmd, const u8* data, u32& pos, u32 size, bool bigEndian);
 static bool handle_aurora(const u8* data, u32& pos, u32 size, bool bigEndian);
 
-void process(const u8* data, u32 size, bool bigEndian) {
+uint32_t process(const u8* data, u32 size, bool bigEndian) {
   ZoneScoped;
   // Everything decoded here mutates renderer state (GX state, the recorded command lists and the mapped staging buffers), so take the renderer GPU mutex once for the whole drain rather than once per draw command.
   std::lock_guard gpuLock(aurora::renderer_gpu_mutex());
   u32 pos = 0;
 
   while (pos < size) {
+    const u32 commandStart = pos;
     u8 cmd = data[pos++];
     u8 opcode = cmd & CP_OPCODE_MASK;
     // Log.warn("Processing opcode {:02x} at pos {} (size {})", opcode, pos - 1, size);
@@ -574,7 +575,7 @@ void process(const u8* data, u32 size, bool bigEndian) {
 
     case GX_LOAD_AURORA: {
       if (!handle_aurora(data, pos, size, bigEndian)) {
-        return;
+        return size;
       }
       break;
     }
@@ -582,8 +583,10 @@ void process(const u8* data, u32 size, bool bigEndian) {
     default:
       // Draw commands occupy the full 0x80-0xBF range.
       if (is_draw_cmd(cmd)) {
-        if (!handle_draw(cmd, data, pos, size, bigEndian)) {
-          return;
+        try {
+          if (!handle_draw(cmd, data, pos, size, bigEndian)) return size;
+        } catch (const gfx::StagingBatchFull&) {
+          return commandStart;
         }
       } else {
         static u32 unknownLogCount = 0;
@@ -606,6 +609,7 @@ void process(const u8* data, u32 size, bool bigEndian) {
       break;
     }
   }
+  return size;
 }
 
 // Helper to extract bit fields from a 32-bit register
@@ -2102,6 +2106,22 @@ static const CachedPipelineState& resolve_pipeline_state(GXPrimitive prim, GXVtx
   return state;
 }
 
+static bool admit_draw(GXPrimitive prim, GXVtxFmt fmt, u16 count, uint32_t vertexBytes, bool merged = false) {
+  const auto& indexTemplate = cached_index_template(prim, count);
+  gfx::StagingSizes demand{vertexBytes, 0, indexTemplate.indices.size() * sizeof(u16), 0};
+  if (merged) return gfx::staging_has_space(demand);
+  const auto& info = resolve_pipeline_state(prim, fmt).shaderInfo;
+  demand[1] = gfx::staging_uniform_bytes(info.uniformSize);
+  if (frame_interpolation_identity_needed() && frame_interpolation_replay_safe())
+    demand[1] *= 1 + MaxInterpolatedFrames;
+  for (int i = GX_VA_POS; i <= GX_VA_TEX7; ++i) {
+    if ((g_gxState.vtxDesc[i] == GX_INDEX8 || g_gxState.vtxDesc[i] == GX_INDEX16) &&
+        g_gxState.arrays[i].cachedRange.size == 0)
+      demand[3] += gfx::staging_storage_bytes(g_gxState.arrays[i].size);
+  }
+  return gfx::staging_has_space(demand);
+}
+
 bool submit_raw_draw(GXPrimitive prim, GXVtxFmt fmt, const uint8_t* vertices, uint16_t vtxCount,
                      uint32_t vertexBytes) {
   ZoneScoped;
@@ -2137,7 +2157,14 @@ bool submit_raw_draw(GXPrimitive prim, GXVtxFmt fmt, const uint8_t* vertices, ui
   if (!has_complete_primitive(prim, vtxCount)) return true;
 
   // This entry point bypasses process(), so it owns the renderer lock itself.
-  std::lock_guard gpuLock(aurora::renderer_gpu_mutex());
+  std::unique_lock gpuLock(aurora::renderer_gpu_mutex());
+  if (!admit_draw(prim, fmt, vtxCount, vertexBytes)) {
+    gpuLock.unlock();
+    gfx::split_staging_batch();
+    gpuLock.lock();
+    if (!admit_draw(prim, fmt, vtxCount, vertexBytes))
+      throw gfx::StagingCapacityError("Raw draw does not fit after capacity submission");
+  }
   const gfx::Range vertRange = gfx::push_verts(vertices, vertexBytes);
   const bool interpolationIdentityActive = frame_interpolation_identity_needed();
   const PnMtxUsage matrixUsage = interpolationIdentityActive
@@ -2180,11 +2207,9 @@ static bool handle_draw(u8 cmd, const u8* data, u32& pos, u32 size, bool bigEndi
     return true;
   }
 
-  // Push raw vertex data to buffer
-  const uint8_t* vertices = data + pos;
-  gfx::Range vertRange = gfx::push_verts(vertices, totalVtxBytes);
-  pos += totalVtxBytes;
-
+  DrawData* mergeTarget = nullptr;
+  // Decide admission before allocating anything. The merged path needs only
+  // vertices and indices; it must not resolve pipelines or upload arrays.
   // Try to merge with previous draw call
   if (!g_gxState.stateDirty) LIKELY {
     auto* lastDraw = gfx::get_last_draw_command<DrawData>();
@@ -2195,6 +2220,14 @@ static bool handle_draw(u8 cmd, const u8* data, u32& pos, u32 size, bool bigEndi
         !lastDraw->expandedPrimitive && lastDraw->instanceCount == 1 &&
         uint64_t(lastDraw->vtxCount) +
             vtxCount <= 65536u) LIKELY {
+      mergeTarget = lastDraw;
+    }
+  }
+  if (!admit_draw(prim, fmt, vtxCount, totalVtxBytes, mergeTarget != nullptr)) throw gfx::StagingBatchFull{};
+  const uint8_t* vertices = data + pos;
+  gfx::Range vertRange = gfx::push_verts(vertices, totalVtxBytes);
+  pos += totalVtxBytes;
+  if (auto* lastDraw = mergeTarget) {
       const auto& indexTemplate = cached_index_template(prim, vtxCount);
       const auto indices = offset_index_template(indexTemplate, lastDraw->vtxCount);
       const u32 numIndices = indexTemplate.indexCount;
@@ -2215,7 +2248,6 @@ static bool handle_draw(u8 cmd, const u8* data, u32& pos, u32 size, bool bigEndi
         extend_interpolation_draw(pn_mtx_mask(vertices, vtxCount, vtxSize));
       }
       return true;
-    }
   }
 
   const bool interpolationIdentityActive = frame_interpolation_identity_needed();
