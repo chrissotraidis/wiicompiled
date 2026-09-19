@@ -65,6 +65,7 @@
 
 #if defined(__APPLE__) && (TARGET_OS_IOS || TARGET_OS_TV)
 #include <SDL3/SDL_main.h>
+#include <SDL3/SDL_messagebox.h>
 #include "kartpad_mobile_runtime_host.h"
 #endif
 
@@ -1298,6 +1299,16 @@ int RuntimeMain(int argc, char** argv) {
         const AuroraBackend requestedBackend = auroraConfig.desiredBackend;
 
         const AuroraInfo auroraInfo = aurora_initialize(0, nullptr, &auroraConfig);
+        if (auroraInfo.initializationStatus != AURORA_INITIALIZATION_SUCCESS) {
+            const std::string reason = auroraInfo.initializationError != nullptr
+                ? auroraInfo.initializationError : "No supported graphics backend is available";
+            RT_LOG(RT_TAG_RUNTIME) << "Graphics startup rejected: " << reason << std::endl;
+            const std::string message = "KartPad could not start the graphics renderer on this device.\n\n" + reason;
+            SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Graphics Unavailable", message.c_str(), nullptr);
+            SetRuntimeExitCodeImpl(1);
+            ShutdownProcessTranscript();
+            return 1;
+        }
 #if defined(__APPLE__) && (TARGET_OS_IOS || TARGET_OS_TV)
         KartPadMobileRuntimeHostInstall(auroraInfo.window);
 #endif
