@@ -408,6 +408,9 @@ static PendingPipeline* touch_pending_pipeline(PipelineRef hash, bool prioritize
 
   g_priorityPipelines.emplace_back(std::move(*backgroundIt));
   g_backgroundPipelines.erase(backgroundIt);
+  // Idle workers must see this promotion even while the background compiler
+  // is occupied. This condition variable also has renderer waiters.
+  g_pipelineCv.notify_all();
   return &g_priorityPipelines.back();
 }
 
@@ -542,7 +545,8 @@ static PipelineRef find_pipeline_impl(ShaderType type, const PipelineConfig& con
   }
 
   if (notifyWorker) {
-    g_pipelineCv.notify_one();
+    // notify_one can select a renderer waiter instead of a compiler worker.
+    g_pipelineCv.notify_all();
   }
   if (notifyWaiters) {
     g_pipelineCv.notify_all();
