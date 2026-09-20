@@ -582,7 +582,7 @@ void resolve_pass(TextureHandle texture, ClipRect rect, bool clearColor, bool cl
     sourceRect = {srcLeft, srcTop, std::max(srcRight - srcLeft, 1.0f), std::max(srcBottom - srcTop, 1.0f)};
   }
   prevPass.resolveTarget = std::move(texture);
-  prevPass.requireReadyPipelines = persistentCopy;
+  prevPass.requireReadyPipelines |= persistentCopy;
   prevPass.resolveRect = rect;
   prevPass.resolveSourceRect = sourceRect;
   prevPass.resolveFormat = resolveFormat;
@@ -1247,9 +1247,11 @@ void split_staging_batch() {
         retained[i].assign(buffers[i]->data(), buffers[i]->data() + g_suspendedEfbBytes[i]);
     }
   }
-  // A future resolve can make any offscreen prefix permanent. Do not skip its
-  // unfinished pipelines just because that resolve is in the next batch.
-  if (offscreen) for (auto& pass : g_renderPasses) pass.requireReadyPipelines = true;
+  // GXCopyTex can capture the ordinary EFB as well as an explicit offscreen
+  // target. Its command may arrive in the next batch, after this prefix has
+  // already been submitted. Preserve every prefix; target kind cannot tell
+  // us whether the guest will later retain these pixels in a texture.
+  for (auto& pass : g_renderPasses) pass.requireReadyPipelines = true;
   auto encoder = g_device.CreateCommandEncoder();
   end_batch(encoder);
   render(encoder);
@@ -1581,8 +1583,8 @@ bool bind_pipeline(PipelineRef ref, const wgpu::RenderPassEncoder& pass, Pipelin
   if (!skip_unready_pipelines()) {
     pipelineReady = wait_pipeline(ref, pipeline);
   } else if (requireReady) {
-    // The pass resolves into a persistent texture (a one-shot bake such as MKW's minimap), so a
-    // skipped draw would never be re-issued. These run behind loads, not mid-race.
+    // Texture copies and capacity prefixes must retain complete draw results.
+    // A future display frame cannot repair a texture that already captured them.
     pipelineReady = wait_pipeline_for_persistent_pass(ref, pipeline);
   } else {
     pipelineReady = try_pipeline(ref, pipeline);
