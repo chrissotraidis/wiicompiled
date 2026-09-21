@@ -269,6 +269,15 @@ void process_event(SDL_Event& event) {
 #endif
 
   switch (event.type) {
+#if defined(SDL_PLATFORM_ANDROID) && defined(AURORA_ENABLE_GX)
+  case SDL_EVENT_WILL_ENTER_BACKGROUND: {
+    // The event watch only publishes lifecycle flags. Run this infrequent
+    // Dawn operation on the event-pump path, serialized with renderer work.
+    std::lock_guard gpuLock(renderer_gpu_mutex());
+    webgpu::serialize_pipeline_caches();
+    break;
+  }
+#endif
   case SDL_EVENT_KEY_DOWN:
     if (is_alt_enter_event(event)) {
       set_display_mode(get_fullscreen() ? AURORA_DISPLAY_MODE_WINDOWED : AURORA_DISPLAY_MODE_BORDERLESS);
