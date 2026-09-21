@@ -5,6 +5,7 @@
 
 #include <cstdlib>
 #include <unordered_map>
+#include <type_traits>
 
 // The display-list scan cache validates a cached scan against the live guest
 // bytes with a 64-bit XXH3 digest (see GxDisplayListScanCache::CanReuse).
@@ -331,9 +332,12 @@ static void ApplyAuroraVtxStateForDlBegin(GXVtxFmt fmt) {
 
 
 struct HleGxVertexStateSnapshot {
+    // Snapshots only copy object representations. Raw storage avoids default
+    // constructing all 208 formats when a cached list changes just one row.
+    // The presence flags below guard every read of partially captured storage.
     GXAttrType vtxDesc[26];
-    VtxAttrFmt vtxAttrFmt[8][26];
-    HleGxState::VtxArray vtxArray[26];
+    unsigned char vtxAttrFmt[8][sizeof(g_hleGxState.vtxAttrFmt[0])];
+    unsigned char vtxArray[sizeof(g_hleGxState.vtxArray)];
     GXVtxFmt currentVtxFmt;
     uint64_t vtxLayoutHash;
     bool vtxLayoutHashDirty;
@@ -344,10 +348,12 @@ struct HleGxVertexStateSnapshot {
     bool hasCurrentVtxFmt;
 };
 
+static_assert(std::is_trivially_copyable_v<VtxAttrFmt>);
+static_assert(std::is_trivially_copyable_v<HleGxState::VtxArray>);
+
 constexpr uint32_t kAllVtxAttrFmtRows = 0xFFu;
 
-static HleGxVertexStateSnapshot CaptureGxVertexState() {
-    HleGxVertexStateSnapshot snapshot;
+static void CaptureGxVertexState(HleGxVertexStateSnapshot& snapshot) {
     std::memcpy(snapshot.vtxDesc, g_hleGxState.vtxDesc, sizeof(snapshot.vtxDesc));
     std::memcpy(snapshot.vtxAttrFmt, g_hleGxState.vtxAttrFmt, sizeof(snapshot.vtxAttrFmt));
     std::memcpy(snapshot.vtxArray, g_hleGxState.vtxArray, sizeof(snapshot.vtxArray));
@@ -358,7 +364,6 @@ static HleGxVertexStateSnapshot CaptureGxVertexState() {
     snapshot.hasVtxDesc = true;
     snapshot.hasVtxArray = true;
     snapshot.hasCurrentVtxFmt = true;
-    return snapshot;
 }
 
 static void RestoreGxVertexState(const HleGxVertexStateSnapshot& snapshot) {
@@ -415,8 +420,8 @@ struct DlCpWrite {
 };
 
 
-static HleGxVertexStateSnapshot CaptureGxVertexStateForCpWrites(const std::vector<DlCpWrite>& writes) {
-    HleGxVertexStateSnapshot snapshot;
+static void CaptureGxVertexStateForCpWrites(
+    HleGxVertexStateSnapshot& snapshot, const std::vector<DlCpWrite>& writes) {
     snapshot.vtxAttrFmtRows = 0;
     snapshot.hasVtxDesc = false;
     snapshot.hasVtxArray = false;
@@ -450,7 +455,6 @@ static HleGxVertexStateSnapshot CaptureGxVertexStateForCpWrites(const std::vecto
     }
     snapshot.vtxLayoutHash = g_hleGxState.vtxLayoutHash;
     snapshot.vtxLayoutHashDirty = g_hleGxState.vtxLayoutHashDirty;
-    return snapshot;
 }
 
 struct DlScanCacheEntry {
@@ -871,7 +875,8 @@ struct DlInterpretVisitor {
     bool OnDraw(const uint8_t*, uint8_t opcode, GXVtxFmt vtxfmt, uint16_t vtxCount,
                 const uint8_t* vertices, uint32_t& payloadBytes) {
         EnsureAuroraFrameActive();
-        const HleGxVertexStateSnapshot drawGuestState = CaptureGxVertexState();
+        HleGxVertexStateSnapshot drawGuestState;
+        CaptureGxVertexState(drawGuestState);
         ApplyAuroraVtxStateForDlBegin(vtxfmt);
         GXBegin(OpcodeToGXPrimitive(opcode), vtxfmt, vtxCount);
         GXMarkFrameWork();
@@ -1392,7 +1397,7 @@ extern "C" void GX__CallDisplayList_80172f64(uint32_t listAddr, uint32_t nbytes)
             // embedded in the list. Replaying the recorded writes in stream order
             // lands g_hleGxState exactly where the uncached path would have left it.
             if (dlHasCpWrites) {
-                stateBeforeScan = CaptureGxVertexStateForCpWrites(cached->cpWrites);
+                CaptureGxVertexStateForCpWrites(stateBeforeScan, cached->cpWrites);
                 haveStateBeforeScan = true;
             }
             for (const auto& write : cached->cpWrites) {
@@ -1411,7 +1416,7 @@ extern "C" void GX__CallDisplayList_80172f64(uint32_t listAddr, uint32_t nbytes)
             std::vector<DlCpWrite> cpWrites{};
             // The scan discovers the list's CP writes as it walks, so this path
             // cannot narrow the snapshot the way the cached one does.
-            stateBeforeScan = CaptureGxVertexState();
+            CaptureGxVertexState(stateBeforeScan);
             haveStateBeforeScan = true;
             scanOk = ScanDisplayListMaxIndices(list, nbytes, maxIdx, sawIdx, maxXfIdx, maxXfBytes, sawXfIdx,
                                                &dlVtxFmt, &dlVtxFmtMixed, &dlHasNestedDl,
