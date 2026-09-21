@@ -928,8 +928,10 @@ void serialize_pipeline_caches() noexcept {
     const auto after = blob_cache_stats();
     const double elapsedMs = std::chrono::duration<double, std::milli>(
         std::chrono::steady_clock::now() - started).count();
-    KartPadAndroidLogMetric("KartPadPipelineCache", "idle_flush_ms=%.3f blob_stores_delta=%llu",
-                           elapsedMs, static_cast<unsigned long long>(after.stores - before.stores));
+    KartPadAndroidLogMetric("KartPadPipelineCache", "idle_flush_ms=%.3f blob_stores_delta=%llu blob_hits=%llu blob_lookups=%llu",
+                           elapsedMs, static_cast<unsigned long long>(after.stores - before.stores),
+                           static_cast<unsigned long long>(after.hits),
+                           static_cast<unsigned long long>(after.lookups));
   }
 #endif
 }
