@@ -11,6 +11,7 @@ extern "C" void KartPadAndroidLogMetric(const char*, const char*, ...);
 #include <array>
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -915,6 +916,22 @@ void serialize_pipeline_caches() noexcept {
   }();
   if (performIdleTasks != nullptr) {
     performIdleTasks(&g_device);
+  }
+#elif defined(WEBGPU_DAWN) && defined(__ANDROID__)
+  // Android links Dawn statically. Persist its compiled Vulkan cache at the
+  // same infrequent idle boundaries as Windows, not after every pipeline burst.
+  if (g_device && g_backendType == wgpu::BackendType::Vulkan &&
+      !g_deviceLost.load(std::memory_order_acquire)) {
+    const auto started = std::chrono::steady_clock::now();
+    const auto before = blob_cache_stats();
+    dawn::native::PerformIdleTasks(g_device);
+    const auto after = blob_cache_stats();
+    const double elapsedMs = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - started).count();
+    KartPadAndroidLogMetric("KartPadPipelineCache", "idle_flush_ms=%.3f blob_stores_delta=%llu blob_hits=%llu blob_lookups=%llu",
+                           elapsedMs, static_cast<unsigned long long>(after.stores - before.stores),
+                           static_cast<unsigned long long>(after.hits),
+                           static_cast<unsigned long long>(after.lookups));
   }
 #endif
 }

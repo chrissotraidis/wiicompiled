@@ -611,17 +611,21 @@ bool IsKeyDown(const bool* keys, int keyCount, SDL_Scancode code)
 {
     const auto scancode = static_cast<size_t>(code);
     const bool physicallyDown = static_cast<int>(code) < keyCount && keys[code];
-    const bool syntheticallyDown = scancode < g_syntheticExpiryNs.size() &&
-        g_syntheticExpiryNs[scancode].load(std::memory_order_acquire) > SDL_GetTicksNS();
-    return physicallyDown || syntheticallyDown;
+    if (physicallyDown) return true;
+    const uint64_t expiry = scancode < g_syntheticExpiryNs.size() ?
+        g_syntheticExpiryNs[scancode].load(std::memory_order_acquire) : 0;
+    // Most scancodes have never received a synthetic event. Their zero expiry
+    // cannot be active, so avoid a clock read for each of them on every poll.
+    return expiry != 0 && expiry > SDL_GetTicksNS();
 }
 
 float ReadKeyboardAxisLevel(const bool* keys, int keyCount, SDL_Scancode code)
 {
     if (static_cast<int>(code) < keyCount && keys[code]) return 1.0f;
     const auto scancode = static_cast<size_t>(code);
-    const bool syntheticallyDown = scancode < g_syntheticExpiryNs.size() &&
-        g_syntheticExpiryNs[scancode].load(std::memory_order_acquire) > SDL_GetTicksNS();
+    const uint64_t expiry = scancode < g_syntheticExpiryNs.size() ?
+        g_syntheticExpiryNs[scancode].load(std::memory_order_acquire) : 0;
+    const bool syntheticallyDown = expiry != 0 && expiry > SDL_GetTicksNS();
     return syntheticallyDown ? (FullSyntheticStickEnabled() ? 1.0f : 0.35f) : 0.0f;
 }
 
