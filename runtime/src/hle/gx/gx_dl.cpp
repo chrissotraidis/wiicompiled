@@ -420,26 +420,39 @@ struct DlCpWrite {
 };
 
 
-static void CaptureGxVertexStateForCpWrites(
-    HleGxVertexStateSnapshot& snapshot, const std::vector<DlCpWrite>& writes) {
-    snapshot.vtxAttrFmtRows = 0;
-    snapshot.hasVtxDesc = false;
-    snapshot.hasVtxArray = false;
-    snapshot.hasCurrentVtxFmt = false;
+struct DlCpWriteEffects {
+    uint32_t vtxAttrFmtRows = 0;
+    bool hasVtxDesc = false;
+    bool hasVtxArray = false;
+};
+
+// These effects depend only on the validated command bytes. Compute once when
+// storing a scan; keep replaying the original writes in their original order.
+static DlCpWriteEffects DescribeDlCpWrites(const std::vector<DlCpWrite>& writes) {
+    DlCpWriteEffects effects;
     for (const auto& write : writes) {
         const uint8_t reg = write.reg;
         if (reg == 0x50 || reg == 0x60) {
-            snapshot.hasVtxDesc = true;
+            effects.hasVtxDesc = true;
         } else if (reg >= 0x70 && reg <= 0x77) {
-            snapshot.vtxAttrFmtRows |= 1u << (reg - 0x70);
+            effects.vtxAttrFmtRows |= 1u << (reg - 0x70);
         } else if (reg >= 0x80 && reg <= 0x87) {
-            snapshot.vtxAttrFmtRows |= 1u << (reg - 0x80);
+            effects.vtxAttrFmtRows |= 1u << (reg - 0x80);
         } else if (reg >= 0x90 && reg <= 0x97) {
-            snapshot.vtxAttrFmtRows |= 1u << (reg - 0x90);
+            effects.vtxAttrFmtRows |= 1u << (reg - 0x90);
         } else if (reg >= 0xA0 && reg <= 0xBF) {
-            snapshot.hasVtxArray = true;
+            effects.hasVtxArray = true;
         }
     }
+    return effects;
+}
+
+static void CaptureGxVertexStateForCpWrites(
+    HleGxVertexStateSnapshot& snapshot, const DlCpWriteEffects& effects) {
+    snapshot.vtxAttrFmtRows = effects.vtxAttrFmtRows;
+    snapshot.hasVtxDesc = effects.hasVtxDesc;
+    snapshot.hasVtxArray = effects.hasVtxArray;
+    snapshot.hasCurrentVtxFmt = false;
     if (snapshot.hasVtxDesc) {
         std::memcpy(snapshot.vtxDesc, g_hleGxState.vtxDesc, sizeof(snapshot.vtxDesc));
     }
@@ -487,6 +500,7 @@ struct DlScanCacheRecord {
     uint64_t contentDigest = 0;
     uint64_t writeGeneration = kDlWriteGenerationUntracked;
     std::vector<DlCpWrite> cpWrites{};
+    DlCpWriteEffects cpWriteEffects{};
     std::vector<uint8_t> flattened{};
 };
 
@@ -632,6 +646,7 @@ static void StoreDlScanCache(uint32_t listAddr, uint32_t nbytes, uint64_t layout
     // Sampled before the digest was taken, so a write racing the digest can only
     // make the next call re-digest, never make it trust a stale entry.
     record.writeGeneration = writeGeneration;
+    record.cpWriteEffects = DescribeDlCpWrites(cpWrites);
     record.cpWrites = std::move(cpWrites);
     if (flattened != nullptr && flattenedBytes != 0) {
         record.flattened.assign(flattened, flattened + flattenedBytes);
@@ -1397,7 +1412,7 @@ extern "C" void GX__CallDisplayList_80172f64(uint32_t listAddr, uint32_t nbytes)
             // embedded in the list. Replaying the recorded writes in stream order
             // lands g_hleGxState exactly where the uncached path would have left it.
             if (dlHasCpWrites) {
-                CaptureGxVertexStateForCpWrites(stateBeforeScan, cached->cpWrites);
+                CaptureGxVertexStateForCpWrites(stateBeforeScan, cached->cpWriteEffects);
                 haveStateBeforeScan = true;
             }
             for (const auto& write : cached->cpWrites) {
