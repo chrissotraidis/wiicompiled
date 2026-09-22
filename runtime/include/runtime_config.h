@@ -365,7 +365,7 @@ inline void EnsureConfigFile() {
               "# Rich Presence talks only to a locally-running Discord client.\n"
               "# Retro Rewind supplies its official app ID automatically. Set this\n"
               "# to WiiCompiled's Discord application ID for basic base-game presence.\n"
-              "enabled = true\n"
+              "enabled = false\n"
               "# client_id = \"123456789012345678\"\n\n"
               "[paths]\n"
               "# dvd_root = \"D:\\\\MarioKartWii\\\\DATA\"\n"
@@ -1012,7 +1012,7 @@ inline std::string RetroRewindRoot(std::string fallback = "") {
     return Get().retroRewindRoot.value_or(std::move(fallback));
 }
 
-inline bool DiscordPresenceEnabled(bool fallback = true) {
+inline bool DiscordPresenceEnabled(bool fallback = false) {
     return Get().discordPresenceEnabled.value_or(fallback);
 }
 
