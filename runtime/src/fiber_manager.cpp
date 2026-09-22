@@ -222,6 +222,11 @@ bool GuestFiberManager::IsInitialized() {
     return s_initialized;
 }
 
+bool GuestFiberManager::IsOnSchedulerFiber() {
+    return !s_initialized || HostContext::IsCurrent(s_schedulerFiber);
+}
+
+
 bool GuestFiberManager::CreateGuestFiber(uint32_t guestThreadAddr, uint32_t entryPoint,
                                           uint32_t entryArg, uint32_t stackBase) {
     if (!s_initialized) {
