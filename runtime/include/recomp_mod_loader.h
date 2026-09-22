@@ -3,6 +3,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <filesystem>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -74,8 +75,10 @@ void RunPostRelInitializers();
 void RegisterProfileInitializer(std::string_view profile, ProfileInitializerFn fn);
 void ActivateProfile(std::string_view profile);
 
+// The generated call site passes a UTF-8 literal; it is decoded once here and
+// stays a path from then on.
 void RegisterDvdOverlayRoot(std::string root);
-const std::vector<std::string>& DvdOverlayRoots();
+const std::vector<std::filesystem::path>& DvdOverlayRoots();
 
 // Riivolution settings pinned by the distribution's recomp.yml. The XML path is
 // relative to the pack/overlay root; option selections use Riivolution's 1-based

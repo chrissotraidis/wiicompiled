@@ -2,7 +2,7 @@
 
 This is the **tvos** runtime source for [KartPad](https://github.com/chrissotraidis/kartpad), derived from [WiiCompiled by patchzyy and contributors](https://github.com/patchzyy/wiicompiled).
 
-Upstream base: `1912292c804ff9b1b79938de89369ec4496f9fff`. KartPad migration baseline: `dd79c936e5f32dde2d5a003798163cf615935c0d`.
+Upstream base: `83463764b8acda394e058b0c689a10b8561fc380`. KartPad migration baseline: `dd79c936e5f32dde2d5a003798163cf615935c0d`.
 
 The `kartpad-macos`, `kartpad-ios` (also iPadOS), `kartpad-android`, and `kartpad-tvos` branches preserve each platform's existing source behavior. Edit and commit source on the relevant branch; KartPad pins the reviewed commit as a Git submodule. Runtime source is in `runtime/`; Aurora retains its upstream location and notices in `aurora-main/`. Existing upstream licenses and authorship apply.
 
@@ -11,3 +11,14 @@ These branches are initially materialized from KartPad's ordered platform patche
 The translator in this branch is the untouched upstream baseline. KartPad's maintained translator lives in KartPad's `vendor/wiicompiled/translator` subtree; its unmodified native-registration baseline must remain separate from these platform runtime sources.
 
 Merge reviewed upstream changes into an isolated platform branch, test in KartPad, then update its submodule pin. Shared fixes can be reviewed and cherry-picked between affected platform branches. Do not silently update all platforms or submit the whole platform delta as one upstream bug fix.
+
+## 22 September 2026 integration candidate
+
+Merged the upstream runtime through the base above while retaining KartPad's
+platform build graph, sandbox/save paths, dual-profile dispatch, touch input and
+platform controller adapters. The four reviewed display-list, inactive-key and
+AX sample-window CPU reductions now exist in all maintained platform sources.
+Upstream host contexts and input APIs require platform integration; source
+ancestry alone is not package or physical-device acceptance. The KartPad parent
+repository records builds and outstanding gates in
+`docs/artifacts/2026-09-22/upstream-all-platforms.md`.
