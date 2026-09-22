@@ -130,6 +130,29 @@ int main() {
         Require(Ensure(fresh, error, 1900000999), "Second boot");
         Require(ReadBytes(FilePath(fresh)) == firstBoot, "Second boot must not change any bytes");
 
+        // Upgrade from KartPad's old managed-NAND identity file. This must
+        // carry the registered serial forward, not mint a new clock serial.
+        const auto legacyApp = root / "legacy-app";
+        const auto legacyNand = legacyApp / "NAND";
+        std::filesystem::create_directories(legacyNand);
+        { std::ofstream f(legacyNand / ".mkw_recompiled_managed_nand"); f << "version=1\n"; }
+        { std::ofstream f(legacyApp / "ConsoleIdentity.txt"); f << "serial=123456789\n"; }
+        const auto originalLegacy = ReadBytes(legacyApp / "ConsoleIdentity.txt");
+        Require(Ensure(legacyNand, error, -1), "Legacy identity must migrate even without a valid clock");
+        Require(Read(legacyNand)->at("SERNO") == "123456789", "Preserve registered console serial");
+        Require(ReadBytes(legacyApp / "ConsoleIdentity.txt") == originalLegacy, "Leave legacy identity intact");
+        const auto migrated = ReadBytes(FilePath(legacyNand));
+        { std::ofstream f(legacyApp / "ConsoleIdentity.txt"); f << "serial=987654321\n"; }
+        Require(Ensure(legacyNand, error), "Existing NAND remains authoritative");
+        Require(ReadBytes(FilePath(legacyNand)) == migrated, "Never overwrite existing NAND settings");
+        std::filesystem::remove(FilePath(legacyNand));
+        { std::ofstream f(legacyApp / "ConsoleIdentity.txt"); f << "serial=broken\n"; }
+        Require(!Ensure(legacyNand, error), "Malformed legacy identity must not silently reset profiles");
+        Require(!std::filesystem::exists(FilePath(legacyNand)), "Failed migration must not publish settings");
+        std::filesystem::remove(legacyNand / ".mkw_recompiled_managed_nand");
+        Require(Ensure(legacyNand, error, 1800000123), "Unmanaged NAND must not import an unrelated identity");
+        Require(Read(legacyNand)->at("SERNO") == "800000123", "Unmanaged NAND keeps normal initialization");
+
         const auto blocked = root / "blocked";
         { std::ofstream output(blocked); output << "file obstructing NAND directory"; }
         Require(!Ensure(blocked, error, 1800000123), "Write failure must not return an ephemeral identity");
