@@ -168,7 +168,39 @@ inline bool Ensure(const std::filesystem::path& root, std::string& error,
         return false;
     }
 
-    const auto bytes = EncodeNew(GenerateSerial(now));
+    // KartPad previously kept its virtual-console serial beside the managed
+    // NAND. Seed the new settings format from that identity so an upgrade does
+    // not disconnect existing DWC profiles. Imported/existing NAND stays intact.
+    std::string serial = GenerateSerial(now);
+    ec.clear();
+    const bool managed = std::filesystem::is_regular_file(
+        root / ".mkw_recompiled_managed_nand", ec);
+    if (ec && ec != std::errc::no_such_file_or_directory) {
+        error = "Cannot inspect managed NAND identity marker: " + ec.message();
+        return false;
+    }
+    if (managed) {
+        const auto legacy = root.parent_path() / "ConsoleIdentity.txt";
+        ec.clear();
+        const auto legacyStatus = std::filesystem::symlink_status(legacy, ec);
+        if (ec && ec != std::errc::no_such_file_or_directory) {
+            error = "Cannot inspect previous console identity: " + ec.message();
+            return false;
+        }
+        if (std::filesystem::exists(legacyStatus)) {
+            std::ifstream input(legacy);
+            std::string line;
+            if (!std::getline(input, line) || line.size() != 16 ||
+                line.compare(0, 7, "serial=") != 0 ||
+                line.substr(7).find_first_not_of("0123456789") != std::string::npos ||
+                line.substr(7) == "000000000") {
+                error = "Previous console identity is unreadable or invalid; restore its backup";
+                return false;
+            }
+            serial = line.substr(7);
+        }
+    }
+    const auto bytes = EncodeNew(serial);
     if (!bytes) {
         error = "Cannot initialize NAND settings: invalid system clock";
         return false;
