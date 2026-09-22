@@ -1288,8 +1288,14 @@ bool try_pipeline(PipelineRef ref, wgpu::RenderPipeline& pipeline) {
   return true;
 }
 
+#if defined(__ANDROID__)
+extern "C" void KartPadAndroidLogMetric(const char*, const char*, ...);
+#endif
 static bool wait_pipeline_impl(PipelineRef ref, wgpu::RenderPipeline& pipeline, bool fatalIfMissing,
                                bool persistentPass) {
+#if defined(__ANDROID__)
+  std::chrono::nanoseconds waited{};
+#endif
   std::unique_lock lock{g_pipelineMutex};
   if (!g_pipelines.contains(ref) && g_pendingPipelines.contains(ref)) {
     ZoneScopedN("wait_pipeline");
@@ -1303,7 +1309,13 @@ static bool wait_pipeline_impl(PipelineRef ref, wgpu::RenderPipeline& pipeline, 
       // A persistent resolve is the last chance to produce its texture, so timing out here corrupts it
       // permanently. Only a pass marked requireReadyPipelines takes this path.
     }
+#if defined(__ANDROID__)
+    const auto waitStarted = std::chrono::steady_clock::now();
+#endif
     g_pipelineCv.wait(lock, finished);
+#if defined(__ANDROID__)
+    waited = std::chrono::steady_clock::now() - waitStarted;
+#endif
   }
   const auto it = g_pipelines.find(ref);
   if (it == g_pipelines.end()) {
@@ -1316,6 +1328,21 @@ static bool wait_pipeline_impl(PipelineRef ref, wgpu::RenderPipeline& pipeline, 
     return false;
   }
   pipeline = it->second.pipeline;
+  lock.unlock();
+#if defined(__ANDROID__)
+  if (waited >= std::chrono::milliseconds(8)) {
+    // Report at most once per second, after releasing the pipeline mutex.
+    static std::atomic<int64_t> lastReportNanos{0};
+    const auto now = std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+    auto previous = lastReportNanos.load(std::memory_order_relaxed);
+    if (now - previous >= 1'000'000'000 &&
+        lastReportNanos.compare_exchange_strong(previous, now, std::memory_order_relaxed)) {
+      KartPadAndroidLogMetric("KartPadPipelineWait", "wait_ms=%.3f persistent=%d",
+          std::chrono::duration<double, std::milli>(waited).count(), persistentPass ? 1 : 0);
+    }
+  }
+#endif
   return true;
 }
 

@@ -884,6 +884,9 @@ struct PresentationImage {
 };
 
 struct PresentationJob {
+#if defined(__ANDROID__)
+  PresentClock::time_point queuedAt{};
+#endif
   std::shared_ptr<PresentationImage> image;
   uint32_t logicalFrame = 0;
   // Absolute deadline on PresentClock stamped by the producer's schedule.
@@ -931,6 +934,12 @@ std::shared_ptr<PresentationImage> acquire_presentation_image(size_t slot, uint3
 bool present_presentation_job(const PresentationJob& job) {
   ZoneScoped;
   const auto submissionStarted = PresentClock::now();
+#if defined(__ANDROID__)
+  if (job.queuedAt != PresentClock::time_point{}) {
+    KartPadAndroidRecordPhase(13, std::chrono::duration_cast<std::chrono::nanoseconds>(
+        submissionStarted - job.queuedAt).count(), -1);
+  }
+#endif
   // Keep the threshold far above compositor and scheduling jitter. The timings below separate a
   // real surface stall from a bad deadline, and only the former needs a rebuild.
   constexpr auto kSurfaceStallThreshold = std::chrono::milliseconds(250);
@@ -953,6 +962,11 @@ bool present_presentation_job(const PresentationJob& job) {
     lateBy = std::chrono::duration_cast<std::chrono::nanoseconds>(PresentClock::now() -
                                                                   job.presentAt);
   }
+#if defined(__ANDROID__)
+  if (job.presentAt != PresentClock::time_point{}) {
+    KartPadAndroidRecordPhase(14, (std::max)(0LL, static_cast<long long>(lateBy.count())), -1);
+  }
+#endif
   {
     window::SurfaceLock surfaceLock;
     // Acquire, encode, submit and present are one unit against a configured swapchain, so the
@@ -1206,6 +1220,9 @@ void enqueue_presentations(std::vector<PresentationJob>&& jobs) {
     }
   }
   for (auto& job : jobs) {
+#if defined(__ANDROID__)
+    job.queuedAt = PresentClock::now();
+#endif
     g_presenter.jobs.emplace_back(std::move(job));
   }
   lock.unlock();
@@ -1929,7 +1946,17 @@ void aurora_get_present_timing(AuroraPresentTiming* timing) {
 }
 void aurora_set_frame_interpolation_fps(uint32_t targetFps) {
 #ifdef AURORA_ENABLE_GX
+#if defined(__ANDROID__)
+  const bool wasInterpolating = aurora::gx::frame_interpolation_fps() != 0;
+#endif
   aurora::gx::set_frame_interpolation_fps(targetFps);
+#if defined(__ANDROID__)
+  if (wasInterpolating != (aurora::gx::frame_interpolation_fps() != 0)) {
+    // Settings can be applied after renderer initialization or changed in flight.
+    // The render worker drains the presenter before updating the surface mode.
+    aurora::request_surface_reconfigure();
+  }
+#endif
 #else
   (void)targetFps;
 #endif
