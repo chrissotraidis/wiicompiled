@@ -2,6 +2,7 @@
 #include "memory.h"
 #include "abi_bridge.h"
 #include "hle_stubs.h"
+#include "host_context.h"
 #include "runtime_log.h"
 
 // Defined in hle/os/os_sleep.cpp; the sleep-timer table is file-local there.
@@ -11,67 +12,7 @@
 #include <cstdlib>
 #include <iostream>
 #include <iomanip>
-#include <memory>
 #include <sstream>
-
-#if defined(__APPLE__)
-#include <cerrno>
-#include <cstring>
-#include <ucontext.h>
-#endif
-
-namespace {
-#if defined(__APPLE__)
-struct AppleFiber {
-    ucontext_t context{};
-    std::unique_ptr<std::byte[]> stack;
-};
-
-thread_local AppleFiber* g_currentAppleFiber = nullptr;
-
-void* CreateAppleSchedulerFiber()
-{
-    auto fiber = std::make_unique<AppleFiber>();
-    if (getcontext(&fiber->context) != 0) {
-        return nullptr;
-    }
-    g_currentAppleFiber = fiber.get();
-    return fiber.release();
-}
-
-void SwitchHostFiber(void* handle)
-{
-    auto* target = static_cast<AppleFiber*>(handle);
-    AppleFiber* source = g_currentAppleFiber;
-    if (!source || !target || source == target) {
-        return;
-    }
-
-    g_currentAppleFiber = target;
-    if (swapcontext(&source->context, &target->context) != 0) {
-        const int error = errno;
-        g_currentAppleFiber = source;
-        RT_LOG(RT_TAG_OS) << "FATAL: swapcontext failed: " << std::strerror(error) << std::endl;
-        std::abort();
-    }
-    g_currentAppleFiber = source;
-}
-
-void* CurrentHostFiber()
-{
-    return g_currentAppleFiber;
-}
-
-void DeleteHostFiber(void* handle)
-{
-    delete static_cast<AppleFiber*>(handle);
-}
-#elif defined(_WIN32)
-void SwitchHostFiber(void* handle) { SwitchToFiber(handle); }
-void* CurrentHostFiber() { return GetCurrentFiber(); }
-void DeleteHostFiber(void* handle) { DeleteFiber(handle); }
-#endif
-} // namespace
 
 namespace Fiber {
 
@@ -84,19 +25,16 @@ bool GuestFiberManager::s_initialized = false;
 thread_local CpuContext* GuestFiberManager::s_cpuContext = nullptr;
 
 void GuestFiberManager::PurgePendingFibers() {
-#if defined(_WIN32) || defined(__APPLE__)
     std::vector<void*> toDelete;
     {
         std::lock_guard<std::mutex> lock(s_mutex);
         toDelete.swap(s_fibersPendingDelete);
     }
-    const void* current = CurrentHostFiber();
     for (void* f : toDelete) {
-        if (f && f != current) {
-            DeleteHostFiber(f);
+        if (f && !HostContext::IsCurrent(f)) {
+            HostContext::Destroy(f);
         }
     }
-#endif
 }
 
 // Global VI retrace counter
@@ -249,31 +187,12 @@ void GuestFiberManager::Initialize() {
         return;
     }
     
-#if defined(_WIN32)
-    // Convert the main thread to a fiber (the scheduler fiber)
-    s_schedulerFiber = ConvertThreadToFiber(nullptr);
-    if (!s_schedulerFiber) {
-        // May already be a fiber
-        s_schedulerFiber = GetCurrentFiber();
-        if (!s_schedulerFiber) {
-            RT_LOG(RT_TAG_OS) << "FATAL: Failed to initialize scheduler fiber!" << std::endl;
-            ShowRuntimeFatalPopup("guest scheduler initialization failed",
-                                  "Windows could not create the scheduler fiber required to run guest threads.");
-            std::abort();
-        }
-    }
-    
-#elif defined(__APPLE__)
-    s_schedulerFiber = CreateAppleSchedulerFiber();
-    if (!s_schedulerFiber) {
-        RT_LOG(RT_TAG_OS) << "FATAL: Failed to initialize macOS scheduler fiber: "
-                          << std::strerror(errno) << std::endl;
+    if (!HostContext::InitializeScheduler(&s_schedulerFiber)) {
+        RT_LOG(RT_TAG_OS) << "FATAL: Failed to initialize scheduler context!" << std::endl;
+        ShowRuntimeFatalPopup("guest scheduler initialization failed",
+                              "The host could not create the scheduler context required to run guest threads.");
         std::abort();
     }
-#else
-    RT_LOG(RT_TAG_OS) << "WARNING: Fiber support not available on this platform!" << std::endl;
-    s_schedulerFiber = nullptr;
-#endif
     
     s_currentGuestThread = 0;
     s_initialized = true;
@@ -282,30 +201,19 @@ void GuestFiberManager::Initialize() {
 void GuestFiberManager::Shutdown() {
     std::lock_guard<std::mutex> lock(s_mutex);
 
-#if defined(_WIN32) || defined(__APPLE__)
     for (auto& [addr, fiber] : s_fibers) {
         if (fiber.fiber && !fiber.isSchedulerFiber) {
-            DeleteHostFiber(fiber.fiber);
+            HostContext::Destroy(fiber.fiber);
             fiber.fiber = nullptr;
         }
     }
     s_fibers.clear();
-    
-#if defined(_WIN32)
-    // Convert scheduler fiber back to thread
+
     if (s_schedulerFiber) {
-        ConvertFiberToThread();
+        HostContext::ShutdownScheduler(s_schedulerFiber);
         s_schedulerFiber = nullptr;
     }
-#else
-    if (s_schedulerFiber) {
-        DeleteHostFiber(s_schedulerFiber);
-        s_schedulerFiber = nullptr;
-        g_currentAppleFiber = nullptr;
-    }
-#endif
-#endif
-    
+
     s_initialized = false;
 }
 
@@ -325,12 +233,10 @@ bool GuestFiberManager::CreateGuestFiber(uint32_t guestThreadAddr, uint32_t entr
     // Check if fiber already exists for this thread - if so, reset it
     auto existingIt = s_fibers.find(guestThreadAddr);
     if (existingIt != s_fibers.end()) {
-#if defined(_WIN32) || defined(__APPLE__)
         // Delete the old fiber if it exists and is not the scheduler fiber
         if (existingIt->second.fiber && !existingIt->second.isSchedulerFiber) {
-            DeleteHostFiber(existingIt->second.fiber);
+            HostContext::Destroy(existingIt->second.fiber);
         }
-#endif
         s_fibers.erase(existingIt);
     }
     
@@ -349,43 +255,22 @@ bool GuestFiberManager::CreateGuestFiber(uint32_t guestThreadAddr, uint32_t entr
     gf.cpuContext.pc = entryPoint;
     gf.cpuContext.srr0 = entryPoint;
     
-#if defined(_WIN32)
-    // Create Windows fiber with reasonable stack size
-    // Use host stack size (64KB should be plenty for translated code)
-    constexpr size_t kHostStackSize = 64 * 1024;
-    gf.fiber = CreateFiber(kHostStackSize, FiberProc, reinterpret_cast<void*>(static_cast<uintptr_t>(guestThreadAddr)));
+    // The host stack models only translated host calls; the guest stack starts
+    // at stackBase in the CPU context above. 64 KiB is too small for deep
+    // translated/HLE call chains (notably NW4R's sound worker), and on macOS
+    // it can exhaust the guarded coroutine stack as unrelated host work (such
+    // as a window resize) adds a little more nesting. Keep enough headroom for
+    // those chains while the guest stack remains separately bounded.
+    constexpr size_t kHostStackSize = 1024 * 1024;
+    gf.fiber = HostContext::Create(kHostStackSize, FiberProc,
+                                   reinterpret_cast<void*>(static_cast<uintptr_t>(guestThreadAddr)));
     
     if (!gf.fiber) {
-        DWORD err = GetLastError();
-        RT_LOG(RT_TAG_OS) << "CreateFiber failed for thread 0x"
-                  << std::hex << guestThreadAddr 
-                  << " error=" << std::dec << err << std::endl;
+        RT_LOG(RT_TAG_OS) << "Failed to create host context for thread 0x"
+                  << std::hex << guestThreadAddr << std::dec << std::endl;
         return false;
     }
-#elif defined(__APPLE__)
-    constexpr size_t kHostStackSize = 256 * 1024;
-    auto appleFiber = std::make_unique<AppleFiber>();
-    appleFiber->stack = std::make_unique<std::byte[]>(kHostStackSize);
-    if (getcontext(&appleFiber->context) != 0) {
-        RT_LOG(RT_TAG_OS) << "getcontext failed for thread 0x" << std::hex << guestThreadAddr
-                          << ": " << std::strerror(errno) << std::dec << std::endl;
-        return false;
-    }
-    appleFiber->context.uc_stack.ss_sp = appleFiber->stack.get();
-    appleFiber->context.uc_stack.ss_size = kHostStackSize;
-    appleFiber->context.uc_stack.ss_flags = 0;
-    appleFiber->context.uc_link = &static_cast<AppleFiber*>(s_schedulerFiber)->context;
-    auto trampoline = +[](uint32_t threadAddr) {
-        GuestFiberManager::FiberProc(
-            reinterpret_cast<void*>(static_cast<uintptr_t>(threadAddr)));
-    };
-    makecontext(&appleFiber->context,
-                reinterpret_cast<void (*)()>(trampoline), 1, guestThreadAddr);
-    gf.fiber = appleFiber.release();
-#else
-    gf.fiber = nullptr;
-#endif
-    
+
     s_fibers[guestThreadAddr] = gf;
     
     
@@ -437,17 +322,14 @@ void GuestFiberManager::ExitGuestThread(uint32_t guestThreadAddr, ThreadState fi
         s_currentGuestThread = 0;
     }
     
-#if defined(_WIN32) || defined(__APPLE__)
     if (it->second.fiber && !it->second.isSchedulerFiber) {
-        const void* current = CurrentHostFiber();
-        if (it->second.fiber == current) {
+        if (HostContext::IsCurrent(it->second.fiber)) {
             s_fibersPendingDelete.push_back(it->second.fiber);
         } else {
-            DeleteHostFiber(it->second.fiber);
+            HostContext::Destroy(it->second.fiber);
         }
         it->second.fiber = nullptr;
     }
-#endif
 }
 
 void GuestFiberManager::SwitchToThread(uint32_t guestThreadAddr, CpuContext* cpu) {
@@ -510,18 +392,16 @@ void GuestFiberManager::SwitchToThread(uint32_t guestThreadAddr, CpuContext* cpu
     // Store CPU context pointer for the target fiber to use
     s_cpuContext = cpu;
     
-#if defined(_WIN32) || defined(__APPLE__)
     // Check if we're already on the target fiber (e.g., switching to main thread
     // when we're already on the scheduler fiber)
-    void* currentFiber = CurrentHostFiber();
-    if (currentFiber == fiberHandle) {
+    if (HostContext::IsCurrent(fiberHandle)) {
         // Already executing on the target host fiber. This is common for the
         // default guest thread, which also owns the scheduler fiber. Keep the
         // live CPU context instead of restoring a possibly stale saved copy
         // from before the guest thread slept.
         return;
     }
-    
+
     if (cpu && haveTargetContext) {
         *cpu = targetContext;
         // FPSCR travels with the guest-thread context, and its NI bit is
@@ -531,8 +411,8 @@ void GuestFiberManager::SwitchToThread(uint32_t guestThreadAddr, CpuContext* cpu
     }
 
     // Switch to the target fiber (the target fiber will load its own context)
-    SwitchHostFiber(fiberHandle);
-    
+    HostContext::Switch(fiberHandle);
+
     // When we return here, the fiber that issued SwitchToThread has resumed.
     // That does not automatically mean the previous guest thread became runnable
     // again; a different thread may simply have yielded back to the scheduler.
@@ -571,7 +451,6 @@ void GuestFiberManager::SwitchToThread(uint32_t guestThreadAddr, CpuContext* cpu
             s_currentGuestThread = 0;
         }
     }
-#endif
 }
 
 uint32_t GuestFiberManager::GetCurrentGuestThread() {
@@ -653,9 +532,8 @@ void GuestFiberManager::FiberProc(void* param)
 #endif
 {
     uint32_t guestThreadAddr = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(param));
-    
-    
-#if defined(_WIN32) || defined(__APPLE__)
+
+
     // Get our fiber info
     GuestFiber* fiber = nullptr;
     uint32_t entryPoint = 0;
@@ -666,7 +544,7 @@ void GuestFiberManager::FiberProc(void* param)
         auto it = s_fibers.find(guestThreadAddr);
         if (it == s_fibers.end()) {
             RT_LOG(RT_TAG_OS) << "FiberProc: fiber not found!" << std::endl;
-            SwitchHostFiber(s_schedulerFiber);
+            HostContext::Switch(s_schedulerFiber);
             return;
         }
         fiber = &it->second;
@@ -729,7 +607,7 @@ void GuestFiberManager::FiberProc(void* param)
                       << ", fn=0x" << startFn << ") after retries; continuing anyway." << std::dec << std::endl;
             break;
         }
-        SwitchHostFiber(s_schedulerFiber);
+        HostContext::Switch(s_schedulerFiber);
     }
 
     // The deferral loop above yields to the scheduler and therefore can resume
@@ -786,11 +664,7 @@ void GuestFiberManager::FiberProc(void* param)
     }
     
     // Return to scheduler
-    SwitchHostFiber(s_schedulerFiber);
-#else
-    (void)guestThreadAddr;
-    RT_LOG(RT_TAG_OS) << "Fibers not supported on this platform!" << std::endl;
-#endif
+    HostContext::Switch(s_schedulerFiber);
 }
 
 } // namespace Fiber
