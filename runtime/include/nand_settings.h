@@ -16,6 +16,11 @@
 #include <windows.h>
 #else
 #include <unistd.h>
+#ifdef __ANDROID__
+#include <fcntl.h>
+#include <linux/fs.h>
+#include <sys/syscall.h>
+#endif
 #endif
 
 namespace RuntimeNandSettings {
@@ -200,6 +205,11 @@ inline bool Ensure(const std::filesystem::path& root, std::string& error,
     if (written) {
 #ifdef _WIN32
         published = MoveFileExW(temporary.c_str(), path.c_str(), MOVEFILE_WRITE_THROUGH) != 0;
+#elif defined(__ANDROID__)
+        // App SELinux policy denies hard links. Atomic no-replace rename keeps
+        // the same first-writer-wins identity guarantee without link permission.
+        published = ::syscall(SYS_renameat2, AT_FDCWD, temporary.c_str(),
+                              AT_FDCWD, path.c_str(), RENAME_NOREPLACE) == 0;
 #else
         published = ::link(temporary.c_str(), path.c_str()) == 0;
 #endif
