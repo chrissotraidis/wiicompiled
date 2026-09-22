@@ -1620,6 +1620,27 @@ bool FrameReadyForOverlay() noexcept {
     return context != nullptr && context->WithinFrameScope;
 }
 
+void ReleaseControllers() noexcept {
+    // Aurora drives the LED white on first PADRead and never clears it, and the
+    // exit paths terminate the process outright, so do it here.
+    bool queued = false;
+    for (uint32_t port = 0; port < PAD_MAX_CONTROLLERS; ++port) {
+        const s32 index = PADGetIndexForPort(port);
+        if (index < 0) continue;
+        if (SDL_Gamepad* pad = PADGetSDLGamepadForIndex(static_cast<u32>(index))) {
+            SDL_SetGamepadLED(pad, 0, 0, 0);
+            queued = true;
+        }
+    }
+    constexpr std::array<uint32_t, PAD_MAX_CONTROLLERS> stopAll{
+        PAD_MOTOR_STOP_HARD, PAD_MOTOR_STOP_HARD, PAD_MOTOR_STOP_HARD, PAD_MOTOR_STOP_HARD};
+    PADControlAllMotors(stopAll.data());
+    // SDL hands LED and rumble reports to its own HIDAPI sender thread rather
+    // than writing them here, so without this the process dies before the
+    // controller ever receives them.
+    if (queued) SDL_Delay(120);
+}
+
 bool Draw() noexcept {
     if (!FrameReadyForOverlay()) {
         return false;
