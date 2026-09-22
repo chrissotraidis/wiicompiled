@@ -1,4 +1,4 @@
-﻿cmake_minimum_required(VERSION 3.16)
+cmake_minimum_required(VERSION 3.16)
 project(mkw_recompiled LANGUAGES C CXX ASM)
 
 if((NOT APPLE AND NOT ANDROID) OR NOT CMAKE_SIZEOF_VOID_P EQUAL 8 OR
@@ -18,6 +18,16 @@ endif()
 set(MKW_PROJECT_COMPILE_DEFINITIONS NOMINMAX)
 
 set(CMAKE_CXX_STANDARD 20)
+if(APPLE)
+    set(MKW_PLATFORM_MACOS TRUE)
+    enable_language(ASM)
+endif()
+if(ANDROID)
+    add_library(mkw_libco STATIC third_party/libco/libco.c)
+    target_include_directories(mkw_libco PUBLIC "${CMAKE_CURRENT_LIST_DIR}/third_party/libco")
+    add_library(mkw::libco ALIAS mkw_libco)
+    set_target_properties(mkw_libco PROPERTIES POSITION_INDEPENDENT_CODE ON)
+endif()
 find_package(Threads REQUIRED)
 
 # Release binaries must not disclose the local checkout path through __FILE__
@@ -296,6 +306,13 @@ else()
     list(APPEND SOURCES
         "${CMAKE_CURRENT_LIST_DIR}/src/apple/guest_flat_memory_apple.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/src/apple/wup028_adapter_stub.cpp")
+endif()
+
+# Use KartPad's mobile/desktop VM adapter; upstream's alternate macOS VM
+# backend must not also define the same GuestFlat entry points.
+list(REMOVE_ITEM SOURCES "${CMAKE_CURRENT_LIST_DIR}/src/guest_flat_memory_macos.cpp")
+if(APPLE)
+    list(APPEND SOURCES "${CMAKE_CURRENT_LIST_DIR}/src/platform/macos/co_switch.S")
 endif()
 
 # The translator emits the complete, content-addressed source graph. Consuming

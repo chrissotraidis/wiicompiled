@@ -4,6 +4,7 @@
 
 #include "nand_internal.h"
 
+#include "discord_presence.h"
 #include "runtime_log.h"
 
 extern "C" void OSSleepThread_HLE_801aa9b8(CpuContext* ctx);
@@ -201,9 +202,69 @@ static int32_t HandleDolphinIoctlv(uint32_t cmd, uint32_t numIn, uint32_t numOut
         }
 
         case DOLPHIN_IOCTL_SET_SPEED_LIMIT:
-        case DOLPHIN_IOCTL_DISCORD_SET_CLIENT:
-        case DOLPHIN_IOCTL_DISCORD_SET_PRESENCE:
+            return ISFS_OK;
+
+        case DOLPHIN_IOCTL_DISCORD_SET_CLIENT: {
+            if (numIn != 1 || numOut != 0 || vectorPtr == 0) {
+                return ISFS_EINVAL;
+            }
+            const IosVector client = ReadIosVector(vectorPtr, 0);
+            if (!IsValidGuestRange(client.address, client.size)) {
+                return ISFS_EINVAL;
+            }
+            if (RuntimeConfigFile::DiscordPresenceEnabled()) {
+                DiscordPresence::SetClient(ReadGuestCString(client.address, client.size));
+            }
+            return ISFS_OK;
+        }
+
+        case DOLPHIN_IOCTL_DISCORD_SET_PRESENCE: {
+            if (numIn != 10 || numOut != 0 || vectorPtr == 0) {
+                return ISFS_EINVAL;
+            }
+            std::array<IosVector, 10> values{};
+            for (uint32_t index = 0; index < values.size(); ++index) {
+                values[index] = ReadIosVector(vectorPtr, index);
+                if (!IsValidGuestRange(values[index].address, values[index].size)) {
+                    return ISFS_EINVAL;
+                }
+            }
+            if (RuntimeConfigFile::DiscordPresenceEnabled()) {
+                DiscordPresence::Activity activity;
+                activity.details = ReadGuestCString(values[0].address, values[0].size);
+                activity.state = ReadGuestCString(values[1].address, values[1].size);
+                activity.largeImageKey = ReadGuestCString(values[2].address, values[2].size);
+                activity.largeImageText = ReadGuestCString(values[3].address, values[3].size);
+                activity.smallImageKey = ReadGuestCString(values[4].address, values[4].size);
+                activity.smallImageText = ReadGuestCString(values[5].address, values[5].size);
+                if (values[6].size >= 8 && Memory::Contains(values[6].address, 8)) {
+                    activity.startTimestamp = static_cast<int64_t>(
+                        (static_cast<uint64_t>(Memory::Read32(values[6].address)) << 32) |
+                        Memory::Read32(values[6].address + 4));
+                }
+                if (values[7].size >= 8 && Memory::Contains(values[7].address, 8)) {
+                    activity.endTimestamp = static_cast<int64_t>(
+                        (static_cast<uint64_t>(Memory::Read32(values[7].address)) << 32) |
+                        Memory::Read32(values[7].address + 4));
+                }
+                if (values[8].size >= 4) {
+                    activity.partySize = Memory::Read32(values[8].address);
+                }
+                if (values[9].size >= 4) {
+                    activity.partyMax = Memory::Read32(values[9].address);
+                }
+                DiscordPresence::SetActivity(std::move(activity));
+            }
+            return ISFS_OK;
+        }
+
         case DOLPHIN_IOCTL_DISCORD_RESET:
+            if (numIn != 0 || numOut != 0) {
+                return ISFS_EINVAL;
+            }
+            if (RuntimeConfigFile::DiscordPresenceEnabled()) {
+                DiscordPresence::Reset();
+            }
             return ISFS_OK;
 
         case DOLPHIN_IOCTL_GET_SYSTEM_TIME: {
@@ -329,7 +390,10 @@ extern "C" int32_t NAND_IOS_Open_HLE(uint32_t pathPtr, uint32_t mode) {
     }
     
     // It's a NAND file path
-    std::string hostPath = TranslateNandPath(path);
+    const std::filesystem::path hostPath = TranslateNandPath(path);
+
+    if (const auto result = NandCheckSystemSaveRead("IOS_Open", hostPath, mode, true))
+        return *result;
     
     // Seed FaceLib resources and a generic Mii database before the existence
     // check so every open mode can still find them on a fresh managed NAND.
@@ -346,16 +410,16 @@ extern "C" int32_t NAND_IOS_Open_HLE(uint32_t pathPtr, uint32_t mode) {
     if (mode == 2 || mode == 3) {
         if (!PathExists(hostPath)) {
             LogNandWarning("IOS_Open", "'%s' does not exist; open mode %u never creates it",
-                    hostPath.c_str(), mode);
+                    HostPathText(hostPath).c_str(), mode);
             return ISFS_ENOENT;
         }
         fopenMode = "r+b";      // Write-only opens still need read for seeks
     }
 
-    FILE* file = std::fopen(hostPath.c_str(), fopenMode);
+    FILE* file = NandFopen(hostPath, fopenMode);
 
     if (!file) {
-        LogNandError("IOS_Open", "FAILED to open '%s'", hostPath.c_str());
+        LogNandError("IOS_Open", "FAILED to open '%s'", HostPathText(hostPath).c_str());
         return ISFS_ENOENT;
     }
     
@@ -516,14 +580,9 @@ extern "C" int32_t NAND_IOS_Ioctl_HLE(
                     return ISFS_EINVAL;
                 }
                 const char* path = (const char*)Memory::GetPointer(inBufPtr + 6);
-                std::string hostPath = TranslateNandPath(path);
+                const std::filesystem::path hostPath = TranslateNandPath(path);
                 
                 if (CreateDirectoryPath(hostPath)) {
-#ifdef _WIN32
-                    _mkdir(hostPath.c_str());
-#else
-                    mkdir(hostPath.c_str(), 0755);
-#endif
                     return ISFS_OK;
                 }
                 return ISFS_EIO;
@@ -534,16 +593,11 @@ extern "C" int32_t NAND_IOS_Ioctl_HLE(
                     return ISFS_EINVAL;
                 }
                 const char* path = (const char*)Memory::GetPointer(inBufPtr);
-                std::string hostPath = TranslateNandPath(path);
+                const std::filesystem::path hostPath = TranslateNandPath(path);
                 
-                if (IsDirectory(hostPath)) {
-#ifdef _WIN32
-                    if (RemoveDirectoryA(hostPath.c_str())) return ISFS_OK;
-#else
-                    if (rmdir(hostPath.c_str()) == 0) return ISFS_OK;
-#endif
-                } else {
-                    if (std::remove(hostPath.c_str()) == 0) return ISFS_OK;
+                // fs::remove refuses a non-empty directory, matching rmdir.
+                if (NandRemove(hostPath)) {
+                    return ISFS_OK;
                 }
                 return ISFS_ENOENT;
             }
@@ -553,7 +607,7 @@ extern "C" int32_t NAND_IOS_Ioctl_HLE(
                     return ISFS_EINVAL;
                 }
                 const char* path = (const char*)Memory::GetPointer(inBufPtr);
-                std::string hostPath = TranslateNandPath(path);
+                const std::filesystem::path hostPath = TranslateNandPath(path);
                 
                 if (!PathExists(hostPath)) {
                     return ISFS_ENOENT;
@@ -582,11 +636,11 @@ extern "C" int32_t NAND_IOS_Ioctl_HLE(
                     return ISFS_EINVAL;
                 }
                 const char* path = (const char*)Memory::GetPointer(inBufPtr + 6);
-                std::string hostPath = TranslateNandPath(path);
+                const std::filesystem::path hostPath = TranslateNandPath(path);
                 CreateParentDirectories(hostPath);
 
                 // Create empty file
-                FILE* f = std::fopen(hostPath.c_str(), "wb");
+                FILE* f = NandFopen(hostPath, "wb");
                 if (f) {
                     std::fclose(f);
                     return ISFS_OK;
@@ -606,10 +660,10 @@ extern "C" int32_t NAND_IOS_Ioctl_HLE(
                 }
                 const char* srcPath = (const char*)Memory::GetPointer(inBufPtr);
                 const char* dstPath = (const char*)Memory::GetPointer(inBufPtr + 0x40);
-                std::string srcHost = TranslateNandPath(srcPath);
-                std::string dstHost = TranslateNandPath(dstPath);
+                const std::filesystem::path srcHost = TranslateNandPath(srcPath);
+                const std::filesystem::path dstHost = TranslateNandPath(dstPath);
                 
-                if (std::rename(srcHost.c_str(), dstHost.c_str()) == 0) {
+                if (NandRename(srcHost, dstHost)) {
                     return ISFS_OK;
                 }
                 return ISFS_EIO;
@@ -804,11 +858,8 @@ static void WriteGuestString(uint32_t address, const char* value) {
 int32_t ISFS_OpenLib_Initialize(CpuContext* ctx) {
     g_isfsInitialized = true;
     
-    // Use the same platform-aware Wii-to-host path translation as every other
-    // NAND operation. A literal Windows separator creates one incorrectly
-    // named sibling directory on POSIX instead of the real title hierarchy.
-    const std::string titlePath = TranslateNandPath(CurrentNandDataDir().c_str());
-    CreateDirectoryPath(titlePath);
+    // Create the title data directory if it doesn't exist
+    CreateDirectoryPath(TranslateNandPath(CurrentNandDataDir().c_str()));
 
     if (!ctx) {
         return ISFS_OK;
@@ -911,7 +962,7 @@ static int32_t HandleIsfsReadDir(uint32_t numIn, uint32_t numOut, uint32_t vecto
     if (wiiPath.empty()) {
         return ISFS_EINVAL;
     }
-    const std::string hostPath = TranslateNandPath(wiiPath.c_str());
+    const std::filesystem::path hostPath = TranslateNandPath(wiiPath.c_str());
     if (!IsDirectory(hostPath)) {
         return ISFS_ENOENT;
     }
@@ -922,7 +973,7 @@ static int32_t HandleIsfsReadDir(uint32_t numIn, uint32_t numOut, uint32_t vecto
     std::vector<std::string> names;
     std::error_code ec;
     for (const auto& entry : std::filesystem::directory_iterator(hostPath, ec)) {
-        std::string name = entry.path().filename().string();
+        std::string name = HostPathText(entry.path().filename());
         if (name.empty() || name.size() > kMaxNandNameLength) {
             continue;
         }
