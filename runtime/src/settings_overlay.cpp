@@ -4,6 +4,7 @@
 #include <time.h>
 extern "C" void KartPadAndroidLogMetric(const char*, const char*, ...);
 extern "C" void KartPadLogDisplayListCacheMetrics();
+extern "C" void KartPadLogGpuResourceMetrics();
 #include "wup028_adapter.h"
 #include "audio_backend.h"
 #include "aurora_events.h"
@@ -1197,6 +1198,7 @@ void DrawFpsOverlay() {
                 presentTiming.sampleCount, presentTiming.worstFrameTimeMs,
                 presentTiming.jitterMs, g_resolutionScale);
         KartPadLogDisplayListCacheMetrics();
+        KartPadLogGpuResourceMetrics();
         const uint64_t intervalPresents =
             presentTiming.totalPresentCount - lastTelemetryPresentCount;
         lastTelemetryPresentCount = presentTiming.totalPresentCount;

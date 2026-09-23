@@ -263,7 +263,7 @@ static constexpr StagingSizes PhysicalStagingCapacity{
     VertexBufferSize, UniformBufferSize, IndexBufferSize, StorageBufferSize};
 static StagingSizes g_stagingCapacity = PhysicalStagingCapacity;
 static uint64_t g_stagingEpoch = 0;
-static uint64_t g_stagingSplitCount = 0;
+static std::atomic<uint64_t> g_stagingSplitCount{0};
 static StagingSizes g_stagingHighWater{};
 
 StagingSizes staging_usage() noexcept {
@@ -271,7 +271,7 @@ StagingSizes staging_usage() noexcept {
 }
 StagingSizes staging_high_water() noexcept { return g_stagingHighWater; }
 uint64_t staging_epoch() noexcept { return g_stagingEpoch; }
-uint64_t staging_split_count() noexcept { return g_stagingSplitCount; }
+uint64_t staging_split_count() noexcept { return g_stagingSplitCount.load(std::memory_order_relaxed); }
 uint64_t staging_uniform_bytes(uint64_t bytes) {
   return staging_padded(bytes, g_cachedLimits.minUniformBufferOffsetAlignment);
 }
@@ -1286,7 +1286,7 @@ void split_staging_batch() {
   gx::g_gxState.stateDirty = true;
   push_command(CommandType::SetViewport, Command::Data{.setViewport = viewport});
   push_command(CommandType::SetScissor, Command::Data{.setScissor = scissor});
-  ++g_stagingSplitCount;
+  g_stagingSplitCount.fetch_add(1, std::memory_order_relaxed);
 }
 
 uint32_t current_frame() noexcept { return g_frameIndex; }

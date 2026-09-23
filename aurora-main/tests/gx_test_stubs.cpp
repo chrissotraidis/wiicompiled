@@ -99,6 +99,11 @@ void configure(const GXRenderModeObj*) noexcept {}
 // --- Texture uploads ---
 namespace aurora::gfx {
 std::vector<TextureUpload> g_textureUploads;
+// Staging capacity: the host tests never exhaust a staging buffer.
+uint64_t staging_uniform_bytes(uint64_t bytes) { return bytes; }
+uint64_t staging_storage_bytes(uint64_t bytes) { return bytes; }
+bool staging_has_space(const StagingSizes&) { return true; }
+void split_staging_batch() {}
 } // namespace aurora::gfx
 
 namespace aurora::gfx::efb_ram {
