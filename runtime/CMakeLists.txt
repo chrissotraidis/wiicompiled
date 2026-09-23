@@ -16,6 +16,10 @@ endif()
 # libraries and the products in cmake/PublicProducts.cmake) inherits them while
 # aurora-main and its third-party tree stay unaffected.
 set(MKW_PROJECT_COMPILE_DEFINITIONS NOMINMAX)
+# Skip host overflow/underflow/inexact capture while the guest leaves the
+# matching FPSCR enables clear; results and register writes are unchanged
+# (see KartPad docs/artifacts/2026-09-23/android-copy-stream-loop.md).
+list(APPEND MKW_PROJECT_COMPILE_DEFINITIONS KARTPAD_UNOBSERVED_FP_STATUS=1)
 
 set(CMAKE_CXX_STANDARD 20)
 if(APPLE)
