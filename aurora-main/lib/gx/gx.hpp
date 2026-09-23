@@ -307,8 +307,6 @@ struct GXState {
     u32 dataSize = 0;
     GXTexFmt format = GX_TF_I4;
     bool sampledThisFrame = false;
-    // Frames in an unbroken run in which this destination was produced once per frame.
-    u32 consecutiveFrames = 0;
 
     operator bool() const noexcept { return handle.operator bool(); }
   };
@@ -483,8 +481,7 @@ struct CopyTexturePoolStats {
   u64 released = 0;
   u32 liveCopies = 0;
   u64 liveCopyApproxBytes = 0;
-  u64 persistentCopies = 0;
-  u64 streamingCopies = 0;
+  u64 textureCopies = 0;
 };
 // Relaxed snapshot for diagnostics; safe to read from any thread.
 CopyTexturePoolStats copy_texture_pool_stats() noexcept;

@@ -183,14 +183,7 @@ constexpr size_t kCopyTexturePoolPerKey = 3;
 // else references and that no copy has requested for this many frames belongs to
 // a finished scene; keeping it only retains GPU memory for the process lifetime.
 constexpr u32 kCopyTexturePoolIdleFrames = 300;
-// A color copy produced every frame for this long is a recurring stream (for
-// example bloom). A frame that skips an unready shader is redrawn next frame,
-// so it need not stall for compilation. Shorter runs, one-shot copies and
-// depth copies still wait: a scratch target reused for a few frames can be
-// retained afterwards (the code134 black-thumbnail regression).
-constexpr u32 kStreamingCopyFrames = 120;
-std::atomic<u64> g_persistentCopies{0};
-std::atomic<u64> g_streamingCopies{0};
+std::atomic<u64> g_textureCopies{0};
 std::atomic<u32> g_copyTexturePoolEntries{0};
 std::atomic<u64> g_copyTexturePoolBytes{0};
 std::atomic<u64> g_copyTexturePoolReleased{0};
@@ -304,8 +297,7 @@ CopyTexturePoolStats copy_texture_pool_stats() noexcept {
       .released = g_copyTexturePoolReleased.load(std::memory_order_relaxed),
       .liveCopies = g_liveCopyTextures.load(std::memory_order_relaxed),
       .liveCopyApproxBytes = g_liveCopyTextureBytes.load(std::memory_order_relaxed),
-      .persistentCopies = g_persistentCopies.load(std::memory_order_relaxed),
-      .streamingCopies = g_streamingCopies.load(std::memory_order_relaxed),
+      .textureCopies = g_textureCopies.load(std::memory_order_relaxed),
   };
 }
 } // namespace aurora::gx
@@ -318,12 +310,11 @@ extern "C" void KartPadLogGpuResourceMetrics() {
   KartPadAndroidLogMetric("KartPadGpuResources",
                           "copy_pool_entries=%u copy_pool_approx_mib=%.1f copy_pool_released=%llu "
                           "live_copies=%u live_copy_approx_mib=%.1f "
-                          "copies_persistent=%llu copies_streaming=%llu staging_splits=%llu",
+                          "texture_copies=%llu staging_splits=%llu",
                           pool.entries, static_cast<double>(pool.approxBytes) / (1024.0 * 1024.0),
                           static_cast<unsigned long long>(pool.released),
                           pool.liveCopies, static_cast<double>(pool.liveCopyApproxBytes) / (1024.0 * 1024.0),
-                          static_cast<unsigned long long>(pool.persistentCopies),
-                          static_cast<unsigned long long>(pool.streamingCopies),
+                          static_cast<unsigned long long>(pool.textureCopies),
                           static_cast<unsigned long long>(aurora::gfx::staging_split_count()));
 }
 #endif
@@ -579,12 +570,10 @@ void GXCopyTex(void* dest, GXBool clear) {
   if (sampledThisFrame || scaledSizeChanged) {
     const u32 revision = handle.revision;
     const u32 lastProducedFrame = handle.lastProducedFrame;
-    const u32 consecutiveFrames = scaledSizeChanged ? 0 : handle.consecutiveFrames;
     handle = aurora::gx::GXState::CopyTextureRef{
         .handle = acquire_copy_texture(key, scaledDstWidth, scaledDstHeight, texCopyFmt),
         .revision = revision,
         .lastProducedFrame = lastProducedFrame,
-        .consecutiveFrames = consecutiveFrames,
     };
   }
 
@@ -611,17 +600,12 @@ void GXCopyTex(void* dest, GXBool clear) {
   // Every GXCopyTex is observable texture data. Reusing a destination in this
   // or the previous frame does not guarantee another redraw: menu thumbnail
   // scratch targets can be reused and then retained. Depth copies have the
-  // same requirement. Only display presentation and long-running color copy
-  // streams (see kStreamingCopyFrames) may skip unfinished draws.
-  if (handle.revision != 0 && currentFrame - handle.lastProducedFrame == 1) {
-    ++handle.consecutiveFrames;
-  } else if (handle.revision == 0 || currentFrame != handle.lastProducedFrame) {
-    handle.consecutiveFrames = 1;
-  }
-  const bool streamingCopy =
-      !aurora::gx::is_depth_format(texCopyFmt) && handle.consecutiveFrames >= kStreamingCopyFrames;
-  const bool persistentCopy = !streamingCopy;
-  (streamingCopy ? g_streamingCopies : g_persistentCopies).fetch_add(1, std::memory_order_relaxed);
+  // same requirement. Only display presentation may skip unfinished draws.
+  // Mario Kart Wii menus copy the same destinations every frame while baking
+  // different thumbnails, so a long run of copies does not prove a redraw
+  // either (a 120-frame "streaming" exemption reproduced black thumbnails).
+  const bool persistentCopy = true;
+  g_textureCopies.fetch_add(1, std::memory_order_relaxed);
   aurora::gfx::resolve_pass(handle.handle, rect, clearState.clearColor, clearState.clearAlpha, clearState.clearDepth,
                             clearState.clearColorValue, aurora::gx::clear_depth_value(), resolveFmt,
                             &sourceRect.sampleRect, g_gxState.texCopyHalfScale, &copyFilter, forceOpaqueAlpha,
