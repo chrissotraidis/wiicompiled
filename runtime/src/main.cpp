@@ -846,6 +846,15 @@ void WriteCrashArtifacts(std::string_view reason, std::string_view extraDetails,
             << std::hex << target
             << ", but that function was not translated or registered.\n\n"
             << "Caller LR: 0x" << (cpu ? cpu->lr : 0u);
+    if (cpu && cpu->lr == 0x8000A42Cu) {
+        std::ostringstream moduleDetails;
+        moduleDetails << "ModuleLinker::CallModule: module index " << std::dec << cpu->gpr[4]
+                      << ", module base 0x" << std::hex << cpu->gpr[3]
+                      << ", REL prolog 0x" << target
+                      << " (registered StaticR prolog: 0x8055531C).";
+        RT_LOG(RT_TAG_RUNTIME) << moduleDetails.str() << std::endl;
+        message << '\n' << moduleDetails.str();
+    }
     if (target == 0) {
         message << "\n\nA jump to address 0 usually means a virtual call through a bad "
                    "object pointer; the crash log heuristics have details.";
