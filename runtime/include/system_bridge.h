@@ -51,6 +51,10 @@ void WriteCrashArtifacts(std::string_view reason,
                          std::string_view extraDetails = {},
                          const uint32_t* missingGuestTarget = nullptr) noexcept;
 
+// Finish an explicit guest/runtime exit without running static destructors
+// while the transcript still owns pump threads.
+[[noreturn]] void RuntimeTerminate(int code, std::string_view reason) noexcept;
+
 // Full fatal path for a guest jump to an untranslated/invalid target:
 // stderr diagnostics, crash artifacts, popup, exit.
 [[noreturn]] void FatalMissingGuestTarget(uint32_t target, struct CpuContext* cpu) noexcept;

@@ -137,7 +137,7 @@ static bool IsDvdDataRoot(const fs::path& path) {
     SetRuntimeExitCode(EXIT_FAILURE);
     ShowRuntimeFatalPopup(category, details);
     MarkFatalErrorReported();
-    std::exit(EXIT_FAILURE);
+    RuntimeCrash::RuntimeTerminate(EXIT_FAILURE, details);
 }
 
 [[noreturn]] static void FailDvdRoot(const char* source, const fs::path& path = {}) {
