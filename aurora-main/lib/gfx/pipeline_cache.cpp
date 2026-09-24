@@ -104,6 +104,27 @@ static absl::flat_hash_set<PipelineRef> g_pipelineCachePendingWrites;
 static bool g_pipelineCacheWriterStop = false;
 static int g_sdlVfsRegisterResult = SQLITE_ERROR;
 
+// Course-scoped recipe replay. The runtime reports when a course archive starts
+// loading. Recipes used while that course was active are recorded; the next time
+// it loads, they are queued for compilation during its loading screen, so the
+// persistent texture-copy passes of the race do not stall on first use. Replay
+// only compiles pipelines early; it never skips or alters a draw.
+struct PipelineSceneLink {
+  uint64_t scene;
+  ShaderType type;
+  PipelineRef hash;
+  uint32_t seq;
+};
+constexpr size_t MaxScenePrewarmPipelineBuilds = 384;
+static uint64_t g_pipelineScene = 0;               // guarded by g_pipelineMutex
+static std::atomic<uint32_t> g_pipelineSceneGeneration{0};
+static uint32_t g_pipelineSceneStartFrame = 0;     // guarded by g_pipelineMutex
+static absl::flat_hash_set<PipelineRef> g_pipelineSceneRecorded; // guarded by g_pipelineMutex
+static std::deque<PipelineSceneLink> g_pipelineSceneLinkQueue;  // guarded by g_pipelineCacheWriterMutex
+static std::deque<uint64_t> g_pipelineSceneReplayQueue;        // guarded by g_pipelineCacheWriterMutex
+static sqlite3_stmt* g_pipelineSceneInsertStmt = nullptr;
+static sqlite3_stmt* g_pipelineSceneLoadStmt = nullptr;
+
 static SdlVfsSqliteFile* sdl_vfs_file(sqlite3_file* file) {
   return reinterpret_cast<SdlVfsSqliteFile*>(file);
 }
@@ -383,6 +404,17 @@ static void enqueue_pipeline_cache_write(PipelineCacheWrite write) {
   g_pipelineCacheWriterCv.notify_one();
 }
 
+static void enqueue_pipeline_scene_link(const PipelineSceneLink& link) {
+  if (g_pipelineCacheBroken || g_pipelineCacheDb == nullptr) {
+    return;
+  }
+  {
+    std::lock_guard lock{g_pipelineCacheWriterMutex};
+    g_pipelineSceneLinkQueue.push_back(link);
+  }
+  g_pipelineCacheWriterCv.notify_one();
+}
+
 template <typename Queue>
 static auto find_pending_pipeline(Queue& queue, PipelineRef hash) {
   return std::find_if(queue.begin(), queue.end(), [=](const PendingPipeline& pending) { return pending.hash == hash; });
@@ -445,7 +477,8 @@ static bool remove_pending_pipeline(Queue& queue, PipelineRef hash) {
 
 template <typename PipelineConfig>
 static PipelineRef find_pipeline_impl(ShaderType type, const PipelineConfig& config, NewPipelineCallback&& cb,
-                                      bool persist, std::optional<uint32_t> firstFrameUsedOverride) {
+                                      bool persist, std::optional<uint32_t> firstFrameUsedOverride,
+                                      bool sceneReplay = false) {
   ZoneScoped;
 
   const PipelineRef hash = xxh3_hash(config, static_cast<HashType>(type));
@@ -456,8 +489,17 @@ static PipelineRef find_pipeline_impl(ShaderType type, const PipelineConfig& con
   bool removedPending = false;
   bool notifyWaiters = false;
   std::optional<PipelineCacheWrite> cacheWrite;
+  std::optional<PipelineSceneLink> sceneLink;
   {
     std::scoped_lock guard{g_pipelineMutex};
+    if (persist && !cachePreload && g_pipelineScene != 0 && g_pipelineSceneRecorded.insert(hash).second) {
+      sceneLink = PipelineSceneLink{
+          .scene = g_pipelineScene,
+          .type = type,
+          .hash = hash,
+          .seq = firstFrameUsed - g_pipelineSceneStartFrame,
+      };
+    }
     const bool deferGxPipeline = g_hasPipelineThread && g_pipelineFrameActive && type == ShaderType::GX;
     const bool skipUnreadyGxPipeline = deferGxPipeline && g_skipUnreadyGxPipelines.load(std::memory_order_relaxed);
     auto pipelineIt = g_pipelines.find(hash);
@@ -493,7 +535,9 @@ static PipelineRef find_pipeline_impl(ShaderType type, const PipelineConfig& con
         if (!cachePreload && g_pendingPipelines.size() >= MaxQueuedPipelineBuilds && !skipUnreadyGxPipeline) {
           syncCreate = true;
         } else {
-          auto& targetQueue = deferGxPipeline ? g_priorityPipelines : g_backgroundPipelines;
+          // Scene replay runs during a loading screen: use every worker, as for first use.
+          const bool priority = deferGxPipeline || (sceneReplay && g_hasPipelineThread && type == ShaderType::GX);
+          auto& targetQueue = priority ? g_priorityPipelines : g_backgroundPipelines;
           targetQueue.emplace_back(PendingPipeline{
               .hash = hash,
               .firstFrameUsed = firstFrameUsed,
@@ -539,6 +583,9 @@ static PipelineRef find_pipeline_impl(ShaderType type, const PipelineConfig& con
   if (cacheWrite) {
     enqueue_pipeline_cache_write(std::move(*cacheWrite));
   }
+  if (sceneLink) {
+    enqueue_pipeline_scene_link(*sceneLink);
+  }
 
   if (notifyWorker) {
     // The condition variable also has renderer waiters.
@@ -563,6 +610,14 @@ static void pipeline_cache_abort() {
   if (g_pipelineCacheUpsertStmt != nullptr) {
     sqlite3_finalize(g_pipelineCacheUpsertStmt);
     g_pipelineCacheUpsertStmt = nullptr;
+  }
+  if (g_pipelineSceneInsertStmt != nullptr) {
+    sqlite3_finalize(g_pipelineSceneInsertStmt);
+    g_pipelineSceneInsertStmt = nullptr;
+  }
+  if (g_pipelineSceneLoadStmt != nullptr) {
+    sqlite3_finalize(g_pipelineSceneLoadStmt);
+    g_pipelineSceneLoadStmt = nullptr;
   }
   if (g_pipelineCacheDb != nullptr) {
     sqlite3_close(g_pipelineCacheDb);
@@ -771,6 +826,7 @@ static bool prepare_pipeline_cache_db() {
     if (!schemaFailed && !schemaMatch) {
       const auto schemaSql = fmt::format(
           R"(DROP TABLE IF EXISTS pipeline_cache;
+DROP TABLE IF EXISTS pipeline_scene;
 CREATE TABLE pipeline_cache (
   type INTEGER NOT NULL,
   hash INTEGER NOT NULL,
@@ -793,11 +849,39 @@ INSERT INTO aurora_schema VALUES ({});)",
     }
 
     if (!schemaFailed) {
+      // Added without a schema bump so existing recipe rows are kept.
+      ret = sqlite::exec(g_pipelineCacheDb,
+                         "CREATE TABLE IF NOT EXISTS pipeline_scene ("
+                         "scene INTEGER NOT NULL, type INTEGER NOT NULL, hash INTEGER NOT NULL, "
+                         "seq INTEGER NOT NULL, PRIMARY KEY (scene, type, hash)) WITHOUT ROWID;");
+      if (ret != SQLITE_OK) {
+        Log.error("Failed to create pipeline scene table: {}", sqlite3_errmsg(g_pipelineCacheDb));
+        schemaFailed = true;
+      }
+    }
+
+    if (!schemaFailed) {
       tx.commit();
     }
   }
 
   if (schemaFailed) {
+    pipeline_cache_abort();
+    return false;
+  }
+
+  ret = sqlite3_prepare_v3(g_pipelineCacheDb,
+                           "INSERT OR IGNORE INTO pipeline_scene (scene, type, hash, seq) VALUES (?, ?, ?, ?)",
+                           -1, SQLITE_PREPARE_PERSISTENT, &g_pipelineSceneInsertStmt, nullptr);
+  if (ret == SQLITE_OK) {
+    ret = sqlite3_prepare_v3(g_pipelineCacheDb,
+                             "SELECT p.type, p.hash, p.config, p.first_frame_used FROM pipeline_scene s "
+                             "JOIN pipeline_cache p ON p.type = s.type AND p.hash = s.hash "
+                             "WHERE s.scene = ? ORDER BY s.seq ASC LIMIT ?",
+                             -1, SQLITE_PREPARE_PERSISTENT, &g_pipelineSceneLoadStmt, nullptr);
+  }
+  if (ret != SQLITE_OK) {
+    Log.error("Failed to prepare pipeline scene statements: {}", sqlite3_errmsg(g_pipelineCacheDb));
     pipeline_cache_abort();
     return false;
   }
@@ -909,6 +993,88 @@ static bool write_pipeline_cache_record(const PipelineCacheWrite& write) {
   return true;
 }
 
+static bool write_pipeline_scene_link(const PipelineSceneLink& link) {
+  auto* stmt = g_pipelineSceneInsertStmt;
+  const bool ok = sqlite3_bind_int64(stmt, 1, static_cast<sqlite3_int64>(link.scene)) == SQLITE_OK &&
+                  sqlite3_bind_int(stmt, 2, underlying(link.type)) == SQLITE_OK &&
+                  sqlite3_bind_int64(stmt, 3, static_cast<sqlite3_int64>(link.hash)) == SQLITE_OK &&
+                  sqlite3_bind_int64(stmt, 4, static_cast<sqlite3_int64>(link.seq)) == SQLITE_OK &&
+                  sqlite3_step(stmt) == SQLITE_DONE;
+  if (!ok) {
+    Log.error("Failed to record pipeline scene link: {}", sqlite3_errmsg(g_pipelineCacheDb));
+  }
+  sqlite3_reset(stmt);
+  sqlite3_clear_bindings(stmt);
+  return ok;
+}
+
+template <typename PipelineConfig, typename CreateFn>
+static bool replay_scene_recipe(ShaderType type, uint32_t configVersion, CreateFn&& create, PipelineRef storedHash,
+                                const uint8_t* blob, int size, uint32_t firstFrameUsed) {
+  if (size != static_cast<int>(sizeof(PipelineConfig)) || blob == nullptr ||
+      xxh3_hash_s(blob, static_cast<size_t>(size), static_cast<HashType>(type)) != storedHash) {
+    return false;
+  }
+  PipelineConfig config;
+  std::memcpy(&config, blob, sizeof(config));
+  if (config.version != configVersion) {
+    return false;
+  }
+  if constexpr (std::is_same_v<PipelineConfig, gx::PipelineConfig>) {
+    if (!gx::valid_pipeline_config(config)) {
+      return false;
+    }
+  }
+  find_pipeline_impl(type, config, [=] { return create(config); }, false, firstFrameUsed, true);
+  return true;
+}
+
+// Runs on the writer thread, which owns the database statements.
+static void replay_pipeline_scene(uint64_t scene) {
+  auto* stmt = g_pipelineSceneLoadStmt;
+  if (sqlite3_bind_int64(stmt, 1, static_cast<sqlite3_int64>(scene)) != SQLITE_OK ||
+      sqlite3_bind_int64(stmt, 2, static_cast<sqlite3_int64>(MaxScenePrewarmPipelineBuilds)) != SQLITE_OK) {
+    sqlite3_reset(stmt);
+    sqlite3_clear_bindings(stmt);
+    return;
+  }
+  uint32_t recorded = 0;
+  uint32_t queued = 0;
+  int ret;
+  while ((ret = sqlite3_step(stmt)) == SQLITE_ROW) {
+    ++recorded;
+    const auto type = static_cast<ShaderType>(sqlite3_column_int(stmt, 0));
+    const auto hash = static_cast<PipelineRef>(sqlite3_column_int64(stmt, 1));
+    const auto* blob = static_cast<const uint8_t*>(sqlite3_column_blob(stmt, 2));
+    const int size = sqlite3_column_bytes(stmt, 2);
+    const auto firstFrameUsed = static_cast<uint32_t>(sqlite3_column_int64(stmt, 3));
+    bool known;
+    {
+      std::scoped_lock guard{g_pipelineMutex};
+      known = g_pipelines.contains(hash) || g_pendingPipelines.contains(hash);
+    }
+    if (known) {
+      continue;
+    }
+    bool replayed = false;
+    if (type == ShaderType::GX) {
+      replayed = replay_scene_recipe<gx::PipelineConfig>(type, gx::GXPipelineConfigVersion, gx::create_pipeline,
+                                                         hash, blob, size, firstFrameUsed);
+    } else if (type == ShaderType::Clear) {
+      replayed = replay_scene_recipe<clear::PipelineConfig>(type, clear::ClearPipelineConfigVersion,
+                                                            clear::create_pipeline, hash, blob, size,
+                                                            firstFrameUsed);
+    }
+    queued += replayed ? 1 : 0;
+  }
+  if (ret != SQLITE_DONE) {
+    Log.warn("Pipeline scene replay stopped early: {}", sqlite3_errmsg(g_pipelineCacheDb));
+  }
+  sqlite3_reset(stmt);
+  sqlite3_clear_bindings(stmt);
+  Log.info("Pipeline scene replay: scene {:016x}, {} recorded, {} queued", scene, recorded, queued);
+}
+
 static void pipeline_cache_writer() {
 #ifdef TRACY_ENABLE
   tracy::SetThreadName("Pipeline cache writer thread");
@@ -916,19 +1082,27 @@ static void pipeline_cache_writer() {
 
   while (true) {
     std::deque<PipelineCacheWrite> batch;
+    std::deque<PipelineSceneLink> links;
+    std::deque<uint64_t> replays;
+    bool stopping;
     {
       std::unique_lock lock{g_pipelineCacheWriterMutex};
-      g_pipelineCacheWriterCv.wait(lock,
-                                   [] { return g_pipelineCacheWriterStop || !g_pipelineCacheWriteQueue.empty(); });
-      if (g_pipelineCacheWriterStop && g_pipelineCacheWriteQueue.empty()) {
+      g_pipelineCacheWriterCv.wait(lock, [] {
+        return g_pipelineCacheWriterStop || !g_pipelineCacheWriteQueue.empty() ||
+               !g_pipelineSceneLinkQueue.empty() || !g_pipelineSceneReplayQueue.empty();
+      });
+      if (g_pipelineCacheWriterStop && g_pipelineCacheWriteQueue.empty() && g_pipelineSceneLinkQueue.empty()) {
         return;
       }
       batch.swap(g_pipelineCacheWriteQueue);
+      links.swap(g_pipelineSceneLinkQueue);
+      replays.swap(g_pipelineSceneReplayQueue);
       g_pipelineCachePendingWrites.clear();
+      stopping = g_pipelineCacheWriterStop;
     }
 
     bool writeFailed = false;
-    {
+    if (!batch.empty() || !links.empty()) {
       sqlite::Transaction tx(g_pipelineCacheDb, Log, true);
       if (!tx) {
         Log.error("Failed to begin pipeline cache write transaction");
@@ -936,6 +1110,12 @@ static void pipeline_cache_writer() {
       } else {
         for (const auto& write : batch) {
           if (!write_pipeline_cache_record(write)) {
+            writeFailed = true;
+            break;
+          }
+        }
+        for (const auto& link : links) {
+          if (writeFailed || !write_pipeline_scene_link(link)) {
             writeFailed = true;
             break;
           }
@@ -950,6 +1130,11 @@ static void pipeline_cache_writer() {
     if (writeFailed) {
       pipeline_cache_abort();
       return;
+    }
+
+    // Only the newest request matters: an older course is no longer loading.
+    if (!replays.empty() && !stopping) {
+      replay_pipeline_scene(replays.back());
     }
   }
 }
@@ -1167,6 +1352,8 @@ static void stop_pipeline_cache_writer() {
 
   g_pipelineCacheWriteQueue.clear();
   g_pipelineCachePendingWrites.clear();
+  g_pipelineSceneLinkQueue.clear();
+  g_pipelineSceneReplayQueue.clear();
 }
 
 template <>
@@ -1230,9 +1417,36 @@ void shutdown_pipeline_cache() {
   g_priorityPipelines.clear();
   g_backgroundPipelines.clear();
   g_pendingPipelines.clear();
+  g_pipelineScene = 0;
+  g_pipelineSceneRecorded.clear();
+  g_pipelineSceneGeneration.fetch_add(1, std::memory_order_release);
 
   queuedPipelines = 0;
   createdPipelines = 0;
+}
+
+uint32_t pipeline_scene_generation() noexcept {
+  return g_pipelineSceneGeneration.load(std::memory_order_acquire);
+}
+
+void set_pipeline_scene(uint64_t scene) noexcept {
+  {
+    std::scoped_lock guard{g_pipelineMutex};
+    // A second load of the same course is a new visit and must replay and
+    // record again. The DVD caller filters repeated reads of one archive.
+    g_pipelineScene = scene;
+    g_pipelineSceneStartFrame = current_frame();
+    g_pipelineSceneRecorded.clear();
+    g_pipelineSceneGeneration.fetch_add(1, std::memory_order_release);
+  }
+  if (scene == 0 || g_pipelineCacheBroken || !g_pipelineCacheWriterThread.joinable()) {
+    return;
+  }
+  {
+    std::lock_guard lock{g_pipelineCacheWriterMutex};
+    g_pipelineSceneReplayQueue.push_back(scene);
+  }
+  g_pipelineCacheWriterCv.notify_one();
 }
 
 void begin_pipeline_frame() {
@@ -1319,3 +1533,5 @@ void aurora_set_skip_unready_pipelines(const bool enabled) { aurora::gfx::set_sk
 bool aurora_get_skip_unready_pipelines() { return aurora::gfx::skip_unready_pipelines(); }
 
 uint32_t aurora_get_queued_pipeline_count() { return aurora::gfx::queued_pipeline_count(); }
+
+void aurora_set_pipeline_scene(uint64_t scene) { aurora::gfx::set_pipeline_scene(scene); }

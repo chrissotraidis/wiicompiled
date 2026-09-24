@@ -23,6 +23,8 @@ void end_pipeline_frame();
 void set_skip_unready_pipelines(bool enabled) noexcept;
 bool skip_unready_pipelines() noexcept;
 uint32_t queued_pipeline_count() noexcept;
+// Changes when a course scene changes so GX's draw memos can record reused pipelines.
+uint32_t pipeline_scene_generation() noexcept;
 
 template <typename Config>
 PipelineRef find_pipeline(ShaderType type, const Config& config, NewPipelineCallback&& cb);
