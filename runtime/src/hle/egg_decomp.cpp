@@ -1,10 +1,12 @@
 #include "hle_stubs.h"
 
 #include <cstdint>
+#include <cstdlib>
 #include <limits>
 #include "memory.h"
 #include "recomp_mod_loader.h"
 #include "runtime_log.h"
+#include "system_bridge.h"
 
 extern "C" void GxNotifyGuestRamDmaWrite(uint32_t addr, uint32_t size);
 
@@ -41,7 +43,7 @@ static uint32_t DecodeSZS(uint32_t src, uint32_t expandSize, Access& access) {
                                    << std::dec << ", back-reference before output" << std::endl;
                 ShowRuntimeFatalPopup("corrupt compressed file",
                                       "The game stopped decoding a malformed Yaz0 file.");
-                std::abort();
+                RuntimeCrash::RuntimeTerminate(EXIT_FAILURE, "malformed Yaz0 back-reference");
             }
             uint32_t copyIdx = dstIdx - distance;
             uint32_t count = rep >> 12;
@@ -56,7 +58,7 @@ static uint32_t DecodeSZS(uint32_t src, uint32_t expandSize, Access& access) {
                                        << std::endl;
                     ShowRuntimeFatalPopup("corrupt compressed file",
                                           "The game stopped decoding a malformed Yaz0 file.");
-                    std::abort();
+                    RuntimeCrash::RuntimeTerminate(EXIT_FAILURE, "malformed Yaz0 output length");
                 }
                 access.WriteOutput(dstIdx++, access.ReadOutput(copyIdx++));
             }

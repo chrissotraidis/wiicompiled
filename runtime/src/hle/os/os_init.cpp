@@ -75,7 +75,7 @@ extern "C" void OSFatal_HLE_801a4ec4(CpuContext* ctx) {
     SetRuntimeExitCode(EXIT_FAILURE);
     ShowRuntimeFatalPopup("the guest operating system reported a fatal error", details);
     MarkFatalErrorReported();
-    std::exit(EXIT_FAILURE);
+    RuntimeCrash::RuntimeTerminate(EXIT_FAILURE, "guest OSFatal");
 }
 
 REGISTER_NATIVE_FUNCTION_AS(0x801A4EC4, OSFatal_HLE_801a4ec4, "OSFatal_HLE_801a4ec4");

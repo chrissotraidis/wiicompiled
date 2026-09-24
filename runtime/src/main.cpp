@@ -67,6 +67,7 @@
 #include "wup028_adapter.h"
 #include "fiber_manager.h"
 #include "hle_stubs.h"
+#include "hle/audio/ax_dsp.h"
 #include "runtime_config.h"
 #include "runtime_log.h"
 #include "runtime_product.h"
@@ -820,6 +821,30 @@ void WriteCrashArtifacts(std::string_view reason, std::string_view extraDetails,
     }
 }
 
+[[noreturn]] void RuntimeTerminate(int code, std::string_view reason) noexcept {
+    static std::atomic_flag terminating = ATOMIC_FLAG_INIT;
+    if (terminating.test_and_set(std::memory_order_acq_rel)) {
+        std::_Exit(code);
+    }
+
+    std::fprintf(stderr, "[runtime] exit %d: %.*s\n", code,
+                 static_cast<int>(reason.size()), reason.data());
+    if (code != 0 && !g_fatalErrorReported.load(std::memory_order_acquire)) {
+        WriteCrashArtifacts("terminate", reason);
+        MarkFatalErrorReported();
+    }
+    SetRuntimeExitCodeImpl(code);
+
+    // Stop workers before their guest-memory mappings or static state disappear.
+    try { AxDspHle::ShutdownMixWorker(); } catch (...) {}
+    if (g_auroraInitialized.exchange(false, std::memory_order_acq_rel)) {
+        try { aurora_shutdown(); } catch (...) {}
+    }
+    try { ShutdownProcessTranscript(); } catch (...) {}
+    std::fflush(nullptr);
+    std::_Exit(code);
+}
+
 [[noreturn]] void FatalMissingGuestTarget(uint32_t target, CpuContext* cpu) noexcept {
     RT_LOG(RT_TAG_RUNTIME) << "InvokeIndirectCpu: target 0x" << std::hex << target
               << " not translated (missing function)" << std::dec << std::endl;
@@ -844,7 +869,7 @@ void WriteCrashArtifacts(std::string_view reason, std::string_view extraDetails,
     WriteCrashArtifacts("missing_target", message.str(), &target);
     ShowRuntimeFatalPopup("Missing translated function", message.str());
     MarkFatalErrorReported();
-    std::exit(EXIT_FAILURE);
+    RuntimeTerminate(EXIT_FAILURE, "missing translated guest target");
 }
 
 } // namespace RuntimeCrash
