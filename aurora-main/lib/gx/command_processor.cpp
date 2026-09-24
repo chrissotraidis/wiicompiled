@@ -3,6 +3,7 @@
 #include "command_processor.hpp"
 
 #include "../gfx/common.hpp"
+#include "../gfx/pipeline_cache.hpp"
 #include "../dolphin/gx/__gx.h"
 #include "../gfx/texture_replacement.hpp"
 #include "dolphin/gx/GXAurora.h"
@@ -2057,6 +2058,13 @@ static const CachedPipelineState& cached_pipeline_state(const PipelineConfig& co
     CachedPipelineState state{};
   };
   static std::array<Entry, CacheSize> cache{};
+  static u32 cacheSceneGeneration = 0;
+
+  const u32 sceneGeneration = gfx::pipeline_scene_generation();
+  if (cacheSceneGeneration != sceneGeneration) {
+    for (auto& entry : cache) entry.valid = false;
+    cacheSceneGeneration = sceneGeneration;
+  }
 
   const HashType hash = xxh3_hash(config, static_cast<HashType>(gfx::ShaderType::GX));
   auto& entry = cache[hash & (CacheSize - 1)];
@@ -2081,6 +2089,7 @@ static const CachedPipelineState& resolve_pipeline_state(GXPrimitive prim, GXVtx
   struct Memo {
     const CachedPipelineState* state = nullptr;
     u32 generation = 0;
+    u32 sceneGeneration = 0;
     u32 sampleCount = 0;
     GXPrimitive prim = static_cast<GXPrimitive>(0);
     GXVtxFmt fmt = static_cast<GXVtxFmt>(0);
@@ -2089,7 +2098,8 @@ static const CachedPipelineState& resolve_pipeline_state(GXPrimitive prim, GXVtx
 
   const u32 sampleCount = gfx::get_sample_count();
   const u32 generation = g_gxState.pipelineStateGeneration;
-  if (memo.state != nullptr && memo.generation == generation && memo.sampleCount == sampleCount &&
+  const u32 sceneGeneration = gfx::pipeline_scene_generation();
+  if (memo.state != nullptr && memo.generation == generation && memo.sceneGeneration == sceneGeneration && memo.sampleCount == sampleCount &&
       memo.prim == prim && memo.fmt == fmt) LIKELY {
     return *memo.state;
   }
@@ -2101,6 +2111,7 @@ static const CachedPipelineState& resolve_pipeline_state(GXPrimitive prim, GXVtx
   memo = Memo{
       .state = &state,
       .generation = generation,
+      .sceneGeneration = sceneGeneration,
       .sampleCount = sampleCount,
       .prim = prim,
       .fmt = fmt,
