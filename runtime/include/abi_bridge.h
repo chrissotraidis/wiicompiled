@@ -639,7 +639,7 @@ inline void InvokeIndirectJump(uint32_t target, CpuContext* ctx) {
     SetRuntimeExitCode(EXIT_FAILURE);
     ShowRuntimeFatalPopup("Missing indirect jump target", message.str());
     MarkFatalErrorReported();
-    std::exit(EXIT_FAILURE);
+    RuntimeCrash::RuntimeTerminate(EXIT_FAILURE, "missing indirect jump target");
 }
 
 inline void InvokeIndirectCpu(uint32_t target, CpuContext* ctx) {
