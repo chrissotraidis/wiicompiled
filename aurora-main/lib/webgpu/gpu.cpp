@@ -117,8 +117,8 @@ RenderTargetSize clamp_frame_buffer_size(uint32_t width, uint32_t height) noexce
   return {budgeted.width, budgeted.height};
 }
 
-// V-Sync is never enabled: the guest drives its own pacing, and blocking in Present() couples the
-// whole machine to the monitor (a 120 FPS target on a 75 Hz display runs in slow motion).
+// The default leaves presentation unthrottled. The iOS native-rate FIFO
+// experiment is opt-in and disengages while frame interpolation is active.
 wgpu::PresentMode best_present_mode() {
   const auto supports = [](const wgpu::PresentMode candidate) {
     for (size_t i = 0; i < g_surfaceCapabilities.presentModeCount; ++i) {
@@ -128,6 +128,12 @@ wgpu::PresentMode best_present_mode() {
     }
     return false;
   };
+  if (g_config.vsync && g_backendType == wgpu::BackendType::Metal &&
+      aurora_get_frame_interpolation_fps() == 0) {
+    if (supports(wgpu::PresentMode::Fifo)) {
+      return wgpu::PresentMode::Fifo;
+    }
+  }
   // Vulkan prefers Mailbox, every other backend Immediate. Under window capture the Vulkan driver
   // cannot flip and Immediate leaks about a megabyte per present until the device is lost.
   const bool preferMailbox = g_backendType == wgpu::BackendType::Vulkan;
@@ -992,16 +998,22 @@ void resize_swapchain(uint32_t width, uint32_t height, uint32_t native_width, ui
         render_height);
   }
 
+  const auto presentMode = best_present_mode();
+  const bool presentModeChanged = g_graphicsConfig.surfaceConfiguration.presentMode != presentMode;
   const bool sizeChanged = g_graphicsConfig.surfaceConfiguration.width != native_width ||
                            g_graphicsConfig.surfaceConfiguration.height != native_height ||
                            g_frameBuffer.size.width != render_width || g_frameBuffer.size.height != render_height;
-  if (!force && !sizeChanged) {
+  if (!force && !sizeChanged && !presentModeChanged) {
     return;
   }
   if (sizeChanged) {
     gx::clear_display_copy_cache();
     gfx::clear_caches();
     clear_present_source_override();
+  }
+  if (presentModeChanged) {
+    Log.info("Changing surface present mode to {}", magic_enum::enum_name(presentMode));
+    g_graphicsConfig.surfaceConfiguration.presentMode = presentMode;
   }
   g_graphicsConfig.surfaceConfiguration.width = native_width;
   g_graphicsConfig.surfaceConfiguration.height = native_height;

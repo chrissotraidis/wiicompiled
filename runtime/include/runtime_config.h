@@ -46,6 +46,7 @@ struct RuntimeUserConfig {
     std::optional<float> resolutionMultiplier;
     std::optional<std::string> graphicsApi;
     std::optional<std::string> displayMode;
+    std::optional<bool> vsync;
     std::optional<uint32_t> frameInterpolationFps;
     std::optional<bool> skipUnreadyPipelines;
     std::optional<bool> disableCopyFilter;
@@ -332,6 +333,8 @@ inline void EnsureConfigFile() {
               "[video]\n"
               "widescreen = false\n"
               "resolution_multiplier = 1.0\n"
+              "# Experimental native-rate FIFO presentation; restart after changing.\n"
+              "# vsync = false\n"
               "frame_interpolation_fps = 0\n"
               "display_mode = \"windowed\"\n"
               "graphics_api = \"auto\"\n"
@@ -489,6 +492,7 @@ inline RuntimeUserConfig ParseConfigDocument(const toml::value& document) {
             config.frameInterpolationFps = migrated;
         }
     }
+    config.vsync = FindConfigValue<bool>(document, "video", "vsync");
     config.skipUnreadyPipelines = FindConfigValue<bool>(document, "video", "skip_unready_pipelines");
     config.disableCopyFilter = FindConfigValue<bool>(document, "video", "disable_copy_filter");
     config.showFps = FindConfigValue<bool>(document, "video", "show_fps");
@@ -1050,6 +1054,9 @@ inline void LogLoadedConfig() {
             }
             if (config.frameInterpolationFps) {
                 std::cout << " frame_interpolation_fps=" << *config.frameInterpolationFps;
+            }
+            if (config.vsync) {
+                std::cout << " vsync=" << (*config.vsync ? "true" : "false");
             }
             if (config.skipUnreadyPipelines) {
                 std::cout << " skip_unready_pipelines=" << (*config.skipUnreadyPipelines ? "true" : "false");

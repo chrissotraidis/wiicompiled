@@ -1419,6 +1419,7 @@ int RuntimeMain(int argc, char** argv) {
         // We use auto backend (or specific if needed) and set a default window size.
         // This is required for GX commands (like texture loading) to work.
         AuroraConfig auroraConfig = {};
+        auroraConfig.vsync = RuntimeConfigFile::Get().vsync.value_or(false);
         auroraConfig.appName = RuntimeProduct::Active().displayName.data();
         const auto applicationDataDirectory = RuntimeConfigFile::ApplicationDataDirectory();
         const auto rendererCacheDirectory = RuntimeConfigFile::CacheDataDirectory();
@@ -1462,7 +1463,6 @@ int RuntimeMain(int argc, char** argv) {
         auroraConfig.allowTextureReplacements = RuntimeConfigFile::TextureReplacements(false);
         auroraConfig.allowTextureDumps = auroraConfig.allowTextureReplacements &&
                                          RuntimeConfigFile::TextureDumps(false);
-        // No vsync knob: aurora always configures a non-blocking present mode.
         auroraConfig.desiredBackend = BACKEND_AUTO;
 #if defined(__APPLE__) && TARGET_OS_IOS
         ConfigureMkwMobileAspectMode(mobileAspectMode, auroraConfig.windowWidth,

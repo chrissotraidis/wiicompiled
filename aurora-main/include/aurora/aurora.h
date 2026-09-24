@@ -87,8 +87,8 @@ typedef struct {
   AuroraBackend desiredBackend;
   uint32_t msaa;
   uint16_t maxTextureAnisotropy;
-  // No vsync knob exists: the swapchain is always configured for a
-  // non-blocking present mode (Immediate, else Mailbox). See best_present_mode.
+  // iOS startup opt-in for native-rate FIFO presentation.
+  bool vsync;
   bool startFullscreen;
   bool allowJoystickBackgroundEvents;
   bool pauseOnFocusLost;
