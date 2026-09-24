@@ -4,6 +4,10 @@
 #include <cstdint>
 
 namespace aurora::input {
+// SDL controllers assigned to Classic channels own those guest ports even
+// while the bridge is suspended. This does not consume button presses.
+uint32_t standard_gamepad_assigned_mask() noexcept;
+
 // Connection probes must never consume a latched registration button press.
 bool standard_gamepad_connected(uint32_t player,
                                 bool allowSingleUnassigned) noexcept;

@@ -12,6 +12,7 @@
 #include "../vi/vi_internal.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -173,13 +174,56 @@ struct CopyTexturePoolEntry {
   u32 scaledWidth = 0;
   u32 scaledHeight = 0;
   aurora::gfx::TextureHandle handle;
+  u32 lastUsedFrame = 0;
 };
 std::vector<CopyTexturePoolEntry> g_copyTexturePool;
   // Keep only a few reusable copy targets per destination.
 constexpr size_t kCopyTexturePoolPerKey = 3;
+// Pooled targets exist only for reuse by recurring copies. A spare that nothing
+// else references and that no copy has requested for this many frames belongs to
+// a finished scene; keeping it only retains GPU memory for the process lifetime.
+constexpr u32 kCopyTexturePoolIdleFrames = 300;
+std::atomic<u64> g_textureCopies{0};
+std::atomic<u32> g_copyTexturePoolEntries{0};
+std::atomic<u64> g_copyTexturePoolBytes{0};
+std::atomic<u64> g_copyTexturePoolReleased{0};
+std::atomic<u32> g_liveCopyTextures{0};
+std::atomic<u64> g_liveCopyTextureBytes{0};
+
+// Live copy targets stay referenced by the copy cache until the guest flushes
+// their destination; they are reported separately from reuse-only pool spares.
+void publish_live_copy_texture_stats() {
+  u64 bytes = 0;
+  u32 count = 0;
+  for (const auto& [_, ref] : g_gxState.copyTextureCache) {
+    if (ref.handle) {
+      bytes += u64{ref.handle->size.width} * ref.handle->size.height * 4;
+      ++count;
+    }
+  }
+  g_liveCopyTextures.store(count, std::memory_order_relaxed);
+  g_liveCopyTextureBytes.store(bytes, std::memory_order_relaxed);
+}
+
+void publish_copy_texture_pool_stats() {
+  // Approximate: copy targets are four-byte color textures at their scaled size.
+  u64 bytes = 0;
+  for (const auto& entry : g_copyTexturePool) {
+    bytes += u64{entry.scaledWidth} * entry.scaledHeight * 4;
+  }
+  g_copyTexturePoolEntries.store(static_cast<u32>(g_copyTexturePool.size()), std::memory_order_relaxed);
+  g_copyTexturePoolBytes.store(bytes, std::memory_order_relaxed);
+}
 
 aurora::gfx::TextureHandle acquire_copy_texture(const aurora::gx::GXState::CopyTextureKey& key, u32 width, u32 height,
                                                 GXTexFmt texCopyFmt) {
+  const u32 frame = aurora::gfx::current_frame();
+  const auto released = std::erase_if(g_copyTexturePool, [frame](const CopyTexturePoolEntry& entry) {
+    return entry.handle.use_count() <= 1 && frame - entry.lastUsedFrame > kCopyTexturePoolIdleFrames;
+  });
+  if (released != 0) {
+    g_copyTexturePoolReleased.fetch_add(released, std::memory_order_relaxed);
+  }
   size_t sameKey = 0;
   for (auto it = g_copyTexturePool.begin(); it != g_copyTexturePool.end();) {
     if (!(it->key == key)) {
@@ -193,6 +237,8 @@ aurora::gfx::TextureHandle acquire_copy_texture(const aurora::gx::GXState::CopyT
     }
     ++sameKey;
     if (it->scaledWidth == width && it->scaledHeight == height && it->handle.use_count() == 1) {
+      it->lastUsedFrame = frame;
+      publish_copy_texture_pool_stats();
       return it->handle;
     }
     ++it;
@@ -200,8 +246,9 @@ aurora::gfx::TextureHandle acquire_copy_texture(const aurora::gx::GXState::CopyT
 
   auto handle = create_copy_texture(width, height, texCopyFmt);
   if (sameKey < kCopyTexturePoolPerKey) {
-    g_copyTexturePool.push_back({key, width, height, handle});
+    g_copyTexturePool.push_back({key, width, height, handle, frame});
   }
+  publish_copy_texture_pool_stats();
   return handle;
 }
 
@@ -236,11 +283,41 @@ namespace aurora::gx {
 void prune_copy_texture_pool(const void* dest) noexcept {
   if (dest == nullptr) {
     g_copyTexturePool.clear();
+    publish_copy_texture_pool_stats();
     return;
   }
   std::erase_if(g_copyTexturePool, [dest](const CopyTexturePoolEntry& entry) { return entry.key.dest == dest; });
+  publish_copy_texture_pool_stats();
+}
+
+CopyTexturePoolStats copy_texture_pool_stats() noexcept {
+  return {
+      .entries = g_copyTexturePoolEntries.load(std::memory_order_relaxed),
+      .approxBytes = g_copyTexturePoolBytes.load(std::memory_order_relaxed),
+      .released = g_copyTexturePoolReleased.load(std::memory_order_relaxed),
+      .liveCopies = g_liveCopyTextures.load(std::memory_order_relaxed),
+      .liveCopyApproxBytes = g_liveCopyTextureBytes.load(std::memory_order_relaxed),
+      .textureCopies = g_textureCopies.load(std::memory_order_relaxed),
+  };
 }
 } // namespace aurora::gx
+
+#if defined(__ANDROID__)
+extern "C" void KartPadAndroidLogMetric(const char*, const char*, ...);
+// Called from the periodic telemetry on the game thread; reads only relaxed counters.
+extern "C" void KartPadLogGpuResourceMetrics() {
+  const auto pool = aurora::gx::copy_texture_pool_stats();
+  KartPadAndroidLogMetric("KartPadGpuResources",
+                          "copy_pool_entries=%u copy_pool_approx_mib=%.1f copy_pool_released=%llu "
+                          "live_copies=%u live_copy_approx_mib=%.1f "
+                          "texture_copies=%llu staging_splits=%llu",
+                          pool.entries, static_cast<double>(pool.approxBytes) / (1024.0 * 1024.0),
+                          static_cast<unsigned long long>(pool.released),
+                          pool.liveCopies, static_cast<double>(pool.liveCopyApproxBytes) / (1024.0 * 1024.0),
+                          static_cast<unsigned long long>(pool.textureCopies),
+                          static_cast<unsigned long long>(aurora::gfx::staging_split_count()));
+}
+#endif
 
 extern "C" {
 GXRenderModeObj GXNtsc480IntDf = {
@@ -520,9 +597,15 @@ void GXCopyTex(void* dest, GXBool clear) {
     clearState.clearAlpha = clear && alphaUpdate;
   }
   const auto copyFilter = combined_copy_filter_coefficients(g_gxState.copyFilterVFilter);
-  // Skip only recurring color copies so one-shot copies are never lost.
-  const bool producedConsecutively = handle.revision != 0 && currentFrame - handle.lastProducedFrame <= 1;
-  const bool persistentCopy = !aurora::gx::is_depth_format(texCopyFmt) && !producedConsecutively;
+  // Every GXCopyTex is observable texture data. Reusing a destination in this
+  // or the previous frame does not guarantee another redraw: menu thumbnail
+  // scratch targets can be reused and then retained. Depth copies have the
+  // same requirement. Only display presentation may skip unfinished draws.
+  // Mario Kart Wii menus copy the same destinations every frame while baking
+  // different thumbnails, so a long run of copies does not prove a redraw
+  // either (a 120-frame "streaming" exemption reproduced black thumbnails).
+  const bool persistentCopy = true;
+  g_textureCopies.fetch_add(1, std::memory_order_relaxed);
   aurora::gfx::resolve_pass(handle.handle, rect, clearState.clearColor, clearState.clearAlpha, clearState.clearDepth,
                             clearState.clearColorValue, aurora::gx::clear_depth_value(), resolveFmt,
                             &sourceRect.sampleRect, g_gxState.texCopyHalfScale, &copyFilter, forceOpaqueAlpha,
@@ -537,6 +620,7 @@ void GXCopyTex(void* dest, GXBool clear) {
   handle.dataSize = GXGetTexBufferSize(static_cast<u16>(logicalDstWidth), static_cast<u16>(logicalDstHeight), texCopyFmt, GX_FALSE, 0);
   aurora::gx::notify_copy_texture_created();
   g_gxState.copyTextures[dest] = handle;
+  publish_live_copy_texture_stats();
   // Keep the GPU copy and download it only if guest code reads the destination.
   aurora::gfx::efb_ram::schedule(dest, logicalDstWidth, logicalDstHeight, texCopyFmt, handle.handle);
 }

@@ -1,6 +1,6 @@
 # Fails the release build when a fact duplicated across the repo stops agreeing with the copy
 # that owns it (recomp.yml). Scripts read pinned facts through Get-MkwProjectPins, but three
-# consumers can't read YAML (the C++ runtime header, the C# constants, hand-written lists on
+# consumers can't read YAML (the C++ runtime header, the C# constants, shell scripts, and hand-written lists on
 # both sides of the C#/PowerShell boundary), so those are checked here instead.
 [CmdletBinding()]
 param([string]$RepositoryRoot)
@@ -15,7 +15,8 @@ if ([string]::IsNullOrWhiteSpace($RepositoryRoot)) {
 }
 $repoRoot = [IO.Path]::GetFullPath($RepositoryRoot)
 $launcher = Join-Path $repoRoot 'Launcher'
-$setup = Join-Path $launcher 'WiiCompiled.Setup'
+$setup = Join-Path $launcher 'WiiCompiled.Setup.Windows'
+$common = Join-Path $launcher 'WiiCompiled.Setup.Common'
 
 $failures = [Collections.Generic.List[string]]::new()
 function Add-Failure([string]$Message) { $failures.Add($Message) }
@@ -48,12 +49,20 @@ function Compare-Set([string[]]$Expected, [string[]]$Actual, [string]$ExpectedNa
 $pins = Get-MkwProjectPins (Join-Path $repoRoot 'projects\mkwii\recomp.yml')
 
 # --- The Retro-WFC endpoint: recomp.yml owns it; the installer host pins the same string so a
-# --- redirected or rewritten endpoint cannot be fetched from.
-$inputValidation = Read-SourceFile (Join-Path $setup 'InputValidation.cs') 'InputValidation.cs'
-$hostUri = Get-CapturedValue $inputValidation 'CurrentRetroWfcPayloadUri\s*=\s*"([^"]+)"' `
+# --- redirected or rewritten endpoint cannot be fetched from. The literal lives in
+# --- WiiCompiled.Setup.Common (shared with WiiCompiled.Setup.Linux) - InputValidation.cs only
+# --- re-exports it as `= RetroWfcPayload.CurrentRetroWfcPayloadUri;`, no literal to capture there.
+$retroWfcPayload = Read-SourceFile (Join-Path $common 'RetroWfcPayload.cs') 'RetroWfcPayload.cs'
+$hostUri = Get-CapturedValue $retroWfcPayload 'CurrentRetroWfcPayloadUri\s*=\s*"([^"]+)"' `
     'The host Retro-WFC endpoint constant'
 if ($hostUri -cne $pins.RetroWfcPayloadUri) {
     Add-Failure "InputValidation.CurrentRetroWfcPayloadUri is '$hostUri' but recomp.yml pins '$($pins.RetroWfcPayloadUri)'."
+}
+$macosSetup = Read-SourceFile (Join-Path $launcher 'macos\setup.command') 'macOS setup.command'
+$macosUri = Get-CapturedValue $macosSetup "'([^']*/api/wfc/payload\?g=RMCPD00)'" `
+    'The macOS Retro-WFC endpoint'
+if ($macosUri -cne $pins.RetroWfcPayloadUri) {
+    Add-Failure "macOS setup.command downloads '$macosUri' but recomp.yml pins '$($pins.RetroWfcPayloadUri)'."
 }
 
 # --- The game identity: the manifest carries it, but the host also compiles a fallback for a

@@ -226,6 +226,16 @@ bool SDLCALL lifecycle_event_watch(void*, SDL_Event* event) {
     g_backgrounded.store(true, std::memory_order_release);
 #if defined(SDL_PLATFORM_ANDROID)
     input::set_standard_gamepads_active(false);
+#ifdef AURORA_ENABLE_GX
+    if (event->type == SDL_EVENT_WILL_ENTER_BACKGROUND) {
+      // SDL 3 sends app lifecycle events only to watchers, then blocks its
+      // Android pump until resume. Flush here before that boundary. This does
+      // not reconfigure surfaces; serialize with renderer work and let Dawn
+      // serialize its own compiler/device work internally.
+      std::lock_guard gpuLock(renderer_gpu_mutex());
+      webgpu::serialize_pipeline_caches();
+    }
+#endif
 #endif
     break;
   case SDL_EVENT_DID_ENTER_FOREGROUND:

@@ -475,6 +475,16 @@ void set_display_copy_present_source() noexcept;
 void evict_copy_texture(const void* dest) noexcept;
 // Drops retired GX copy targets so they cannot outlive the destination they were recycled for.
 void prune_copy_texture_pool(const void* dest) noexcept;
+struct CopyTexturePoolStats {
+  u32 entries = 0;
+  u64 approxBytes = 0;
+  u64 released = 0;
+  u32 liveCopies = 0;
+  u64 liveCopyApproxBytes = 0;
+  u64 textureCopies = 0;
+};
+// Relaxed snapshot for diagnostics; safe to read from any thread.
+CopyTexturePoolStats copy_texture_pool_stats() noexcept;
 void evict_texture_object(u32 texObjId) noexcept;
 void evict_tlut_object(u32 tlutObjId) noexcept;
 void invalidate_static_texture_cache() noexcept;
@@ -490,7 +500,14 @@ const gfx::TextureBind& get_texture(GXTexMapID id) noexcept;
 void resolve_sampled_textures(const ShaderInfo& info) noexcept;
 
 inline float clear_depth_value() {
-  return std::min(static_cast<float>(g_gxState.clearDepth) / 16777216.f, 16777215.f / 16777216.f);
+  // g_gxState.clearDepth is in GX's own distance terms (0 = near, larger = farther), independent of
+  // how UseReversedZ encodes that as a host depth value - it must be re-mapped the same way the
+  // projection matrix and depth compare function are, or the buffer clears to the wrong extreme
+  // (verified directly: matches upstream aurora's clear_depth_value, which does this same inversion
+  // and was the second missing piece alongside to_compare_function's compare-op inversion).
+  const float normalizedDepth =
+      std::min(static_cast<float>(g_gxState.clearDepth) / 16777216.f, 16777215.f / 16777216.f);
+  return UseReversedZ ? (1.f - normalizedDepth) : normalizedDepth;
 }
 
 inline bool render_target_has_alpha(GXPixelFmt pixelFmt) noexcept { return pixelFmt == GX_PF_RGBA6_Z24; }

@@ -338,11 +338,38 @@ void apply_port_preferences() noexcept {
   }
 }
 
-// Ports are explicit assignments. SDL may choose a player index at connection
-// time, but accepting it would make a newly connected controller silently take
-// over a game port before the user assigns it in the controller menu.
+// SDL only hands out a player index when the device already had a gamepad mapping
+// at connect time, so anything mapped later (the setup wizard) stays at -1.
 void ensure_player_index(GameController& controller) noexcept {
-  assign_player_index(controller, -1);
+  const int32_t player = SDL_GetGamepadPlayerIndex(controller.m_controller);
+  if (player >= 0) {
+    controller.m_playerIndex = player;
+    return;
+  }
+  if (controller.m_playerIndex >= 0) {
+    return;
+  }
+  ensure_port_preferences_loaded();
+  const auto claim = [&](bool skipConfiguredPorts) {
+    for (int32_t port = 0; port < PAD_MAX_CONTROLLERS; ++port) {
+      if (skipConfiguredPorts && g_portPreferences[port].state != PortPreferenceState::Unset) {
+        continue;
+      }
+      const bool taken = std::any_of(g_GameControllers.begin(), g_GameControllers.end(), [&](const auto& entry) {
+        return entry.second.m_controller != controller.m_controller && effective_player_index(entry.second) == port;
+      });
+      if (!taken) {
+        assign_player_index(controller, port);
+        return true;
+      }
+    }
+    return false;
+  };
+  // Explicitly configured ports are only used as a last resort so a hot-plugged
+  // controller cannot steal the port its preferred device will claim.
+  if (!claim(true)) {
+    claim(false);
+  }
 }
 } // namespace
 
@@ -366,7 +393,9 @@ static GameController* resolve_standard_gamepad(
       break;
     }
   }
+  // First-use convenience must not undo an explicit Unassigned choice.
   if (controller == nullptr && player == 0 && allowSingleUnassigned &&
+      g_portPreferences[0].state == PortPreferenceState::Unset &&
       g_GameControllers.size() == 1) {
     auto& [instance, candidate] = *g_GameControllers.begin();
     (void)instance;
@@ -375,6 +404,18 @@ static GameController* resolve_standard_gamepad(
     }
   }
   return controller;
+}
+
+uint32_t standard_gamepad_assigned_mask() noexcept {
+  std::scoped_lock lock(g_standardGamepadBridgeMutex);
+  uint32_t mask = 0;
+  for (const auto& [instance, controller] : g_GameControllers) {
+    (void)instance;
+    if (controller.m_controller != nullptr && controller.m_playerIndex >= 0 &&
+        controller.m_playerIndex < PAD_MAX_CONTROLLERS)
+      mask |= 1u << controller.m_playerIndex;
+  }
+  return mask;
 }
 
 bool standard_gamepad_connected(uint32_t player, bool allowSingleUnassigned) noexcept {
@@ -653,6 +694,8 @@ SDL_JoystickID add_controller(SDL_JoystickID which) noexcept {
       return -1;
     }
     controller.m_isGameCube = controller.m_vid == 0x057E && controller.m_pid == 0x0337;
+    const char* serial = SDL_GetGamepadSerial(ctrl);
+    controller.m_gameCubeUseOrdinaryStop = controller.m_isGameCube && serial && "GCP+"sv == serial;
     if (controller.m_isGameCube ||
         (SDL_GetGamepadType(ctrl) == SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_PRO && controller.m_pid == 0x2073)) {
       controller.m_deadZones.emulateTriggers = false;
@@ -739,6 +782,13 @@ bool controller_has_rumble(Uint32 instance) noexcept {
 void controller_rumble(uint32_t instance, uint16_t low_freq_intensity, uint16_t high_freq_intensity,
                        uint16_t duration_ms) noexcept {
   if (auto it = g_GameControllers.find(instance); it != g_GameControllers.end()) {
+    // GC Pocket+ has been observed continuing to vibrate after a hard stop;
+    // an ordinary stop cleared it. With GAMECUBE_RUMBLE_BRAKE enabled, SDL
+    // encodes (0, 1) as adapter command 0, whereas (0, 0) sends command 2.
+    // Apply the workaround here so shutdown uses the same stop as PAD calls.
+    if (it->second.m_gameCubeUseOrdinaryStop && low_freq_intensity == 0 && high_freq_intensity == 0) {
+      high_freq_intensity = 1;
+    }
     SDL_RumbleGamepad(it->second.m_controller, low_freq_intensity, high_freq_intensity, duration_ms);
   }
 }

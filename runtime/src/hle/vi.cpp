@@ -7,6 +7,7 @@
 #include "aurora_events.h"
 #include "settings_overlay.h"
 #include "fiber_manager.h"
+#include "platform/host_platform.h"
 #include "runtime_log.h"
 
 #include <dolphin/vi.h>
@@ -22,16 +23,20 @@
 #include <mutex>
 #include <thread>
 
-#include <aurora/aurora.h>
-
 #if defined(_WIN32)
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
+#endif
+
+#include <aurora/aurora.h>
+
+#if defined(__ANDROID__)
+#include <android/log.h>
+#include <dlfcn.h>
+#include <time.h>
+#include <unistd.h>
 #endif
 
 // Forward declaration for OSWakeupThread - used to wake threads on VI retrace queue
@@ -48,6 +53,61 @@ extern "C" int32_t OS__RestoreInterrupts_801a65d4(int32_t level);
 // aurora_begin_frame() before GX commands and aurora_end_frame() after.
 std::atomic_bool g_auroraFrameActive{false};
 std::atomic_bool g_auroraFrameHadWork{false};
+
+#if defined(__ANDROID__)
+namespace {
+// Android Dynamic Performance Framework hint for the game thread (API 33+).
+// Declares the per-frame budget and reports the thread's CPU work each
+// produced frame so the OS can raise clocks or move the thread to a faster
+// core when frames run long. It only affects scheduling, never game logic.
+// Loaded dynamically because the app still supports API 28.
+struct PerformanceHintApi {
+    using GetManager = void* (*)();
+    using CreateSession = void* (*)(void*, const int32_t*, size_t, int64_t);
+    using ReportActual = int (*)(void*, int64_t);
+    GetManager getManager = nullptr;
+    CreateSession createSession = nullptr;
+    ReportActual reportActual = nullptr;
+    void* session = nullptr;
+    bool attempted = false;
+    int64_t lastThreadCpuNanos = -1;
+};
+
+int64_t ThreadCpuNanos() {
+    timespec value{};
+    if (clock_gettime(CLOCK_THREAD_CPUTIME_ID, &value) != 0) return -1;
+    return static_cast<int64_t>(value.tv_sec) * 1000000000LL + value.tv_nsec;
+}
+
+void ReportGameThreadFrameWork(uint64_t intervalNanos) {
+    static PerformanceHintApi api;
+    if (!api.attempted) {
+        api.attempted = true;
+        if (void* library = dlopen("libandroid.so", RTLD_NOW | RTLD_LOCAL)) {
+            api.getManager = reinterpret_cast<PerformanceHintApi::GetManager>(
+                dlsym(library, "APerformanceHint_getManager"));
+            api.createSession = reinterpret_cast<PerformanceHintApi::CreateSession>(
+                dlsym(library, "APerformanceHint_createSession"));
+            api.reportActual = reinterpret_cast<PerformanceHintApi::ReportActual>(
+                dlsym(library, "APerformanceHint_reportActualWorkDuration"));
+        }
+        void* manager = api.getManager && api.createSession && api.reportActual ? api.getManager() : nullptr;
+        const int32_t thread = static_cast<int32_t>(gettid());
+        const int64_t target = intervalNanos != 0 ? static_cast<int64_t>(intervalNanos) : 16666667LL;
+        api.session = manager ? api.createSession(manager, &thread, 1, target) : nullptr;
+        __android_log_print(ANDROID_LOG_INFO, "KartPadPerfHint", "game thread hint session %s (target_ns=%lld)",
+                            api.session ? "active" : "unavailable", static_cast<long long>(target));
+    }
+    if (!api.session) return;
+    const int64_t now = ThreadCpuNanos();
+    if (now < 0) return;
+    if (api.lastThreadCpuNanos >= 0 && now > api.lastThreadCpuNanos) {
+        api.reportActual(api.session, now - api.lastThreadCpuNanos);
+    }
+    api.lastThreadCpuNanos = now;
+}
+} // namespace
+#endif
 
 namespace {
 
@@ -618,6 +678,9 @@ void VI_HLE_PresentFrame(bool presentedXfb, bool paceToRetrace) {
                 std::chrono::duration_cast<std::chrono::nanoseconds>(g_vi.retraceInterval)
                     .count());
         }
+#if defined(__ANDROID__)
+        ReportGameThreadFrameWork(intervalNanos);
+#endif
         // Hold the frame to its boundary only when no retrace elapsed during
         // its production. A frame that missed its boundary presents
         // immediately: hardware would quantize down to the next vblank here,

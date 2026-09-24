@@ -1,4 +1,4 @@
-﻿# Public WiiCompiled product graph.
+# Public WiiCompiled product graph.
 #
 # The translator owns the translated build graph. Mario Kart's profile-neutral
 # functions are compiled once into mkw_base_shared; only callers whose direct
@@ -8,6 +8,12 @@ set(DATA_INIT_FILE "${MKW_RUNTIME_SOURCE_DIR}/../generated/data_sections_init.cp
 set(DATA_INIT_BLOB_ASM "${MKW_RUNTIME_SOURCE_DIR}/../generated/data_sections_init_blobs.S")
 if(ANDROID AND EXISTS "${DATA_INIT_BLOB_ASM}")
     file(READ "${DATA_INIT_BLOB_ASM}" MKW_ANDROID_DATA_INIT_BLOB_CONTENT)
+    # The translator may run on a Mac while emitting Android's graph.
+    if("${MKW_ANDROID_DATA_INIT_BLOB_CONTENT}" MATCHES "\\.section __TEXT,__const")
+        string(REPLACE ".section __TEXT,__const" ".section .rodata,\"a\",%progbits" MKW_ANDROID_DATA_INIT_BLOB_CONTENT "${MKW_ANDROID_DATA_INIT_BLOB_CONTENT}")
+        string(REPLACE ".globl _k" ".globl k" MKW_ANDROID_DATA_INIT_BLOB_CONTENT "${MKW_ANDROID_DATA_INIT_BLOB_CONTENT}")
+        string(REPLACE "\n_k" "\nk" MKW_ANDROID_DATA_INIT_BLOB_CONTENT "${MKW_ANDROID_DATA_INIT_BLOB_CONTENT}")
+    endif()
     string(REPLACE ".section .rdata,\"dr\""
         ".section .rodata,\"a\",%progbits"
         MKW_ANDROID_DATA_INIT_BLOB_CONTENT
@@ -87,6 +93,10 @@ target_compile_definitions(mkw_runtime_common PRIVATE
 target_link_libraries(mkw_runtime_common PRIVATE
     aurora::gx aurora::pad aurora::si aurora::vi aurora::mtx)
 target_link_libraries(mkw_runtime_common PRIVATE mkw::pugixml mkw::toml11 mkw::cryptopp)
+if(ANDROID)
+    target_link_libraries(mkw_runtime_common PRIVATE mkw::libco)
+endif()
+
 if(APPLE)
     target_link_libraries(mkw_runtime_common PRIVATE "-framework Foundation")
 endif()
@@ -170,6 +180,12 @@ if(MKW_HAVE_RETRO_REWIND)
         foreach(source IN LISTS MKW_RETRO_EXTRA_SOURCES)
             if(source MATCHES "\\.S$")
                 file(READ "${source}" MKW_ANDROID_RETRO_BLOB_CONTENT)
+                # The translator may run on a Mac while emitting Android's graph.
+                if("${MKW_ANDROID_RETRO_BLOB_CONTENT}" MATCHES "\\.section __TEXT,__const")
+                    string(REPLACE ".section __TEXT,__const" ".section .rodata,\"a\",%progbits" MKW_ANDROID_RETRO_BLOB_CONTENT "${MKW_ANDROID_RETRO_BLOB_CONTENT}")
+                    string(REPLACE ".globl _k" ".globl k" MKW_ANDROID_RETRO_BLOB_CONTENT "${MKW_ANDROID_RETRO_BLOB_CONTENT}")
+                    string(REPLACE "\n_k" "\nk" MKW_ANDROID_RETRO_BLOB_CONTENT "${MKW_ANDROID_RETRO_BLOB_CONTENT}")
+                endif()
                 string(REPLACE ".section .rdata,\"dr\""
                     ".section .rodata,\"a\",%progbits"
                     MKW_ANDROID_RETRO_BLOB_CONTENT
@@ -199,6 +215,10 @@ if(MKW_HAVE_RETRO_REWIND)
 endif()
 
 function(mkw_configure_product target)
+    if(ANDROID)
+        target_link_libraries(${target} PRIVATE mkw::libco)
+    endif()
+
     target_sources(${target} PRIVATE $<TARGET_OBJECTS:mkw_runtime_common>)
     # Startup CPU check. Must stay a separate object library so it keeps the
     # plain baseline ISA while everything around it is built for x86-64-v3.

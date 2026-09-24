@@ -1,5 +1,11 @@
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#endif
+#include <aurora/kartpad_diagnostics.h>
 #if defined(__ANDROID__)
 #include <android/log.h>
+#include <android/native_window.h>
+#include <dlfcn.h>
 extern "C" void KartPadAndroidLogMetric(const char*, const char*, ...);
 #endif
 #include "gpu.hpp"
@@ -7,6 +13,7 @@ extern "C" void KartPadAndroidLogMetric(const char*, const char*, ...);
 #include <array>
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -84,6 +91,32 @@ static std::atomic_bool g_initialized{false};
 
 namespace {
 
+#if defined(__ANDROID__)
+void request_android_frame_rate() {
+  using SetFrameRate = int32_t (*)(ANativeWindow*, float, int8_t);
+  static const SetFrameRate setFrameRate = [] {
+    void* library = dlopen("libandroid.so", RTLD_NOW | RTLD_LOCAL);
+    return library ? reinterpret_cast<SetFrameRate>(dlsym(library, "ANativeWindow_setFrameRate")) : nullptr;
+  }();
+  if (!setFrameRate) return; // API 28-29 do not have this API.
+
+  SDL_Window* window = window::get_sdl_window();
+  if (!window) return;
+  const SDL_PropertiesID properties = SDL_GetWindowProperties(window);
+  auto* nativeWindow = static_cast<ANativeWindow*>(
+      SDL_GetPointerProperty(properties, SDL_PROP_WINDOW_ANDROID_WINDOW_POINTER, nullptr));
+  if (!nativeWindow) return;
+
+  const uint32_t interpolatedFps = aurora_get_frame_interpolation_fps();
+  const float outputFps = interpolatedFps ? static_cast<float>(interpolatedFps) : 60.0f;
+  // Android's fixed-source mode is for video; game content can adapt when the
+  // display cannot select the requested rate.
+  const int32_t result = setFrameRate(nativeWindow, outputFps,
+                                     ANATIVEWINDOW_FRAME_RATE_COMPATIBILITY_DEFAULT);
+  Log.info("Android surface frame-rate request {} Hz: {}", outputFps, result);
+}
+#endif
+
 struct RenderTargetSize {
   uint32_t width;
   uint32_t height;
@@ -117,8 +150,8 @@ RenderTargetSize clamp_frame_buffer_size(uint32_t width, uint32_t height) noexce
   return {budgeted.width, budgeted.height};
 }
 
-// V-Sync is never enabled: the guest drives its own pacing, and blocking in Present() couples the
-// whole machine to the monitor (a 120 FPS target on a 75 Hz display runs in slow motion).
+// Interpolated output must not block on a slower display. Android native-rate output
+// can use FIFO on its separate presenter; guest simulation remains independently paced.
 wgpu::PresentMode best_present_mode() {
   const auto supports = [](const wgpu::PresentMode candidate) {
     for (size_t i = 0; i < g_surfaceCapabilities.presentModeCount; ++i) {
@@ -128,6 +161,14 @@ wgpu::PresentMode best_present_mode() {
     }
     return false;
   };
+#if defined(__ANDROID__)
+  // Native-rate FIFO avoids the repeated compositor misses observed with Mailbox.
+  // Keep interpolated output unbounded when its target exceeds display refresh.
+  if (g_backendType == wgpu::BackendType::Vulkan &&
+      aurora_get_frame_interpolation_fps() == 0 && supports(wgpu::PresentMode::Fifo)) {
+    return wgpu::PresentMode::Fifo;
+  }
+#endif
   // Vulkan prefers Mailbox, every other backend Immediate. Under window capture the Vulkan driver
   // cannot flip and Immediate leaks about a megabyte per present until the device is lost.
   const bool preferMailbox = g_backendType == wgpu::BackendType::Vulkan;
@@ -519,10 +560,24 @@ static bool create_surface() {
     Log.error("Failed to create surface");
     return false;
   }
+#if defined(__ANDROID__)
+  request_android_frame_rate();
+#endif
   return true;
 }
 
 bool initialize(AuroraBackend auroraBackend) {
+  using kartpad::diagnostics::Boundary;
+  using kartpad::diagnostics::event;
+  event(Boundary::Backend, "begin", static_cast<int>(auroraBackend));
+  SDL_ClearError();
+#if defined(__ANDROID__) || (defined(__APPLE__) && TARGET_OS_IOS)
+  if (auroraBackend == BACKEND_NULL) {
+    event(Boundary::Backend, "rejected", static_cast<int>(auroraBackend), "Null cannot present a mobile game; no rendering backend was selected");
+    return false;
+  }
+#endif
+
   if (!g_instance) {
     Log.info("Creating WebGPU instance");
     const std::array requiredInstanceFeatures{
@@ -537,9 +592,15 @@ bool initialize(AuroraBackend auroraBackend) {
     // descriptor only restates Dawn's defaults, so use the public WebGPU descriptor here.
     dawn::native::DawnInstanceDescriptor dawnInstanceDescriptor;
     dawnInstanceDescriptor.backendValidationLevel = dawn::native::BackendValidationLevel::Disabled;
+    dawnInstanceDescriptor.SetLoggingCallback([](wgpu::LoggingType type, wgpu::StringView message) {
+      kartpad::diagnostics::event(kartpad::diagnostics::Boundary::Instance,
+          "driver_message", static_cast<int>(type), std::string_view(message));
+    });
     instanceDescriptor.nextInChain = &dawnInstanceDescriptor;
 #endif
+    event(Boundary::Instance, "begin");
     g_instance = wgpu::CreateInstance(&instanceDescriptor);
+    event(Boundary::Instance, g_instance ? "ready" : "failed");
     if (!g_instance) {
       Log.error("Failed to create WebGPU instance");
       return false;
@@ -558,6 +619,7 @@ bool initialize(AuroraBackend auroraBackend) {
   {
     window::SurfaceLock surfaceLock;
     if (!create_surface()) {
+      event(Boundary::Surface, "create_failed");
       return false;
     }
   }
@@ -567,19 +629,27 @@ bool initialize(AuroraBackend auroraBackend) {
         .backendType = backend,
         .compatibleSurface = g_surface,
     };
+    event(Boundary::Adapter, "begin", static_cast<int>(backend));
     const auto future = g_instance.RequestAdapter(
         &options, wgpu::CallbackMode::WaitAnyOnly,
         [](wgpu::RequestAdapterStatus status, wgpu::Adapter adapter, wgpu::StringView message) {
+          event(Boundary::Adapter, status == wgpu::RequestAdapterStatus::Success ? "ready" : "rejected",
+                static_cast<int>(status), std::string_view(message));
           if (status == wgpu::RequestAdapterStatus::Success) {
             g_adapter = std::move(adapter);
           } else {
             Log.warn("Adapter request failed: {}", message);
+            const std::string_view reason{message};
+            SDL_SetError("Graphics adapter unavailable: %.*s",
+                         static_cast<int>(std::min<size_t>(reason.size(), 512)), reason.data());
           }
         });
     const auto status = g_instance.WaitAny(future, 5000000000);
     if (status != wgpu::WaitStatus::Success) {
+      event(Boundary::Adapter, "wait_failed", static_cast<int>(status));
       Log.error("Failed to create {} adapter: {}", magic_enum::enum_name(backend),
                 magic_enum::enum_name(status));
+      SDL_SetError("Graphics adapter request did not complete within its startup deadline");
       return false;
     }
     if (!g_adapter) {
@@ -726,6 +796,8 @@ bool initialize(AuroraBackend auroraBackend) {
     deviceDescriptor.requiredLimits = &requiredLimits;
     deviceDescriptor.SetUncapturedErrorCallback(
         [](const wgpu::Device& device, wgpu::ErrorType type, wgpu::StringView message) {
+          kartpad::diagnostics::event(kartpad::diagnostics::Boundary::Device, "uncaptured_error",
+              static_cast<int>(type), std::string_view(message));
           if (g_initialized.load(std::memory_order_acquire)) {
             FATAL("WebGPU error {}: {}", underlying(type), message);
           } else {
@@ -756,15 +828,21 @@ bool initialize(AuroraBackend auroraBackend) {
     const auto future =
         g_adapter.RequestDevice(&deviceDescriptor, wgpu::CallbackMode::WaitAnyOnly,
                                 [](wgpu::RequestDeviceStatus status, wgpu::Device device, wgpu::StringView message) {
+                                  event(Boundary::Device, status == wgpu::RequestDeviceStatus::Success ? "ready" : "rejected",
+                                        static_cast<int>(status), std::string_view(message));
                                   if (status == wgpu::RequestDeviceStatus::Success) {
                                     g_device = std::move(device);
                                   } else {
                                     Log.warn("Device request failed: {}", message);
+                                    const std::string_view reason{message};
+                                    SDL_SetError("Graphics device unavailable: %.*s",
+                                        static_cast<int>(std::min<size_t>(reason.size(), 512)), reason.data());
                                   }
                                 });
     const auto status = g_instance.WaitAny(future, 5000000000);
     if (status != wgpu::WaitStatus::Success) {
       Log.error("Failed to create device: {}", magic_enum::enum_name(status));
+      SDL_SetError("Graphics device request did not complete within its startup deadline");
       return false;
     }
     if (!g_device) {
@@ -794,6 +872,7 @@ bool initialize(AuroraBackend auroraBackend) {
   g_queue = g_device.GetQueue();
 
   const wgpu::Status status = g_surface.GetCapabilities(g_adapter, &g_surfaceCapabilities);
+  event(Boundary::Surface, status == wgpu::Status::Success ? "capabilities_ready" : "capabilities_failed", static_cast<int>(status));
   if (status != wgpu::Status::Success) {
     Log.error("Failed to get surface capabilities: {}", magic_enum::enum_name(status));
     return false;
@@ -804,6 +883,11 @@ bool initialize(AuroraBackend auroraBackend) {
   }
   if (g_surfaceCapabilities.presentModeCount == 0) {
     Log.error("Surface has no present modes");
+    return false;
+  }
+  const wgpu::TextureUsage neededUsage = wgpu::TextureUsage::RenderAttachment | wgpu::TextureUsage::CopySrc;
+  if ((static_cast<uint64_t>(g_surfaceCapabilities.usages) & static_cast<uint64_t>(neededUsage)) != static_cast<uint64_t>(neededUsage)) {
+    event(Boundary::Surface, "required_usage_missing", static_cast<long long>(g_surfaceCapabilities.usages), "requires RenderAttachment and CopySrc");
     return false;
   }
   auto surfaceFormat = best_surface_format();
@@ -830,6 +914,7 @@ bool initialize(AuroraBackend auroraBackend) {
     window::SurfaceLock surfaceLock;
     resize_swapchain(size.fb_width, size.fb_height, size.native_fb_width, size.native_fb_height, true);
   }
+  event(Boundary::Backend, "ready", static_cast<int>(auroraBackend));
   g_initialized.store(true, std::memory_order_release);
   return true;
 }
@@ -870,6 +955,22 @@ void serialize_pipeline_caches() noexcept {
   }();
   if (performIdleTasks != nullptr) {
     performIdleTasks(&g_device);
+  }
+#elif defined(WEBGPU_DAWN) && defined(__ANDROID__)
+  // Android links Dawn statically. Persist its compiled Vulkan cache at the
+  // same infrequent idle boundaries as Windows, not after every pipeline burst.
+  if (g_device && g_backendType == wgpu::BackendType::Vulkan &&
+      !g_deviceLost.load(std::memory_order_acquire)) {
+    const auto started = std::chrono::steady_clock::now();
+    const auto before = blob_cache_stats();
+    dawn::native::PerformIdleTasks(g_device);
+    const auto after = blob_cache_stats();
+    const double elapsedMs = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - started).count();
+    KartPadAndroidLogMetric("KartPadPipelineCache", "idle_flush_ms=%.3f blob_stores_delta=%llu blob_hits=%llu blob_lookups=%llu",
+                           elapsedMs, static_cast<unsigned long long>(after.stores - before.stores),
+                           static_cast<unsigned long long>(after.hits),
+                           static_cast<unsigned long long>(after.lookups));
   }
 #endif
 }
@@ -916,6 +1017,9 @@ bool refresh_surface(bool recreate) {
   if ((!g_surface || recreate) && !create_surface()) {
     return false;
   }
+#if defined(__ANDROID__)
+  if (!recreate) request_android_frame_rate();
+#endif
   uint32_t width = g_graphicsConfig.surfaceConfiguration.width;
   uint32_t height = g_graphicsConfig.surfaceConfiguration.height;
   uint32_t native_width = width;
@@ -959,16 +1063,22 @@ void resize_swapchain(uint32_t width, uint32_t height, uint32_t native_width, ui
         render_height);
   }
 
+  const auto presentMode = best_present_mode();
+  const bool presentModeChanged = g_graphicsConfig.surfaceConfiguration.presentMode != presentMode;
   const bool sizeChanged = g_graphicsConfig.surfaceConfiguration.width != native_width ||
                            g_graphicsConfig.surfaceConfiguration.height != native_height ||
                            g_frameBuffer.size.width != render_width || g_frameBuffer.size.height != render_height;
-  if (!force && !sizeChanged) {
+  if (!force && !sizeChanged && !presentModeChanged) {
     return;
   }
   if (sizeChanged) {
     gx::clear_display_copy_cache();
     gfx::clear_caches();
     clear_present_source_override();
+  }
+  if (presentModeChanged) {
+    Log.info("Changing surface present mode to {}", magic_enum::enum_name(presentMode));
+    g_graphicsConfig.surfaceConfiguration.presentMode = presentMode;
   }
   g_graphicsConfig.surfaceConfiguration.width = native_width;
   g_graphicsConfig.surfaceConfiguration.height = native_height;
