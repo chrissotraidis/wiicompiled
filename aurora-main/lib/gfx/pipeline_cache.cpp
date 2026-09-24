@@ -121,6 +121,7 @@ struct PipelineSceneLink {
 };
 constexpr size_t MaxScenePrewarmPipelineBuilds = 384;
 static uint64_t g_pipelineScene = 0;               // guarded by g_pipelineMutex
+static std::atomic<uint32_t> g_pipelineSceneGeneration{0};
 static uint32_t g_pipelineSceneStartFrame = 0;     // guarded by g_pipelineMutex
 static absl::flat_hash_set<PipelineRef> g_pipelineSceneRecorded; // guarded by g_pipelineMutex
 static std::deque<PipelineSceneLink> g_pipelineSceneLinkQueue;  // guarded by g_pipelineCacheWriterMutex
@@ -1433,20 +1434,25 @@ void shutdown_pipeline_cache() {
   g_pendingPipelines.clear();
   g_pipelineScene = 0;
   g_pipelineSceneRecorded.clear();
+  g_pipelineSceneGeneration.fetch_add(1, std::memory_order_release);
 
   queuedPipelines = 0;
   createdPipelines = 0;
 }
 
+uint32_t pipeline_scene_generation() noexcept {
+  return g_pipelineSceneGeneration.load(std::memory_order_acquire);
+}
+
 void set_pipeline_scene(uint64_t scene) noexcept {
   {
     std::scoped_lock guard{g_pipelineMutex};
-    if (scene == g_pipelineScene) {
-      return;
-    }
+    // A second load of the same course is a new visit and must replay and
+    // record again. The DVD caller filters repeated reads of one archive.
     g_pipelineScene = scene;
     g_pipelineSceneStartFrame = current_frame();
     g_pipelineSceneRecorded.clear();
+    g_pipelineSceneGeneration.fetch_add(1, std::memory_order_release);
   }
   if (scene == 0 || g_pipelineCacheBroken || !g_pipelineCacheWriterThread.joinable()) {
     return;
