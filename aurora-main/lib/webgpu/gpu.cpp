@@ -4,6 +4,8 @@
 #include <aurora/kartpad_diagnostics.h>
 #if defined(__ANDROID__)
 #include <android/log.h>
+#include <android/native_window.h>
+#include <dlfcn.h>
 extern "C" void KartPadAndroidLogMetric(const char*, const char*, ...);
 #endif
 #include "gpu.hpp"
@@ -88,6 +90,32 @@ static std::array<char, 256> g_deviceLostMessage{};
 static std::atomic_bool g_initialized{false};
 
 namespace {
+
+#if defined(__ANDROID__)
+void request_android_frame_rate() {
+  using SetFrameRate = int32_t (*)(ANativeWindow*, float, int8_t);
+  static const SetFrameRate setFrameRate = [] {
+    void* library = dlopen("libandroid.so", RTLD_NOW | RTLD_LOCAL);
+    return library ? reinterpret_cast<SetFrameRate>(dlsym(library, "ANativeWindow_setFrameRate")) : nullptr;
+  }();
+  if (!setFrameRate) return; // API 28-29 do not have this API.
+
+  SDL_Window* window = window::get_sdl_window();
+  if (!window) return;
+  const SDL_PropertiesID properties = SDL_GetWindowProperties(window);
+  auto* nativeWindow = static_cast<ANativeWindow*>(
+      SDL_GetPointerProperty(properties, SDL_PROP_WINDOW_ANDROID_WINDOW_POINTER, nullptr));
+  if (!nativeWindow) return;
+
+  const uint32_t interpolatedFps = aurora_get_frame_interpolation_fps();
+  const float outputFps = interpolatedFps ? static_cast<float>(interpolatedFps) : 60.0f;
+  // Android's fixed-source mode is for video; game content can adapt when the
+  // display cannot select the requested rate.
+  const int32_t result = setFrameRate(nativeWindow, outputFps,
+                                     ANATIVEWINDOW_FRAME_RATE_COMPATIBILITY_DEFAULT);
+  Log.info("Android surface frame-rate request {} Hz: {}", outputFps, result);
+}
+#endif
 
 struct RenderTargetSize {
   uint32_t width;
@@ -532,6 +560,9 @@ static bool create_surface() {
     Log.error("Failed to create surface");
     return false;
   }
+#if defined(__ANDROID__)
+  request_android_frame_rate();
+#endif
   return true;
 }
 
@@ -986,6 +1017,9 @@ bool refresh_surface(bool recreate) {
   if ((!g_surface || recreate) && !create_surface()) {
     return false;
   }
+#if defined(__ANDROID__)
+  if (!recreate) request_android_frame_rate();
+#endif
   uint32_t width = g_graphicsConfig.surfaceConfiguration.width;
   uint32_t height = g_graphicsConfig.surfaceConfiguration.height;
   uint32_t native_width = width;
