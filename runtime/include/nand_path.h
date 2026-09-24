@@ -46,7 +46,7 @@ inline std::optional<std::filesystem::path> ExistingDirectory(const std::filesys
     SetRuntimeExitCode(EXIT_FAILURE);
     ShowRuntimeFatalPopup("NAND initialization failed", details);
     MarkFatalErrorReported();
-    std::exit(EXIT_FAILURE);
+    RuntimeCrash::RuntimeTerminate(EXIT_FAILURE, details);
 }
 
 inline std::filesystem::path ResolveConfiguredPath(const std::string& value) {
