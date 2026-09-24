@@ -30,7 +30,7 @@ using GxCpDecode::SameVtxAttrFmt;
 // cap both individual entries and aggregate copied command bytes so malformed
 // guest input cannot turn this optimization into unbounded host allocation.
 constexpr uint32_t kDlScanCacheMaxEntryBytes = 64u * 1024u;
-constexpr size_t kDlScanCacheMaxEntries = 8192;
+constexpr size_t kDlScanCacheMaxEntries = 16384;
 constexpr size_t kDlScanCacheMaxStoredBytes = 8u * 1024u * 1024u;
 
 // Display-list write tracking (audit F6a): re-digesting every list every call is the
