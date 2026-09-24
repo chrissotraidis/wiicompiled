@@ -30,6 +30,9 @@ extern "C" void GxNotifyGuestRamDmaWrite(uint32_t addr, uint32_t size);
 #include <mutex>
 #include <sstream>
 #include <utility>
+#include <cctype>
+
+#include <aurora/gfx.h>
 
 namespace fs = std::filesystem;
 
@@ -400,6 +403,38 @@ static bool ResolveAbsRead(uint32_t offset, uint32_t length, AbsReadResult& out)
     out.fileOffset = fileOffset;
     out.readLength = readLength;
     return true;
+}
+
+// A course archive read marks the start of a race load. The renderer records the
+// pipelines used while that course is active and compiles them during its next load
+// (vanilla Race/Course/*.szs; Retro Rewind .../Tracks/*.szs). Other files are ignored.
+static void NotePipelineSceneForRead(const DVDFileEntry& entry) {
+    static std::string lastPath;
+    if (entry.dvdPath == lastPath) {
+        return;
+    }
+    lastPath = entry.dvdPath;
+    std::string lower = entry.dvdPath;
+    std::transform(lower.begin(), lower.end(), lower.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    if (lower.size() < 5 || lower.compare(lower.size() - 4, 4, ".szs") != 0) {
+        return;
+    }
+    const size_t nameSlash = lower.rfind('/');
+    if (nameSlash == std::string::npos || nameSlash == 0) {
+        return;
+    }
+    const size_t dirSlash = lower.rfind('/', nameSlash - 1);
+    const std::string dir = lower.substr(dirSlash == std::string::npos ? 0 : dirSlash + 1,
+                                         nameSlash - (dirSlash == std::string::npos ? 0 : dirSlash + 1));
+    if (dir != "course" && dir != "tracks") {
+        return;
+    }
+    uint64_t key = 1469598103934665603ull;  // FNV-1a; stable across launches and builds
+    for (const unsigned char c : lower) {
+        key = (key ^ c) * 1099511628211ull;
+    }
+    aurora_set_pipeline_scene(key == 0 ? 1 : key);
 }
 
 // Helper: Normalize paths (Windows backslash -> forward slash, lowercase for lookup)
@@ -881,6 +916,7 @@ extern "C" int32_t DVDReadPrio_8015E834(uint32_t fileInfoPtr, uint32_t bufferPtr
     }
 
     const DVDFileEntry& entry = g_fileEntries[extent->entryIndex];
+    NotePipelineSceneForRead(entry);
 
     if (offset < 0 || length < 0) {
         return DvdReadFatal(fileInfoPtr, HostPathText(entry.hostPath), offset,
@@ -987,6 +1023,7 @@ extern "C" int32_t DVD__ReadAbsAsyncPrio_HLE_801628cc(uint32_t cmdBlockPtr,
             } else {
                 CopyToGuestAsDma(bufferPtr, tempBuf.data(), tempBuf.size());
                 bytesRead = static_cast<int32_t>(tempBuf.size());
+                NotePipelineSceneForRead(*readInfo.entry);
             }
         }
 
