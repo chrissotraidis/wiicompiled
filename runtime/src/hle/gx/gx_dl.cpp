@@ -829,6 +829,7 @@ static bool WalkDisplayList(const uint8_t* data, uint32_t nbytes, Visitor& visit
 struct DlMayContainDrawVisitor {
     static constexpr int kMaxDepth = 8;
     static constexpr bool kHandlesDraw = false;
+    bool sawNestedDl = false;
 
     bool OnNop(uint8_t) { return true; }
     bool OnBpReg(const uint8_t*, uint32_t) { return true; }
@@ -841,6 +842,7 @@ struct DlMayContainDrawVisitor {
     // command byte this walker does not model, both mean "assume it draws".
     bool OnUnknownCommand(uint8_t) { return false; }
     bool OnCallDisplayList(uint32_t addr, uint32_t size, int depth) {
+        sawNestedDl = true;
         if (addr == 0 || size == 0) return true;
         const uint8_t* nested = static_cast<const uint8_t*>(GuestToHostPtr(addr, size));
         if (!nested) return false;
@@ -849,9 +851,12 @@ struct DlMayContainDrawVisitor {
     }
 };
 
-static bool DisplayListMayContainDraw(const uint8_t* data, uint32_t nbytes) {
+static bool DisplayListMayContainDraw(const uint8_t* data, uint32_t nbytes,
+                                      bool& hasNestedDl) {
     DlMayContainDrawVisitor visitor;
-    return !WalkDisplayList(data, nbytes, visitor, 0);
+    const bool mayContainDraw = !WalkDisplayList(data, nbytes, visitor, 0);
+    hasNestedDl = visitor.sawNestedDl;
+    return mayContainDraw;
 }
 
 // Interpreter fallback
@@ -1364,9 +1369,21 @@ extern "C" void GX__CallDisplayList_80172f64(uint32_t listAddr, uint32_t nbytes)
 
         // The scan a cached record came from already walked the list for this,
         // so only a miss pays for DisplayListMayContainDraw.
+        bool noDrawHasNestedDl = false;
         const bool mayContainDraw =
-            (cached != nullptr) ? cached->mayContainDraw : DisplayListMayContainDraw(list, nbytes);
+            (cached != nullptr) ? cached->mayContainDraw
+                                : DisplayListMayContainDraw(list, nbytes, noDrawHasNestedDl);
         if (!mayContainDraw) {
+            // Register-only lists skip the index scan. Cache that negative
+            // classification too, but not if a nested list can change without
+            // changing the outer bytes.
+            if (cached == nullptr && allowScanCache && !noDrawHasNestedDl) {
+                const uint64_t contentDigest =
+                    probe.digestValid ? probe.contentDigest : DlContentDigest(list, nbytes);
+                StoreDlScanCache(listAddr, nbytes, scanLayoutHash, contentDigest,
+                                 probe.writeGeneration, false, DlScanCacheEntry{},
+                                 std::vector<DlCpWrite>{}, nullptr, 0);
+            }
             EnsureAuroraFrameActive();
             GXMarkFrameWork();
             GXCallDisplayList(list, nbytes);
