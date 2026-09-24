@@ -49,7 +49,7 @@ extern "C" void PPCHalt_8012E5A4()
                           "Mario Kart Wii executed PPCHalt, which the console only reaches after an "
                           "unrecoverable error.");
     MarkFatalErrorReported();
-    std::exit(EXIT_FAILURE);
+    RuntimeCrash::RuntimeTerminate(EXIT_FAILURE, "guest PPCHalt");
 }
 
 PPC_NATIVE_OVERRIDE_VOID(8012E5A4, PPCHalt_8012E5A4, (), ());
@@ -112,7 +112,7 @@ extern "C" void OS__Panic_801A2660_Cpu(CpuContext* ctx)
     // Give extra time for output to flush with PowerShell redirection
     std::this_thread::sleep_for(std::chrono::milliseconds(200));
     
-    std::exit(EXIT_FAILURE);
+    RuntimeCrash::RuntimeTerminate(EXIT_FAILURE, "guest OS panic");
 }
 
 PPC_NATIVE_OVERRIDE_VOID(801A2660, OS__Panic_801A2660_Cpu, (CpuContext* ctx), (ctx));
@@ -122,13 +122,8 @@ extern "C" uint32_t OSResetSystem()
 {
     RT_LOGF(RT_TAG_OS, "OSResetSystem: simulating console reset\n");
     std::fflush(stderr);
-    // The AX mix worker holds resolved host pointers into the guest regions;
-    // it must be stopped before those mappings are torn down.
-    AxDspHle::ShutdownMixWorker();
-    Memory::Reset();
-    SetRuntimeExitCode(0);
-    std::exit(EXIT_SUCCESS);
-    return 0; // unreachable, but keeps the signature consistent with callers
+    // Process termination releases the mappings after the workers have stopped.
+    RuntimeCrash::RuntimeTerminate(EXIT_SUCCESS, "guest OS reset");
 }
 
 PPC_NATIVE_OVERRIDE(801A8A80, OSResetSystem, uint32_t, (), ());
@@ -146,8 +141,7 @@ extern "C" uint32_t Exit_801AE58C(int status)
         MarkFatalErrorReported();
     }
     SetRuntimeExitCode(status);
-    std::exit(status);
-    return static_cast<uint32_t>(status);
+    RuntimeCrash::RuntimeTerminate(status, "guest exit");
 }
 
 PPC_NATIVE_OVERRIDE(801AE58C, Exit_801AE58C, uint32_t, (int status), (status));

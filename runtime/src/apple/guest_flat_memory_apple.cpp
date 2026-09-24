@@ -16,6 +16,8 @@
 #include <vector>
 
 namespace GuestFlat {
+
+bool g_requiresCheckedAccess = getpagesize() > 4096;
 #if TARGET_OS_IPHONE
 uint8_t* gFlatGuestBase = nullptr;
 #endif
@@ -254,6 +256,6 @@ void LogFaultSummary() noexcept
                   << " unmapped=" << counters.unmapped << std::endl;
 }
 
-bool HandleAccessViolation(void*) noexcept { return false; }
+bool HandleAccessViolation(void*, bool) noexcept { return false; }
 
 } // namespace GuestFlat

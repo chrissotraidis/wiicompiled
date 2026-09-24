@@ -720,9 +720,32 @@ static uint32_t ApplyFifoPacketsDirect(const uint8_t* data, uint32_t sizeBytes) 
             const uint16_t countWords = ReadBE16(packet + 1);
             const uint32_t packetBytes = 1u + 4u + (static_cast<uint32_t>(countWords) + 1u) * 4u;
             if (avail < packetBytes) break;
-            GXCallDisplayList(packet, packetBytes);
+            // Aurora can parse consecutive XF loads in one pass. Keep the
+            // batch inside this burst so CP/BP writes and any later HLE call
+            // retain their original ordering.
+            uint32_t batchBytes = packetBytes;
+            while (avail - batchBytes >= 5u) {
+                const uint8_t* next = packet + batchBytes;
+                if ((next[0] & GX_OPCODE_MASK_CMD) != GX_LOAD_XF_REG_CMD) break;
+                const uint32_t nextBytes =
+                    5u + (static_cast<uint32_t>(ReadBE16(next + 1)) + 1u) * 4u;
+                if (avail - batchBytes < nextBytes) break;
+                batchBytes += nextBytes;
+            }
+            GXCallDisplayList(packet, batchBytes);
             GXMarkFrameWork();
-            offset += packetBytes;
+            offset += batchBytes;
+            continue;
+        }
+
+        if (opcode == GX_CMD_CALL_DL_CMD) {
+            if (avail < 9u) break;
+            const uint32_t listAddr = ReadBE32(packet + 1);
+            const uint32_t listSize = ReadBE32(packet + 5);
+            offset += 9u;
+            if (listAddr != 0 && listSize > 0) {
+                GX__CallDisplayList_80172f64(listAddr, listSize);
+            }
             continue;
         }
 
@@ -777,6 +800,17 @@ static bool WriteDisplayListBurst(const uint8_t* data, uint32_t sizeBytes) {
 
 extern "C" void GX_HLE_FIFO_WriteBurst(const uint8_t* data, uint32_t sizeBytes) {
     if (data == nullptr || sizeBytes == 0) {
+        return;
+    }
+
+    // The translator also folds the three writes of a GX call-display-list
+    // command. If direct parsing is unavailable, preserve those original
+    // 1/4/4 write boundaries, including during display-list recording.
+    if (sizeBytes == 9u && data[0] == GX_CMD_CALL_DL_CMD &&
+        (IsDisplayListActive() || g_hleGxState.inBegin || g_hleGxState.fifoByteCount != 0)) {
+        HleFifoWrite(data[0], 1);
+        HleFifoWrite(ReadBE32(data + 1), 4);
+        HleFifoWrite(ReadBE32(data + 5), 4);
         return;
     }
 
