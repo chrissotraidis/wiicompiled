@@ -738,6 +738,17 @@ static uint32_t ApplyFifoPacketsDirect(const uint8_t* data, uint32_t sizeBytes) 
             continue;
         }
 
+        if (opcode == GX_CMD_CALL_DL_CMD) {
+            if (avail < 9u) break;
+            const uint32_t listAddr = ReadBE32(packet + 1);
+            const uint32_t listSize = ReadBE32(packet + 5);
+            offset += 9u;
+            if (listAddr != 0 && listSize > 0) {
+                GX__CallDisplayList_80172f64(listAddr, listSize);
+            }
+            continue;
+        }
+
         break;
     }
 
@@ -789,6 +800,17 @@ static bool WriteDisplayListBurst(const uint8_t* data, uint32_t sizeBytes) {
 
 extern "C" void GX_HLE_FIFO_WriteBurst(const uint8_t* data, uint32_t sizeBytes) {
     if (data == nullptr || sizeBytes == 0) {
+        return;
+    }
+
+    // The translator also folds the three writes of a GX call-display-list
+    // command. If direct parsing is unavailable, preserve those original
+    // 1/4/4 write boundaries, including during display-list recording.
+    if (sizeBytes == 9u && data[0] == GX_CMD_CALL_DL_CMD &&
+        (IsDisplayListActive() || g_hleGxState.inBegin || g_hleGxState.fifoByteCount != 0)) {
+        HleFifoWrite(data[0], 1);
+        HleFifoWrite(ReadBE32(data + 1), 4);
+        HleFifoWrite(ReadBE32(data + 5), 4);
         return;
     }
 
