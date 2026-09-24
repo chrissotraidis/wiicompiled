@@ -1,3 +1,4 @@
+#include "kartpad_function_timing.h"
 #include "ax_dsp.h"
 
 #include "ax_internal.h"
@@ -645,6 +646,7 @@ private:
     }
 
     void ProcessPBList(uint32_t pbAddr, bool newFilter, bool oldAxLayout) {
+        KARTPAD_FUNCTION_SCOPE("AxDspHle::ProcessPBList");
         uint32_t guard = 0;
         while (pbAddr && guard++ < 256) {
             AXPBWii pb{};
@@ -695,12 +697,14 @@ private:
         const auto path = FindDspCoefficientRom();
         std::ifstream stream(path, std::ios::binary | std::ios::ate);
         if (!stream || stream.tellg() != static_cast<std::streamoff>(m_coeffs.size() * 2)) {
-            throw std::runtime_error("Bundled Wii DSP coefficient ROM has an invalid size: " + path.string());
+            throw std::runtime_error("Bundled Wii DSP coefficient ROM has an invalid size: " +
+                                     RuntimeConfigFile::PathToUtf8(path));
         }
         stream.seekg(0);
         std::array<uint8_t, kResamplingCoefficientCount * 2> bytes{};
         if (!stream.read(reinterpret_cast<char*>(bytes.data()), bytes.size())) {
-            throw std::runtime_error("Failed to read bundled Wii DSP coefficient ROM: " + path.string());
+            throw std::runtime_error("Failed to read bundled Wii DSP coefficient ROM: " +
+                                     RuntimeConfigFile::PathToUtf8(path));
         }
         for (size_t i = 0; i < m_coeffs.size(); ++i) {
             const uint16_t word = static_cast<uint16_t>(bytes[i * 2]) << 8 |

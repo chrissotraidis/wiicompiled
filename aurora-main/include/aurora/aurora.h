@@ -87,8 +87,8 @@ typedef struct {
   AuroraBackend desiredBackend;
   uint32_t msaa;
   uint16_t maxTextureAnisotropy;
-  // No vsync knob exists: the swapchain is always configured for a
-  // non-blocking present mode (Immediate, else Mailbox). See best_present_mode.
+  // iOS startup opt-in for native-rate FIFO presentation.
+  bool vsync;
   bool startFullscreen;
   bool allowJoystickBackgroundEvents;
   bool pauseOnFocusLost;
@@ -127,12 +127,20 @@ typedef struct {
   const char* pipelineCachePath;
 } AuroraConfig;
 
+typedef enum {
+  AURORA_INITIALIZATION_SUCCESS = 0,
+  AURORA_INITIALIZATION_GRAPHICS_UNAVAILABLE = 1,
+} AuroraInitializationStatus;
+
 typedef struct {
   AuroraBackend backend;
   const char* userPath;
   const char* cachePath;
   SDL_Window* window;
   AuroraWindowSize windowSize;
+  AuroraInitializationStatus initializationStatus;
+  // On failure, owned by SDL on the calling thread. Copy before another SDL call.
+  const char* initializationError;
 } AuroraInfo;
 
 AuroraInfo aurora_initialize(int argc, char* argv[], const AuroraConfig* config);

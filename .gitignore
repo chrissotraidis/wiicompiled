@@ -25,9 +25,9 @@ Code.pul
 # Build output
 /build/
 /build-*/
-/.build-output/
-/.build-test/
 /native-build/
+/native-build-macos/
+/local-products/
 /dist/
 /out/
 [Bb]in/
@@ -72,3 +72,5 @@ project.lock.json
 *.log
 output.txt
 
+# Operating System
+.DS_Store

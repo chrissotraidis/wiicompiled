@@ -1,6 +1,9 @@
+#include "kartpad_draw_inputs.hpp"
+#include <chrono>
 #include "command_processor.hpp"
 
 #include "../gfx/common.hpp"
+#include "../gfx/pipeline_cache.hpp"
 #include "../dolphin/gx/__gx.h"
 #include "../gfx/texture_replacement.hpp"
 #include "dolphin/gx/GXAurora.h"
@@ -30,10 +33,11 @@ using IndexBuffer = std::vector<u16>;
 static u32 prepare_idx_template(IndexBuffer& buf, GXPrimitive prim, u16 vtxCount) {
   size_t writePos = 0;
   if (prim == GX_QUADS) {
-    // Retain the existing incomplete-quad behavior: every started group emits a complete six-index quad.
-    buf.resize(((static_cast<u32>(vtxCount) + 3u) / 4u) * 6u);
+    // GX renders a three-vertex remainder as a triangle. One/two are ignored.
+    const u32 completeVertices = static_cast<u32>(vtxCount) & ~3u;
+    buf.resize((completeVertices / 4u) * 6u + (vtxCount % 4u == 3u ? 3u : 0u));
 
-    for (u16 v = 0; v < vtxCount; v += 4) {
+    for (u32 v = 0; v < completeVertices; v += 4) {
       const u16 idx0 = v;
       const u16 idx1 = static_cast<u16>(v + 1);
       const u16 idx2 = static_cast<u16>(v + 2);
@@ -45,15 +49,21 @@ static u32 prepare_idx_template(IndexBuffer& buf, GXPrimitive prim, u16 vtxCount
       buf[writePos++] = idx3;
       buf[writePos++] = idx0;
     }
+    if (vtxCount % 4u == 3u) {
+      buf[writePos++] = static_cast<u16>(completeVertices);
+      buf[writePos++] = static_cast<u16>(completeVertices + 1u);
+      buf[writePos++] = static_cast<u16>(completeVertices + 2u);
+    }
   } else if (prim == GX_TRIANGLES) {
-    buf.resize(vtxCount);
-    for (u16 v = 0; v < vtxCount; ++v) {
+    const u32 completeVertices = (static_cast<u32>(vtxCount) / 3u) * 3u;
+    buf.resize(completeVertices);
+    for (u32 v = 0; v < completeVertices; ++v) {
       buf[writePos++] = v;
     }
   } else if (prim == GX_TRIANGLEFAN) {
-    const u32 indexCount = vtxCount <= 3 ? vtxCount : 3u + (static_cast<u32>(vtxCount) - 3u) * 3u;
+    const u32 indexCount = vtxCount < 3 ? 0u : (static_cast<u32>(vtxCount) - 2u) * 3u;
     buf.resize(indexCount);
-    for (u16 v = 0; v < vtxCount; ++v) {
+    for (u32 v = 0; indexCount != 0 && v < vtxCount; ++v) {
       if (v < 3) {
         buf[writePos++] = v;
         continue;
@@ -63,9 +73,9 @@ static u32 prepare_idx_template(IndexBuffer& buf, GXPrimitive prim, u16 vtxCount
       buf[writePos++] = v;
     }
   } else if (prim == GX_TRIANGLESTRIP) {
-    const u32 indexCount = vtxCount <= 3 ? vtxCount : 3u + (static_cast<u32>(vtxCount) - 3u) * 3u;
+    const u32 indexCount = vtxCount < 3 ? 0u : (static_cast<u32>(vtxCount) - 2u) * 3u;
     buf.resize(indexCount);
-    for (u16 v = 0; v < vtxCount; ++v) {
+    for (u32 v = 0; indexCount != 0 && v < vtxCount; ++v) {
       if (v < 3) {
         buf[writePos++] = v;
         continue;
@@ -86,6 +96,13 @@ static u32 prepare_idx_template(IndexBuffer& buf, GXPrimitive prim, u16 vtxCount
     UNLIKELY FATAL("unsupported primitive type {}", static_cast<u32>(prim));
   CHECK(writePos == buf.size(), "index template size mismatch ({} != {})", writePos, buf.size());
   return static_cast<u32>(writePos);
+}
+
+// Empty/incomplete draws consume FIFO bytes but cannot produce a primitive.
+static bool has_complete_primitive(GXPrimitive prim, u16 count) {
+  if (prim == GX_POINTS) return count >= 1;
+  if (prim == GX_LINES || prim == GX_LINESTRIP) return count >= 2;
+  return count >= 3;
 }
 
 // GX FIFO opcodes - use CP_ prefix to avoid clashing with GXCommandList.h macros
@@ -466,13 +483,14 @@ static void handle_xf(const u8* data, u32& pos, u32 size, bool bigEndian);
 static bool handle_draw(u8 cmd, const u8* data, u32& pos, u32 size, bool bigEndian);
 static bool handle_aurora(const u8* data, u32& pos, u32 size, bool bigEndian);
 
-void process(const u8* data, u32 size, bool bigEndian) {
+uint32_t process(const u8* data, u32 size, bool bigEndian) {
   ZoneScoped;
   // Everything decoded here mutates renderer state (GX state, the recorded command lists and the mapped staging buffers), so take the renderer GPU mutex once for the whole drain rather than once per draw command.
   std::lock_guard gpuLock(aurora::renderer_gpu_mutex());
   u32 pos = 0;
 
   while (pos < size) {
+    const u32 commandStart = pos;
     u8 cmd = data[pos++];
     u8 opcode = cmd & CP_OPCODE_MASK;
     // Log.warn("Processing opcode {:02x} at pos {} (size {})", opcode, pos - 1, size);
@@ -551,12 +569,16 @@ void process(const u8* data, u32 size, bool bigEndian) {
       for (int i = GX_VA_POS; i <= GX_VA_TEX7; ++i) {
         g_gxState.arrays[i].cachedRange = {};
       }
+      // A merged draw retains its previous array uploads. Force a new draw so
+      // handle_draw_unmerged observes the invalidation and uploads fresh data.
+      // Pipeline configuration itself did not change.
+      g_gxState.stateDirty = true;
       break;
     }
 
     case GX_LOAD_AURORA: {
       if (!handle_aurora(data, pos, size, bigEndian)) {
-        return;
+        return size;
       }
       break;
     }
@@ -564,8 +586,10 @@ void process(const u8* data, u32 size, bool bigEndian) {
     default:
       // Draw commands occupy the full 0x80-0xBF range.
       if (is_draw_cmd(cmd)) {
-        if (!handle_draw(cmd, data, pos, size, bigEndian)) {
-          return;
+        try {
+          if (!handle_draw(cmd, data, pos, size, bigEndian)) return size;
+        } catch (const gfx::StagingBatchFull&) {
+          return commandStart;
         }
       } else {
         static u32 unknownLogCount = 0;
@@ -588,6 +612,7 @@ void process(const u8* data, u32 size, bool bigEndian) {
       break;
     }
   }
+  return size;
 }
 
 // Helper to extract bit fields from a 32-bit register
@@ -1848,6 +1873,10 @@ static u32 calculate_last_vtx_size(GXVtxFmt fmt) {
 
   g_gxState.lastVtxFmt = fmt;
   g_gxState.lastVtxSize = vtxSize;
+  // The format is selected by the draw opcode, without a register write.
+  // Even equal-stride formats may decode bytes differently, so do not merge
+  // into a draw using the previous format's shader and uniform layout.
+  g_gxState.stateDirty = true;
 
   return vtxSize;
 }
@@ -2029,6 +2058,13 @@ static const CachedPipelineState& cached_pipeline_state(const PipelineConfig& co
     CachedPipelineState state{};
   };
   static std::array<Entry, CacheSize> cache{};
+  static u32 cacheSceneGeneration = 0;
+
+  const u32 sceneGeneration = gfx::pipeline_scene_generation();
+  if (cacheSceneGeneration != sceneGeneration) {
+    for (auto& entry : cache) entry.valid = false;
+    cacheSceneGeneration = sceneGeneration;
+  }
 
   const HashType hash = xxh3_hash(config, static_cast<HashType>(gfx::ShaderType::GX));
   auto& entry = cache[hash & (CacheSize - 1)];
@@ -2053,6 +2089,7 @@ static const CachedPipelineState& resolve_pipeline_state(GXPrimitive prim, GXVtx
   struct Memo {
     const CachedPipelineState* state = nullptr;
     u32 generation = 0;
+    u32 sceneGeneration = 0;
     u32 sampleCount = 0;
     GXPrimitive prim = static_cast<GXPrimitive>(0);
     GXVtxFmt fmt = static_cast<GXVtxFmt>(0);
@@ -2061,7 +2098,8 @@ static const CachedPipelineState& resolve_pipeline_state(GXPrimitive prim, GXVtx
 
   const u32 sampleCount = gfx::get_sample_count();
   const u32 generation = g_gxState.pipelineStateGeneration;
-  if (memo.state != nullptr && memo.generation == generation && memo.sampleCount == sampleCount &&
+  const u32 sceneGeneration = gfx::pipeline_scene_generation();
+  if (memo.state != nullptr && memo.generation == generation && memo.sceneGeneration == sceneGeneration && memo.sampleCount == sampleCount &&
       memo.prim == prim && memo.fmt == fmt) LIKELY {
     return *memo.state;
   }
@@ -2073,11 +2111,74 @@ static const CachedPipelineState& resolve_pipeline_state(GXPrimitive prim, GXVtx
   memo = Memo{
       .state = &state,
       .generation = generation,
+      .sceneGeneration = sceneGeneration,
       .sampleCount = sampleCount,
       .prim = prim,
       .fmt = fmt,
   };
   return state;
+}
+
+// Opt-in CPU-side evidence from the actual submitted GX stream, including merged draws.
+static void kartpad_audit_draw(GXPrimitive prim, GXVtxFmt fmt, const uint8_t* vertices,
+                               uint16_t count, uint32_t stride, uint32_t bytes) {
+  static const bool enabled = [] {
+    const char* value = std::getenv("KARTPAD_RENDERER_VALIDATION");
+    return value && std::strcmp(value, "1") == 0;
+  }();
+  if (!enabled || g_gxState.vtxDesc[GX_VA_PNMTXIDX] != GX_DIRECT) return;
+  // Periodic windows cover scenes reached after startup. Sample every 128th
+  // eligible draw, no more than 2048 checks/window and 20 windows/launch.
+  using Clock = std::chrono::steady_clock;
+  static auto windowStart = Clock::now();
+  static unsigned window = 0, ordinal = 0, inspected = 0;
+  static kartpad::diagnostics::DrawReportBudget budget;
+  static kartpad::diagnostics::DrawSamplingBudget sampling;
+  static unsigned anomalous = 0;
+  const auto now = Clock::now();
+  if (now-windowStart >= std::chrono::seconds(30)) {
+    if (window < 20) Log.info("KartPadDrawWindow window={} eligible={} inspected={} sampled_every=128 max_checks=2048 time_slices=32 anomalous_inspections={} final={}", window, ordinal, inspected, anomalous, window==19);
+    ++window; windowStart=now; ordinal=0; inspected=0; anomalous=0; budget={}; sampling={};
+  }
+  if (window >= 20 || (++ordinal % 128) != 1 ||
+      !sampling.take(std::chrono::duration_cast<std::chrono::milliseconds>(now-windowStart).count())) return;
+  ++inspected;
+  const auto selection = kartpad::diagnostics::inspect_matrix_selection(vertices, bytes, count, stride);
+  unsigned nonfinitePosition = 0;
+  unsigned nonfiniteNormal = 0;
+  for (unsigned slot = 0; slot < MaxPnMtx; ++slot) {
+    if ((selection.used_mask & (1u << slot)) == 0) continue;
+    nonfinitePosition += kartpad::diagnostics::count_nonfinite(
+        &g_gxState.pnMtx[slot].pos, sizeof(g_gxState.pnMtx[slot].pos));
+    nonfiniteNormal += kartpad::diagnostics::count_nonfinite(
+        &g_gxState.pnMtx[slot].nrm, sizeof(g_gxState.pnMtx[slot].nrm));
+  }
+  const auto& pipeline = resolve_pipeline_state(prim, fmt);
+  const bool anomaly = !selection.complete || selection.outside_palette || nonfinitePosition || nonfiniteNormal;
+  if (anomaly) ++anomalous;
+  if (!budget.take(pipeline.configHash, anomaly)) return;
+  Log.info("KartPadDrawCheck window={} draw={} pipeline={:016x} window_elapsed_ms={} anomaly={} vertices={} stride={} complete={} pn_mask={} pn_max_raw={} pn_outside={} pn_nonmultiple={} pos_nonfinite={} nrm_nonfinite={} postex_count={} nrm_count={} absolute={}",
+           window, ordinal, pipeline.configHash,
+           std::chrono::duration_cast<std::chrono::milliseconds>(now-windowStart).count(), anomaly, count, stride, selection.complete,
+           selection.used_mask, selection.max_raw, selection.outside_palette, selection.non_row_multiple,
+           nonfinitePosition, nonfiniteNormal, pipeline.shaderInfo.matrixLayout.postexCount,
+           pipeline.shaderInfo.matrixLayout.nrmCount, pipeline.shaderInfo.matrixLayout.absolutePosRegion);
+}
+
+static bool admit_draw(GXPrimitive prim, GXVtxFmt fmt, u16 count, uint32_t vertexBytes, bool merged = false) {
+  const auto& indexTemplate = cached_index_template(prim, count);
+  gfx::StagingSizes demand{vertexBytes, 0, indexTemplate.indices.size() * sizeof(u16), 0};
+  if (merged) return gfx::staging_has_space(demand);
+  const auto& info = resolve_pipeline_state(prim, fmt).shaderInfo;
+  demand[1] = gfx::staging_uniform_bytes(info.uniformSize);
+  if (frame_interpolation_identity_needed() && frame_interpolation_replay_safe())
+    demand[1] *= 1 + MaxInterpolatedFrames;
+  for (int i = GX_VA_POS; i <= GX_VA_TEX7; ++i) {
+    if ((g_gxState.vtxDesc[i] == GX_INDEX8 || g_gxState.vtxDesc[i] == GX_INDEX16) &&
+        g_gxState.arrays[i].cachedRange.size == 0)
+      demand[3] += gfx::staging_storage_bytes(g_gxState.arrays[i].size);
+  }
+  return gfx::staging_has_space(demand);
 }
 
 bool submit_raw_draw(GXPrimitive prim, GXVtxFmt fmt, const uint8_t* vertices, uint16_t vtxCount,
@@ -2112,8 +2213,18 @@ bool submit_raw_draw(GXPrimitive prim, GXVtxFmt fmt, const uint8_t* vertices, ui
     return false;
   }
 
+  if (!has_complete_primitive(prim, vtxCount)) return true;
+
   // This entry point bypasses process(), so it owns the renderer lock itself.
-  std::lock_guard gpuLock(aurora::renderer_gpu_mutex());
+  std::unique_lock gpuLock(aurora::renderer_gpu_mutex());
+  if (!admit_draw(prim, fmt, vtxCount, vertexBytes)) {
+    gpuLock.unlock();
+    gfx::split_staging_batch();
+    gpuLock.lock();
+    if (!admit_draw(prim, fmt, vtxCount, vertexBytes))
+      throw gfx::StagingCapacityError("Raw draw does not fit after capacity submission");
+  }
+  kartpad_audit_draw(prim, fmt, vertices, vtxCount, vtxSize, vertexBytes);
   const gfx::Range vertRange = gfx::push_verts(vertices, vertexBytes);
   const bool interpolationIdentityActive = frame_interpolation_identity_needed();
   const PnMtxUsage matrixUsage = interpolationIdentityActive
@@ -2151,17 +2262,33 @@ static bool handle_draw(u8 cmd, const u8* data, u32& pos, u32 size, bool bigEndi
   }
 
 
-  // Push raw vertex data to buffer
-  const uint8_t* vertices = data + pos;
-  gfx::Range vertRange = gfx::push_verts(vertices, totalVtxBytes);
-  pos += totalVtxBytes;
+  if (!has_complete_primitive(prim, vtxCount)) {
+    pos += totalVtxBytes;
+    return true;
+  }
 
+  DrawData* mergeTarget = nullptr;
+  // Decide admission before allocating anything. The merged path needs only
+  // vertices and indices; it must not resolve pipelines or upload arrays.
   // Try to merge with previous draw call
   if (!g_gxState.stateDirty) LIKELY {
     auto* lastDraw = gfx::get_last_draw_command<DrawData>();
-    // Only if the previous draw call was a single instance draw (no lines/points handling)
+    // Expanded lines/points have different vertex interpretation even with one instance.
+    // Triangle-list output has no restart index; index 65535 is usable.
+    // Overflow would address earlier vertices instead of the appended geometry.
     if (lastDraw != nullptr && prim != GX_LINES && prim != GX_LINESTRIP && prim != GX_POINTS &&
-        lastDraw->instanceCount == 1) LIKELY {
+        !lastDraw->expandedPrimitive && lastDraw->instanceCount == 1 &&
+        uint64_t(lastDraw->vtxCount) +
+            vtxCount <= 65536u) LIKELY {
+      mergeTarget = lastDraw;
+    }
+  }
+  if (!admit_draw(prim, fmt, vtxCount, totalVtxBytes, mergeTarget != nullptr)) throw gfx::StagingBatchFull{};
+  const uint8_t* vertices = data + pos;
+  kartpad_audit_draw(prim, fmt, vertices, vtxCount, vtxSize, totalVtxBytes);
+  gfx::Range vertRange = gfx::push_verts(vertices, totalVtxBytes);
+  pos += totalVtxBytes;
+  if (auto* lastDraw = mergeTarget) {
       const auto& indexTemplate = cached_index_template(prim, vtxCount);
       const auto indices = offset_index_template(indexTemplate, lastDraw->vtxCount);
       const u32 numIndices = indexTemplate.indexCount;
@@ -2182,7 +2309,6 @@ static bool handle_draw(u8 cmd, const u8* data, u32& pos, u32 size, bool bigEndi
         extend_interpolation_draw(pn_mtx_mask(vertices, vtxCount, vtxSize));
       }
       return true;
-    }
   }
 
   const bool interpolationIdentityActive = frame_interpolation_identity_needed();
@@ -2278,8 +2404,12 @@ static void handle_draw_unmerged(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount,
       .vtxCount = vtxCount,
       .indexCount = numIndices,
       .instanceCount = instanceCount,
+      .expandedPrimitive = prim == GX_LINES || prim == GX_LINESTRIP || prim == GX_POINTS,
       .bindGroups = bindGroups,
       .dstAlpha = pipelineState.dstAlpha,
+      .diagnosticOriginalPipeline = (pipelineState.configHash == 0x58866e32bada1f83ULL ||
+                                     pipelineState.configHash == 0x33c5ff18d5c180e0ULL)
+                                       ? pipelineState.configHash : 0,
   });
   g_gxState.stateDirty = false;
 }

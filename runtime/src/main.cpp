@@ -1,3 +1,4 @@
+#include <aurora/kartpad_diagnostics.h>
 #include <algorithm>
 #include <atomic>
 #include <cctype>
@@ -26,6 +27,9 @@
 #if defined(__APPLE__)
 #include <TargetConditionals.h>
 #endif
+#if !defined(_WIN32)
+#include <unistd.h>
+#endif
 
 #if defined(_WIN32)
 #ifndef NOMINMAX
@@ -41,6 +45,13 @@
 #include <mmsystem.h>
 #include <dbghelp.h>
 #else
+#include <signal.h>
+#if defined(__x86_64__)
+// Only the x86 POSIX fault path inspects ucontext_t to recover the page-fault
+// write bit. macOS deprecates ucontext and requires _XOPEN_SOURCE just to
+// include the header, while the arm64 handler does not use it at all.
+#include <ucontext.h>
+#endif
 #include <unistd.h>
 #endif
 
@@ -51,9 +62,12 @@
 #include "system_bridge.h"
 #include "ppc_runtime.h"
 #include "aurora_events.h"
+#include "wii_remote_input.h"
+#include "discord_presence.h"
 #include "wup028_adapter.h"
 #include "fiber_manager.h"
 #include "hle_stubs.h"
+#include "hle/audio/ax_dsp.h"
 #include "runtime_config.h"
 #include "runtime_log.h"
 #include "runtime_product.h"
@@ -65,6 +79,7 @@
 
 #if defined(__APPLE__) && TARGET_OS_IOS
 #include <SDL3/SDL_main.h>
+#include <SDL3/SDL_messagebox.h>
 #include "kartpad_mobile_runtime_host.h"
 #endif
 
@@ -404,7 +419,7 @@ void InitializeProcessTranscript(int argc, char** argv) {
     }
 
     const std::filesystem::path path = GetRunLogDirectory() / "console.log";
-    state.file.open(path.string(), std::ios::out | std::ios::trunc | std::ios::binary);
+    state.file.open(path, std::ios::out | std::ios::trunc | std::ios::binary);
     if (!state.file) {
         return;
     }
@@ -580,14 +595,31 @@ std::string FormatHostStackTrace(unsigned framesToSkip) {
     for (USHORT i = 0; i < captured; ++i) {
         const DWORD64 addr = reinterpret_cast<DWORD64>(frames[i]);
         HMODULE module = nullptr;
-        char modulePath[MAX_PATH] = "?";
+        std::string modulePath = "?";
         DWORD64 moduleBase = 0;
-        if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                               reinterpret_cast<LPCSTR>(frames[i]),
+        if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                               reinterpret_cast<LPCWSTR>(frames[i]),
                                &module) != 0 &&
             module != nullptr) {
             moduleBase = reinterpret_cast<DWORD64>(module);
-            (void)GetModuleFileNameA(module, modulePath, MAX_PATH);
+            std::wstring modulePathBuffer(MAX_PATH, L'\0');
+            for (;;) {
+                const DWORD length =
+                    GetModuleFileNameW(module, modulePathBuffer.data(), static_cast<DWORD>(modulePathBuffer.size()));
+                if (length == 0) {
+                    break;
+                }
+                if (length < modulePathBuffer.size()) {
+                    modulePathBuffer.resize(length);
+                    modulePath = RuntimeConfigFile::PathToUtf8(std::filesystem::path(modulePathBuffer));
+                    break;
+                }
+                // Truncated; retry with a larger buffer up to the extended path limit.
+                if (modulePathBuffer.size() >= 32768) {
+                    break;
+                }
+                modulePathBuffer.resize(modulePathBuffer.size() * 2);
+            }
         }
 
         const char* symbolName = "?";
@@ -651,7 +683,7 @@ void WriteFatalLogImpl(std::string_view reason, std::string_view extraDetails = 
     std::string fileName = "crash_";
     fileName.append(reason);
     fileName.append(".txt");
-    std::ofstream out((runDirectory / fileName).string(), std::ios::out | std::ios::trunc);
+    std::ofstream out(runDirectory / fileName, std::ios::out | std::ios::trunc);
     if (!out) {
         return;
     }
@@ -690,11 +722,12 @@ void WriteFatalLogImpl(std::string_view reason, std::string_view extraDetails = 
     // are large.
     static std::atomic_bool s_memorySnapshotWritten{false};
     if (!s_memorySnapshotWritten.exchange(true, std::memory_order_acq_rel)) {
-        SystemBridge::WriteGuestMemorySnapshot(out, (runDirectory / "mem1.bin").string().c_str());
+        SystemBridge::WriteGuestMemorySnapshot(out, runDirectory / "mem1.bin");
     }
 
     out.flush();
-    RT_LOG(RT_TAG_RUNTIME) << "crash artifacts written to " << runDirectory.string() << std::endl;
+    RT_LOG(RT_TAG_RUNTIME) << "crash artifacts written to "
+                           << RuntimeConfigFile::PathToUtf8(runDirectory) << std::endl;
 }
 
 void SetRuntimeExitCodeImpl(int code) {
@@ -777,6 +810,30 @@ void WriteCrashArtifacts(std::string_view reason, std::string_view extraDetails,
     }
 }
 
+[[noreturn]] void RuntimeTerminate(int code, std::string_view reason) noexcept {
+    static std::atomic_flag terminating = ATOMIC_FLAG_INIT;
+    if (terminating.test_and_set(std::memory_order_acq_rel)) {
+        std::_Exit(code);
+    }
+
+    std::fprintf(stderr, "[runtime] exit %d: %.*s\n", code,
+                 static_cast<int>(reason.size()), reason.data());
+    if (code != 0 && !g_fatalErrorReported.load(std::memory_order_acquire)) {
+        WriteCrashArtifacts("terminate", reason);
+        MarkFatalErrorReported();
+    }
+    SetRuntimeExitCodeImpl(code);
+
+    // Stop workers before their guest-memory mappings or static state disappear.
+    try { AxDspHle::ShutdownMixWorker(); } catch (...) {}
+    if (g_auroraInitialized.exchange(false, std::memory_order_acq_rel)) {
+        try { aurora_shutdown(); } catch (...) {}
+    }
+    try { ShutdownProcessTranscript(); } catch (...) {}
+    std::fflush(nullptr);
+    std::_Exit(code);
+}
+
 [[noreturn]] void FatalMissingGuestTarget(uint32_t target, CpuContext* cpu) noexcept {
     RT_LOG(RT_TAG_RUNTIME) << "InvokeIndirectCpu: target 0x" << std::hex << target
               << " not translated (missing function)" << std::dec << std::endl;
@@ -794,6 +851,15 @@ void WriteCrashArtifacts(std::string_view reason, std::string_view extraDetails,
             << std::hex << target
             << ", but that function was not translated or registered.\n\n"
             << "Caller LR: 0x" << (cpu ? cpu->lr : 0u);
+    if (cpu && cpu->lr == 0x8000A42Cu) {
+        std::ostringstream moduleDetails;
+        moduleDetails << "ModuleLinker::CallModule: module index " << std::dec << cpu->gpr[4]
+                      << ", module base 0x" << std::hex << cpu->gpr[3]
+                      << ", REL prolog 0x" << target
+                      << " (registered StaticR prolog: 0x8055531C).";
+        RT_LOG(RT_TAG_RUNTIME) << moduleDetails.str() << std::endl;
+        message << '\n' << moduleDetails.str();
+    }
     if (target == 0) {
         message << "\n\nA jump to address 0 usually means a virtual call through a bad "
                    "object pointer; the crash log heuristics have details.";
@@ -801,7 +867,7 @@ void WriteCrashArtifacts(std::string_view reason, std::string_view extraDetails,
     WriteCrashArtifacts("missing_target", message.str(), &target);
     ShowRuntimeFatalPopup("Missing translated function", message.str());
     MarkFatalErrorReported();
-    std::exit(EXIT_FAILURE);
+    RuntimeTerminate(EXIT_FAILURE, "missing translated guest target");
 }
 
 } // namespace RuntimeCrash
@@ -911,6 +977,7 @@ constexpr DWORD kCppExceptionCodeMsvc = 0xE06D7363;
 // AddressSanitizer uses STATUS_FATAL_APP_EXIT when it detects an error and wants to report it.
 // We must let ASan's handler run so it can print file/line information.
 constexpr DWORD kAsanFatalAppExit = 0x40000015; // STATUS_FATAL_APP_EXIT
+LONG ReportFatalSehAndExit(EXCEPTION_POINTERS* info);
 
 void ReportStructuredException(EXCEPTION_POINTERS* info) {
     if (!info || !info->ExceptionRecord) {
@@ -979,7 +1046,12 @@ LONG CALLBACK SehLogger(EXCEPTION_POINTERS* info) {
     // flat module registers its own handler first, but registration order is
     // not guaranteed once another VEH is installed later, so consult it here
     // too - resolving a fault twice is a no-op.
-    if (GuestFlat::HandleAccessViolation(info)) {
+    if (info->ExceptionRecord != nullptr &&
+        info->ExceptionRecord->ExceptionCode == EXCEPTION_ACCESS_VIOLATION &&
+        info->ExceptionRecord->NumberParameters >= 2 &&
+        GuestFlat::HandleAccessViolation(
+            reinterpret_cast<void*>(info->ExceptionRecord->ExceptionInformation[1]),
+            info->ExceptionRecord->ExceptionInformation[0] != 0)) {
         return EXCEPTION_CONTINUE_EXECUTION;
     }
     if (g_suppressSehReporting && g_sehJumpTarget) {
@@ -1007,13 +1079,34 @@ LONG CALLBACK SehLogger(EXCEPTION_POINTERS* info) {
         info->ExceptionRecord->ExceptionCode == kAsanFatalAppExit) { // ASan reporting - let it print first
         return EXCEPTION_CONTINUE_SEARCH;
     }
-    
+    // Software-raised exceptions (customer bit set) are used for internal control flow by
+    // system DLLs (e.g. msxml6 while mscms parses a display colour profile) and are caught
+    // by their own frame handlers. Only hardware faults are fatal at first chance; anything
+    // else that truly goes unhandled reaches UnhandledSehFilter.
+    if ((info->ExceptionRecord->ExceptionCode & 0x20000000u) != 0) {
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+    return ReportFatalSehAndExit(info);
+}
+
+LONG WINAPI UnhandledSehFilter(EXCEPTION_POINTERS* info) {
+    if (info == nullptr || info->ExceptionRecord == nullptr) {
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+    const DWORD code = info->ExceptionRecord->ExceptionCode;
+    if (code == kCppExceptionCodeGcc || code == kCppExceptionCodeMsvc || code == kAsanFatalAppExit) {
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+    return ReportFatalSehAndExit(info);
+}
+
+LONG ReportFatalSehAndExit(EXCEPTION_POINTERS* info) {
     // Guard against re-entrancy: if we crash while reporting, don't recurse
     static std::atomic_flag s_inCrashHandler = ATOMIC_FLAG_INIT;
     if (s_inCrashHandler.test_and_set()) {
         std::_Exit(EXIT_FAILURE);
     }
-    
+
     // Report the structured exception with detailed information
     ReportStructuredException(info);
     const auto* record = info->ExceptionRecord;
@@ -1048,7 +1141,104 @@ LONG CALLBACK SehLogger(EXCEPTION_POINTERS* info) {
 void InstallSehLogger() {
     if (!g_vectoredSehHandle) {
         g_vectoredSehHandle = AddVectoredExceptionHandler(1, SehLogger);
+        SetUnhandledExceptionFilter(UnhandledSehFilter);
     }
+}
+#else
+// POSIX counterpart to SehLogger above. Unlike Windows' AddVectoredExceptionHandler, which lets
+// GuestFlat and this module each install their own handler and defensively re-check each other,
+// sigaction only allows one handler per signal - the second registration replaces the first
+// instead of chaining. So this is the single SIGSEGV/SIGBUS handler for the whole process, and it
+// owns checking GuestFlat's fault-interception logic first, exactly mirroring the order SehLogger
+// already uses on Windows.
+void ReportUnhandledSignalFault(int sig, void* faultAddress) {
+    RT_LOG(RT_TAG_RUNTIME) << "Signal " << sig << " (fault address 0x" << std::hex
+              << reinterpret_cast<uintptr_t>(faultAddress) << std::dec << ")";
+    if (!g_lastEntryLabel.empty()) {
+        std::cerr << " while executing " << g_lastEntryLabel;
+    }
+    std::cerr << std::endl;
+    if (const CpuContext* cpu = TryGetCpuContext()) {
+        RT_LOG(RT_TAG_RUNTIME) << "===== DUMPING CPU STATE =====" << std::endl;
+        SystemBridge::DumpCpuState(cpu);
+    }
+    std::cerr.flush();
+}
+
+void PosixMemoryFaultHandler(int sig, siginfo_t* info, void* ucontextVoid) {
+    void* faultAddress = info != nullptr ? info->si_addr : nullptr;
+    bool isWrite = false;
+#if defined(__x86_64__)
+    // Standard glibc technique for a POSIX fastmem-style handler: bit 1 (0x2) of the hardware
+    // error code x86 pushes on a page fault records whether it was a write.
+    if (ucontextVoid != nullptr) {
+        auto* uc = static_cast<ucontext_t*>(ucontextVoid);
+        isWrite = (uc->uc_mcontext.gregs[REG_ERR] & 0x2) != 0;
+    }
+#endif
+
+    // Guest-space faults are the flat memory interception mechanism (MMIO, deferred EFB reads,
+    // the executable-write guard, unmapped pages). Resolving one here means resuming the
+    // faulting instruction, which just returning from the handler does.
+    if (faultAddress != nullptr && GuestFlat::HandleAccessViolation(faultAddress, isWrite)) {
+        return;
+    }
+
+    if (g_suppressSehReporting && g_sehJumpTarget) {
+        g_sehLastExceptionCode = static_cast<uint32_t>(sig);
+        g_sehLastExceptionAddress = reinterpret_cast<uintptr_t>(faultAddress);
+        g_sehLastAccessType = isWrite ? 1u : 0u;
+        g_sehLastAccessedAddress = reinterpret_cast<uintptr_t>(faultAddress);
+        siglongjmp(*g_sehJumpTarget, 1);
+    }
+    if (g_suppressSehReporting) {
+        // Reporting suppressed but nobody armed a recovery jump: restore the default disposition
+        // and re-raise so the process still terminates, instead of returning into the same fault.
+        signal(sig, SIG_DFL);
+        raise(sig);
+        return;
+    }
+
+    // Guard against re-entrancy: if we crash while reporting, don't recurse.
+    static std::atomic_flag s_inCrashHandler = ATOMIC_FLAG_INIT;
+    if (s_inCrashHandler.test_and_set()) {
+        std::_Exit(EXIT_FAILURE);
+    }
+
+    ReportUnhandledSignalFault(sig, faultAddress);
+    std::ostringstream popupDetails;
+    popupDetails << "A native signal (" << sig << ") occurred";
+    if (!g_lastEntryLabel.empty()) {
+        popupDetails << " while executing " << g_lastEntryLabel;
+    }
+    if (faultAddress != nullptr) {
+        popupDetails << ".\n\nThe game attempted a " << (isWrite ? "write" : "read")
+                     << " at host address 0x" << std::hex
+                     << reinterpret_cast<uintptr_t>(faultAddress) << std::dec;
+    }
+    popupDetails << ".\n\nThe process transcript and crash log contain the full CPU and stack "
+                    "diagnostics.";
+    ShowRuntimeFatalPopup("a native crash occurred", popupDetails.str());
+    DumpHostStackTrace();
+    WriteFatalLogImpl(sig == SIGBUS ? "sigbus" : "sigsegv");
+
+    std::cerr.flush();
+    std::cout.flush();
+    std::fflush(stdout);
+    std::fflush(stderr);
+    std::_Exit(EXIT_FAILURE);
+}
+
+void InstallPosixMemoryFaultHandler() {
+    struct sigaction action {};
+    action.sa_sigaction = PosixMemoryFaultHandler;
+    action.sa_flags = SA_SIGINFO;
+    sigemptyset(&action.sa_mask);
+    sigaction(SIGSEGV, &action, nullptr);
+    // A touch beyond a memfd-backed mapping's ftruncate()'d size raises SIGBUS rather than
+    // SIGSEGV on Linux; region sizing should make this unreachable, but routing it to the same
+    // handler costs nothing and avoids a silent gap if it ever isn't.
+    sigaction(SIGBUS, &action, nullptr);
 }
 #endif
 
@@ -1157,6 +1347,7 @@ static void TerminateHandler() {
     std::_Exit(EXIT_FAILURE);
 }
 
+// Runtime entry point: loads the configuration, brings up aurora and runs the game.
 int RuntimeMain(int argc, char** argv) {
     // Must run before the transcript duplicates stdout/stderr: it decides what
     // those descriptors are mirrored to now that the products are GUI-subsystem.
@@ -1165,12 +1356,20 @@ int RuntimeMain(int argc, char** argv) {
     ConfigureWindowsFatalDialogBehavior();
     InstallSehLogger();
     WindowsTimerResolutionGuard timerResolutionGuard;
+#else
+    InstallPosixMemoryFaultHandler();
 #endif
     InitializeProcessTranscript(argc, argv);
+    kartpad::diagnostics::event(kartpad::diagnostics::Boundary::Runtime,"begin");
+    // Mobile OS crash collectors must see the original fatal signal. The desktop
+    // handler allocates, locks and calls _Exit, which can deadlock and suppress
+    // Android tombstones / Apple native crash reports. Keep the C++ default
+    // terminate -> abort path on mobile; ordinary explicit exits keep atexit.
+#if !defined(__ANDROID__) && !(defined(__APPLE__) && TARGET_OS_IOS)
     std::signal(SIGABRT, AbortSignalHandler);
-    // Install exit/terminate handlers to ensure we get crash info
-    std::atexit(AtExitHandler);
     std::set_terminate(TerminateHandler);
+#endif
+    std::atexit(AtExitHandler);
     
     std::string currentEntryLabel;
 
@@ -1210,6 +1409,9 @@ int RuntimeMain(int argc, char** argv) {
         const char* activeProfile = RuntimeProduct::IsRetroRewind() ? "retro_rewind" : "base";
         RecompMod::ActivateProfile(activeProfile);
         TranslatedFunctionRegistry::SelectProfile(activeProfile);
+        if (RuntimeConfigFile::DiscordPresenceEnabled()) {
+            DiscordPresence::Initialize(RuntimeConfigFile::DiscordClientId(), "Mario Kart Wii");
+        }
         SystemBridge::Initialize();
         TranslatedFunctionRegistry::Finalize();
 
@@ -1217,6 +1419,7 @@ int RuntimeMain(int argc, char** argv) {
         // We use auto backend (or specific if needed) and set a default window size.
         // This is required for GX commands (like texture loading) to work.
         AuroraConfig auroraConfig = {};
+        auroraConfig.vsync = RuntimeConfigFile::Get().vsync.value_or(false);
         auroraConfig.appName = RuntimeProduct::Active().displayName.data();
         const auto applicationDataDirectory = RuntimeConfigFile::ApplicationDataDirectory();
         const auto rendererCacheDirectory = RuntimeConfigFile::CacheDataDirectory();
@@ -1224,10 +1427,11 @@ int RuntimeMain(int argc, char** argv) {
         std::filesystem::create_directories(rendererCacheDirectory, rendererPathError);
         if (rendererPathError) {
             RT_LOG(RT_TAG_RUNTIME) << "Unable to create renderer cache directory "
-                      << rendererCacheDirectory << ": " << rendererPathError.message() << std::endl;
+                      << RuntimeConfigFile::PathToUtf8(rendererCacheDirectory) << ": "
+                      << rendererPathError.message() << std::endl;
         }
-        const std::string auroraUserPath = applicationDataDirectory.string();
-        const std::string auroraCachePath = rendererCacheDirectory.string();
+        const std::string auroraUserPath = RuntimeConfigFile::PathToUtf8(applicationDataDirectory);
+        const std::string auroraCachePath = RuntimeConfigFile::PathToUtf8(rendererCacheDirectory);
         auroraConfig.userPath = auroraUserPath.c_str();
         auroraConfig.cachePath = auroraCachePath.c_str();
         auroraConfig.logCallback = &RuntimeAuroraLogCallback;
@@ -1259,7 +1463,6 @@ int RuntimeMain(int argc, char** argv) {
         auroraConfig.allowTextureReplacements = RuntimeConfigFile::TextureReplacements(false);
         auroraConfig.allowTextureDumps = auroraConfig.allowTextureReplacements &&
                                          RuntimeConfigFile::TextureDumps(false);
-        // No vsync knob: aurora always configures a non-blocking present mode.
         auroraConfig.desiredBackend = BACKEND_AUTO;
 #if defined(__APPLE__) && TARGET_OS_IOS
         ConfigureMkwMobileAspectMode(mobileAspectMode, auroraConfig.windowWidth,
@@ -1276,9 +1479,21 @@ int RuntimeMain(int argc, char** argv) {
             const char* configName;
             AuroraBackend backend;
         };
+#if defined(__APPLE__)
+        static constexpr std::array<GraphicsBackendEntry, 2> kGraphicsBackends{{
+            {"auto", BACKEND_AUTO}, {"metal", BACKEND_METAL},
+        }};
+// only vulkan for linux
+#elif defined(__linux__)
+            static constexpr std::array<GraphicsBackendEntry, 2> kGraphicsBackends{{
+            {"auto", BACKEND_AUTO}, {"vulkan", BACKEND_VULKAN},
+        }};
+#elif defined(_WIN32)
         static constexpr std::array<GraphicsBackendEntry, 3> kGraphicsBackends{{
             {"auto", BACKEND_AUTO}, {"d3d12", BACKEND_D3D12}, {"vulkan", BACKEND_VULKAN},
         }};
+
+#endif
         const auto backendDisplayName = [](AuroraBackend value) -> const char* {
             for (const auto& entry : kGraphicsBackends) {
                 if (entry.backend == value) {
@@ -1297,7 +1512,22 @@ int RuntimeMain(int argc, char** argv) {
         }
         const AuroraBackend requestedBackend = auroraConfig.desiredBackend;
 
+        // SDL only reads its Wii driver hint when the joystick subsystem starts, which
+        // aurora_initialize does; a Bluetooth Wii Remote paired before launch must be
+        // visible on that first scan.
+        WiiRemoteInput::ConfigureSdlHints(RuntimeConfigFile::WiiRemotesEnabled(true));
+
         const AuroraInfo auroraInfo = aurora_initialize(0, nullptr, &auroraConfig);
+        if (auroraInfo.initializationStatus != AURORA_INITIALIZATION_SUCCESS) {
+            const std::string reason = auroraInfo.initializationError != nullptr
+                ? auroraInfo.initializationError : "No supported graphics backend is available";
+            RT_LOG(RT_TAG_RUNTIME) << "Graphics startup rejected: " << reason << std::endl;
+            const std::string message = "KartPad could not start the graphics renderer on this device.\n\n" + reason;
+            SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Graphics Unavailable", message.c_str(), nullptr);
+            SetRuntimeExitCodeImpl(1);
+            ShutdownProcessTranscript();
+            return 1;
+        }
 #if defined(__APPLE__) && TARGET_OS_IOS
         KartPadMobileRuntimeHostInstall(auroraInfo.window);
 #endif
@@ -1312,7 +1542,6 @@ int RuntimeMain(int argc, char** argv) {
         }
         aurora_set_frame_worker_wait_callback(ServiceGuestTimingDuringAuroraFrameWait);
         GxGuestWrite::InstallAuroraHooks();
-        Wup028Adapter::Initialize();
         UpdateMkwDynamicAspectSurface(auroraInfo.windowSize.native_fb_width,
                                       auroraInfo.windowSize.native_fb_height);
         settings_overlay::InitializeRuntimeSettings();
@@ -1336,6 +1565,7 @@ int RuntimeMain(int argc, char** argv) {
                   << std::endl;
         g_auroraInitialized.store(true, std::memory_order_release);
 
+        kartpad::diagnostics::event(kartpad::diagnostics::Boundary::Guest,"resolve_entry");
         auto entry = ResolveEntry();
         InitializePersistentCpuContext();
         auto& cpu = GetPersistentCpuContext();
@@ -1355,7 +1585,9 @@ int RuntimeMain(int argc, char** argv) {
         currentEntryLabel = label;
         g_lastEntryLabel = currentEntryLabel;
 
+        kartpad::diagnostics::event(kartpad::diagnostics::Boundary::Guest,"begin");
         InvokeIndirectCpu(entry->address, &cpu);
+        kartpad::diagnostics::event(kartpad::diagnostics::Boundary::Guest,"returned");
         const uint32_t result = cpu.gpr[3];
         RT_LOG(RT_TAG_RUNTIME) << label << " => 0x" << std::hex << result << std::dec << " (" << result << ")" << std::endl;
         
@@ -1367,6 +1599,7 @@ int RuntimeMain(int argc, char** argv) {
         KartPadMobileRuntimeHostUninstall();
 #endif
         aurora_shutdown();
+        DiscordPresence::Shutdown();
         SetRuntimeExitCodeImpl(0);
         ShutdownProcessTranscript();
         return 0;
@@ -1388,6 +1621,7 @@ int RuntimeMain(int argc, char** argv) {
         KartPadMobileRuntimeHostUninstall();
 #endif
         aurora_shutdown();
+        DiscordPresence::Shutdown();
         ShutdownProcessTranscript();
         return 1;
     } catch (const std::exception& ex) {
@@ -1403,6 +1637,7 @@ int RuntimeMain(int argc, char** argv) {
         KartPadMobileRuntimeHostUninstall();
 #endif
         aurora_shutdown();
+        DiscordPresence::Shutdown();
         ShutdownProcessTranscript();
         return 1;
     }

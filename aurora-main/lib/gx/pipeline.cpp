@@ -1,4 +1,8 @@
 #include "pipeline.hpp"
+#include "kartpad_draw_inputs.hpp"
+#include <aurora/kartpad_diagnostics.h>
+#include <cstdlib>
+#include <cstring>
 
 #include "../webgpu/gpu.hpp"
 #include "gx_fmt.hpp"
@@ -65,9 +69,29 @@ void clear_shader_module_cache() {
   sShaderModuleCache.clear();
 }
 
+// Producer-side input/binding records cannot establish that render() issued a
+// draw. Keep the two report-grounded recipes correlated through frame sealing.
+static void diagnostic_draw_outcome(const DrawData& data, bool encoded, bool interpolated) {
+  static const bool enabled = [] {
+    const char* v = std::getenv("KARTPAD_RENDERER_VALIDATION");
+    return v && std::strcmp(v, "1") == 0;
+  }();
+  if (!enabled || data.diagnosticOriginalPipeline == 0) return;
+  static thread_local kartpad::diagnostics::DrawOutcomeWindow windows[2];
+  auto& window = windows[data.diagnosticOriginalPipeline == 0x58866e32bada1f83ULL ? 0 : 1];
+  const auto now = kartpad::diagnostics::monotonic_ms();
+  if (!window.record(encoded, now)) return;
+  Log.info("KartPadDrawOutcome pid={} unix_ms={} steady_ms={} original={:016x} pipeline={:016x} encoded_calls={} skipped_pipeline_calls={} last_encoded={} last_interpolated={} last_indices={} last_instances={} report={} final={}",
+           kartpad::diagnostics::pid(), kartpad::diagnostics::unix_ms(), now,
+           data.diagnosticOriginalPipeline, data.pipeline, window.encoded, window.skipped,
+           encoded, interpolated, data.indexCount, data.instanceCount, window.reports, window.reports == 120);
+  window.clearCounts();
+}
+
 void render(const DrawData& data, const wgpu::RenderPassEncoder& pass, DrawEncodeState& state,
             bool requireReadyPipeline, const gfx::Range* uniformRangeOverride) {
   if (!gfx::bind_pipeline(data.pipeline, pass, state.currentPipeline, requireReadyPipeline)) {
+    diagnostic_draw_outcome(data, false, uniformRangeOverride != nullptr);
     return;
   }
 
@@ -92,5 +116,6 @@ void render(const DrawData& data, const wgpu::RenderPassEncoder& pass, DrawEncod
   }
   pass.DrawIndexed(data.indexCount, data.instanceCount,
                    static_cast<uint32_t>(data.idxRange.offset / sizeof(uint16_t)));
+  diagnostic_draw_outcome(data, true, uniformRangeOverride != nullptr);
 }
 } // namespace aurora::gx

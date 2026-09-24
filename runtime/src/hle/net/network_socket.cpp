@@ -4,6 +4,23 @@
 
 namespace NetworkHle {
 
+// Explicit developer launch diagnostic: metadata only, never tokens, payloads,
+// profile IDs, addresses or serials. Does not alter DNS or socket routing.
+static void TraceWfcTcp(const char* operation, uint32_t fd, WiiSocket* socket,
+                        const char* data, int bytes, int error) {
+    const char* enabled = std::getenv("KARTPAD_WFC_TRACE");
+    if (!enabled || std::strcmp(enabled, "1") != 0 || socket->type != SOCK_STREAM ||
+        (socket->peerPort != 29900 && socket->peerPort != 29901 && socket->peerPort != 28910)) return;
+    if (bytes < 0 && IsWouldBlockError(error)) return;
+    const std::string_view packet(data ? data : "", bytes > 0 && data ? static_cast<size_t>(bytes) : 0);
+    const char* command = "other";
+    for (const auto prefix : {"\\lc\\1", "\\lc\\2", "\\login\\", "\\ka\\", "\\error\\", "\\logout\\", "\\status\\", "\\getprofile\\", "\\pi\\"}) {
+        if (packet.starts_with(prefix)) { command = prefix; break; }
+    }
+    NetFail("wfc-tcp op=%s fd=%u port=%u bytes=%d host-error=%d command=%s",
+            operation, fd, socket->peerPort, bytes, error, command);
+}
+
 static uint32_t HostOrderIpv4(const sockaddr_in& address) {
     return ntohl(address.sin_addr.s_addr);
 }
@@ -43,6 +60,7 @@ static int32_t DeleteWiiSocket(uint32_t fd) {
                       fd, s->localTestUdpSendCalls, s->localTestUdpRecvCalls,
                       s->localTestUdpPacketsReceived);
     }
+    TraceWfcTcp("close", fd, s, nullptr, 0, 0);
     ClearSslSessionsForSocket(fd);
     CloseNativeSocket(s->native);
     *s = {};
@@ -498,6 +516,7 @@ int32_t HandleIpTopIoctlv(uint32_t cmd, const std::vector<IoVector>& in, const s
         const int ret = sendto(s->native, reinterpret_cast<const char*>(sendData), static_cast<int>(sendSize),
                                static_cast<int>(flags), destPtr, destLen);
         const int hostError = ret < 0 ? NativeLastError() : 0;
+        TraceWfcTcp("send", fd, s, reinterpret_cast<const char*>(sendData), ret, hostError);
         if (s->type == SOCK_DGRAM && LocalWfcTraceEnabled()) {
             ++s->localTestUdpSendCalls;
             if (ShouldTracePacket(s->localTestUdpSendCalls)) {
@@ -507,7 +526,8 @@ int32_t HandleIpTopIoctlv(uint32_t cmd, const std::vector<IoVector>& in, const s
                               destPtr ? ntohs(dest.sin_port) : 0, ret, hostError);
             }
         }
-        int32_t result = SocketResult(ret);
+        // Diagnostics may change the native error; use the send result captured above.
+        int32_t result = ret >= 0 ? SocketResult(ret) : SocketErrorResult(hostError);
         if (patchedWrite && ret == static_cast<int>(sendSize)) {
             result = static_cast<int32_t>(in[0].size);
         }
@@ -552,6 +572,7 @@ int32_t HandleIpTopIoctlv(uint32_t cmd, const std::vector<IoVector>& in, const s
             nativeErr = ret < 0 ? NativeLastError() : 0;
         }
 
+        TraceWfcTcp("recv", fd, s, data, ret, nativeErr);
         if (ret >= 0 && fromPtr) {
             WriteWiiSockAddr(out[1].address, from, static_cast<uint32_t>(fromLen));
         }

@@ -1,4 +1,4 @@
-﻿cmake_minimum_required(VERSION 3.16)
+cmake_minimum_required(VERSION 3.16)
 project(mkw_recompiled LANGUAGES C CXX)
 
 if(NOT APPLE OR NOT CMAKE_SIZEOF_VOID_P EQUAL 8 OR
@@ -16,8 +16,22 @@ endif()
 # libraries and the products in cmake/PublicProducts.cmake) inherits them while
 # aurora-main and its third-party tree stay unaffected.
 set(MKW_PROJECT_COMPILE_DEFINITIONS NOMINMAX)
+# Skip host overflow/underflow/inexact capture while the guest leaves the
+# matching FPSCR enables clear; results and register writes are unchanged
+# (see KartPad docs/artifacts/2026-09-23/android-copy-stream-loop.md).
+list(APPEND MKW_PROJECT_COMPILE_DEFINITIONS KARTPAD_UNOBSERVED_FP_STATUS=1)
 
 set(CMAKE_CXX_STANDARD 20)
+if(APPLE)
+    set(MKW_PLATFORM_MACOS TRUE)
+    enable_language(ASM)
+endif()
+if(ANDROID)
+    add_library(mkw_libco STATIC third_party/libco/libco.c)
+    target_include_directories(mkw_libco PUBLIC "${CMAKE_CURRENT_LIST_DIR}/third_party/libco")
+    add_library(mkw::libco ALIAS mkw_libco)
+    set_target_properties(mkw_libco PROPERTIES POSITION_INDEPENDENT_CODE ON)
+endif()
 
 # Release binaries must not disclose the local checkout path through __FILE__
 # strings emitted by first-party sources and header-only dependencies.
@@ -276,6 +290,13 @@ list(REMOVE_ITEM SOURCES
 list(APPEND SOURCES
     "${CMAKE_CURRENT_LIST_DIR}/src/apple/guest_flat_memory_apple.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/apple/wup028_adapter_stub.cpp")
+
+# Use KartPad's mobile/desktop VM adapter; upstream's alternate macOS VM
+# backend must not also define the same GuestFlat entry points.
+list(REMOVE_ITEM SOURCES "${CMAKE_CURRENT_LIST_DIR}/src/guest_flat_memory_macos.cpp")
+if(APPLE)
+    list(APPEND SOURCES "${CMAKE_CURRENT_LIST_DIR}/src/platform/macos/co_switch.S")
+endif()
 
 # The translator emits the complete, content-addressed source graph. Consuming
 # this one manifest keeps configure independent of the 28k generated function

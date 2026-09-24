@@ -1,4 +1,4 @@
-﻿# Public WiiCompiled product graph.
+# Public WiiCompiled product graph.
 #
 # The translator owns the translated build graph. Mario Kart's profile-neutral
 # functions are compiled once into mkw_base_shared; only callers whose direct
@@ -78,6 +78,10 @@ target_compile_definitions(mkw_runtime_common PRIVATE
 target_link_libraries(mkw_runtime_common PRIVATE
     aurora::gx aurora::pad aurora::si aurora::vi aurora::mtx)
 target_link_libraries(mkw_runtime_common PRIVATE mkw::pugixml mkw::toml11 mkw::cryptopp)
+if(ANDROID)
+    target_link_libraries(mkw_runtime_common PRIVATE mkw::libco)
+endif()
+
 target_link_libraries(mkw_runtime_common PRIVATE "-framework Foundation")
 if(MKW_CPPWINRT_INCLUDE_DIR)
     if(NOT EXISTS "${MKW_CPPWINRT_INCLUDE_DIR}/winrt/base.h")
@@ -168,6 +172,10 @@ if(MKW_HAVE_RETRO_REWIND)
 endif()
 
 function(mkw_configure_product target)
+    if(ANDROID)
+        target_link_libraries(${target} PRIVATE mkw::libco)
+    endif()
+
     target_sources(${target} PRIVATE $<TARGET_OBJECTS:mkw_runtime_common>)
     # Startup CPU check. Must stay a separate object library so it keeps the
     # plain baseline ISA while everything around it is built for x86-64-v3.
@@ -317,6 +325,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "iOS" AND MKW_KARTPAD_REPO_ROOT)
     endforeach()
     set(MKW_KARTPAD_MOBILE_SOURCES
         "${MKW_KARTPAD_IOS_DIR}/KartPadRuntimeOverlayHost.mm"
+        "${MKW_KARTPAD_IOS_DIR}/KartPadSystemDiagnostics.mm"
         "${MKW_KARTPAD_SHARED_DIR}/KartPadMiiManager.mm"
         "${MKW_KARTPAD_IOS_DIR}/KartPadDiscExtractor.mm"
         "${MKW_KARTPAD_IOS_DIR}/KartPadDiscFormats.cpp"
@@ -374,7 +383,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "iOS" AND MKW_KARTPAD_REPO_ROOT)
         "-framework Metal" "-framework GameController"
         "-framework CoreMotion" "-framework UniformTypeIdentifiers"
         "-framework SystemConfiguration" "-framework CoreFoundation"
-        "-framework CoreServices" "-framework Foundation" "-framework SafariServices"
+        "-framework CoreServices" "-framework Foundation" "-framework SafariServices" "-framework MetricKit"
         "-lcompression" "-lresolv")
     set_target_properties(WiiCompiled PROPERTIES
         OUTPUT_NAME KartPad
@@ -439,7 +448,7 @@ if(MKW_HAVE_RETRO_REWIND)
             "-framework Metal" "-framework GameController"
             "-framework CoreMotion" "-framework UniformTypeIdentifiers"
             "-framework SystemConfiguration" "-framework CoreFoundation"
-            "-framework CoreServices" "-framework Foundation" "-framework SafariServices"
+            "-framework CoreServices" "-framework Foundation" "-framework SafariServices" "-framework MetricKit"
             "-lcompression" "-lresolv")
         set_target_properties(RetroRewind PROPERTIES
             OUTPUT_NAME KartPad
@@ -528,7 +537,7 @@ if(MKW_HAVE_RETRO_REWIND)
             "-framework Metal" "-framework GameController"
             "-framework CoreMotion" "-framework UniformTypeIdentifiers"
             "-framework SystemConfiguration" "-framework CoreFoundation"
-            "-framework CoreServices" "-framework Foundation" "-framework SafariServices"
+            "-framework CoreServices" "-framework Foundation" "-framework SafariServices" "-framework MetricKit"
             "-lcompression" "-lresolv")
         set_target_properties(KartPadDual PROPERTIES
             OUTPUT_NAME KartPad
@@ -537,10 +546,11 @@ if(MKW_HAVE_RETRO_REWIND)
             XCODE_ATTRIBUTE_ARCHS arm64
             XCODE_ATTRIBUTE_ASSETCATALOG_COMPILER_APPICON_NAME AppIcon
             XCODE_ATTRIBUTE_CLANG_CXX_LANGUAGE_STANDARD "c++20"
-            XCODE_ATTRIBUTE_CURRENT_PROJECT_VERSION 43
+            XCODE_ATTRIBUTE_CURRENT_PROJECT_VERSION 72
+            XCODE_ATTRIBUTE_KARTPAD_DIAGNOSTIC_CANDIDATE NO
             XCODE_ATTRIBUTE_GENERATE_INFOPLIST_FILE NO
             XCODE_ATTRIBUTE_IPHONEOS_DEPLOYMENT_TARGET 16.0
-            XCODE_ATTRIBUTE_MARKETING_VERSION 0.4.21
+            XCODE_ATTRIBUTE_MARKETING_VERSION 0.5.1
             XCODE_ATTRIBUTE_PRODUCT_BUNDLE_IDENTIFIER dev.kartpad.app
             XCODE_ATTRIBUTE_SUPPORTED_PLATFORMS "iphonesimulator iphoneos"
             XCODE_ATTRIBUTE_SUPPORTS_MACCATALYST NO

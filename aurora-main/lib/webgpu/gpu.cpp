@@ -1,3 +1,7 @@
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#endif
+#include <aurora/kartpad_diagnostics.h>
 #include "gpu.hpp"
 
 #include <array>
@@ -113,8 +117,8 @@ RenderTargetSize clamp_frame_buffer_size(uint32_t width, uint32_t height) noexce
   return {budgeted.width, budgeted.height};
 }
 
-// V-Sync is never enabled: the guest drives its own pacing, and blocking in Present() couples the
-// whole machine to the monitor (a 120 FPS target on a 75 Hz display runs in slow motion).
+// The default leaves presentation unthrottled. The iOS native-rate FIFO
+// experiment is opt-in and disengages while frame interpolation is active.
 wgpu::PresentMode best_present_mode() {
   const auto supports = [](const wgpu::PresentMode candidate) {
     for (size_t i = 0; i < g_surfaceCapabilities.presentModeCount; ++i) {
@@ -124,6 +128,12 @@ wgpu::PresentMode best_present_mode() {
     }
     return false;
   };
+  if (g_config.vsync && g_backendType == wgpu::BackendType::Metal &&
+      aurora_get_frame_interpolation_fps() == 0) {
+    if (supports(wgpu::PresentMode::Fifo)) {
+      return wgpu::PresentMode::Fifo;
+    }
+  }
   // Vulkan prefers Mailbox, every other backend Immediate. Under window capture the Vulkan driver
   // cannot flip and Immediate leaks about a megabyte per present until the device is lost.
   const bool preferMailbox = g_backendType == wgpu::BackendType::Vulkan;
@@ -519,6 +529,17 @@ static bool create_surface() {
 }
 
 bool initialize(AuroraBackend auroraBackend) {
+  using kartpad::diagnostics::Boundary;
+  using kartpad::diagnostics::event;
+  event(Boundary::Backend, "begin", static_cast<int>(auroraBackend));
+  SDL_ClearError();
+#if defined(__ANDROID__) || (defined(__APPLE__) && TARGET_OS_IOS)
+  if (auroraBackend == BACKEND_NULL) {
+    event(Boundary::Backend, "rejected", static_cast<int>(auroraBackend), "Null cannot present a mobile game; no rendering backend was selected");
+    return false;
+  }
+#endif
+
   if (!g_instance) {
     Log.info("Creating WebGPU instance");
     const std::array requiredInstanceFeatures{
@@ -533,9 +554,15 @@ bool initialize(AuroraBackend auroraBackend) {
     // descriptor only restates Dawn's defaults, so use the public WebGPU descriptor here.
     dawn::native::DawnInstanceDescriptor dawnInstanceDescriptor;
     dawnInstanceDescriptor.backendValidationLevel = dawn::native::BackendValidationLevel::Disabled;
+    dawnInstanceDescriptor.SetLoggingCallback([](wgpu::LoggingType type, wgpu::StringView message) {
+      kartpad::diagnostics::event(kartpad::diagnostics::Boundary::Instance,
+          "driver_message", static_cast<int>(type), std::string_view(message));
+    });
     instanceDescriptor.nextInChain = &dawnInstanceDescriptor;
 #endif
+    event(Boundary::Instance, "begin");
     g_instance = wgpu::CreateInstance(&instanceDescriptor);
+    event(Boundary::Instance, g_instance ? "ready" : "failed");
     if (!g_instance) {
       Log.error("Failed to create WebGPU instance");
       return false;
@@ -554,6 +581,7 @@ bool initialize(AuroraBackend auroraBackend) {
   {
     window::SurfaceLock surfaceLock;
     if (!create_surface()) {
+      event(Boundary::Surface, "create_failed");
       return false;
     }
   }
@@ -563,19 +591,27 @@ bool initialize(AuroraBackend auroraBackend) {
         .backendType = backend,
         .compatibleSurface = g_surface,
     };
+    event(Boundary::Adapter, "begin", static_cast<int>(backend));
     const auto future = g_instance.RequestAdapter(
         &options, wgpu::CallbackMode::WaitAnyOnly,
         [](wgpu::RequestAdapterStatus status, wgpu::Adapter adapter, wgpu::StringView message) {
+          event(Boundary::Adapter, status == wgpu::RequestAdapterStatus::Success ? "ready" : "rejected",
+                static_cast<int>(status), std::string_view(message));
           if (status == wgpu::RequestAdapterStatus::Success) {
             g_adapter = std::move(adapter);
           } else {
             Log.warn("Adapter request failed: {}", message);
+            const std::string_view reason{message};
+            SDL_SetError("Graphics adapter unavailable: %.*s",
+                         static_cast<int>(std::min<size_t>(reason.size(), 512)), reason.data());
           }
         });
     const auto status = g_instance.WaitAny(future, 5000000000);
     if (status != wgpu::WaitStatus::Success) {
+      event(Boundary::Adapter, "wait_failed", static_cast<int>(status));
       Log.error("Failed to create {} adapter: {}", magic_enum::enum_name(backend),
                 magic_enum::enum_name(status));
+      SDL_SetError("Graphics adapter request did not complete within its startup deadline");
       return false;
     }
     if (!g_adapter) {
@@ -682,10 +718,18 @@ bool initialize(AuroraBackend auroraBackend) {
       "enable_immediate_error_handling",
         /* clang-format on */
     };
+    const char* rendererValidationFlag = std::getenv("KARTPAD_RENDERER_VALIDATION");
+    const bool rendererValidation = rendererValidationFlag != nullptr &&
+                                    std::strcmp(rendererValidationFlag, "1") == 0;
 #ifdef NDEBUG
-    enableToggles.push_back("skip_validation");
-    enableToggles.push_back("disable_robustness");
+    if (!rendererValidation) {
+      enableToggles.push_back("skip_validation");
+      enableToggles.push_back("disable_robustness");
+    }
 #endif
+    const std::array<const char*, 2> validationDisabledToggles = {
+        "skip_validation", "disable_robustness"};
+    Log.info("KartPad renderer diagnostic mode: {}", rendererValidation ? "validation-and-robustness" : "normal");
     if (g_backendType == wgpu::BackendType::Vulkan) {
       enableToggles.push_back("vulkan_monolithic_pipeline_cache");
     }
@@ -693,6 +737,8 @@ bool initialize(AuroraBackend auroraBackend) {
         .nextInChain = &cacheDescriptor,
         .enabledToggleCount = enableToggles.size(),
         .enabledToggles = enableToggles.data(),
+        .disabledToggleCount = rendererValidation ? validationDisabledToggles.size() : 0,
+        .disabledToggles = rendererValidation ? validationDisabledToggles.data() : nullptr,
     });
 #endif
     wgpu::DeviceDescriptor deviceDescriptor;
@@ -704,6 +750,8 @@ bool initialize(AuroraBackend auroraBackend) {
     deviceDescriptor.requiredLimits = &requiredLimits;
     deviceDescriptor.SetUncapturedErrorCallback(
         [](const wgpu::Device& device, wgpu::ErrorType type, wgpu::StringView message) {
+          kartpad::diagnostics::event(kartpad::diagnostics::Boundary::Device, "uncaptured_error",
+              static_cast<int>(type), std::string_view(message));
           if (g_initialized.load(std::memory_order_acquire)) {
             FATAL("WebGPU error {}: {}", underlying(type), message);
           } else {
@@ -734,15 +782,21 @@ bool initialize(AuroraBackend auroraBackend) {
     const auto future =
         g_adapter.RequestDevice(&deviceDescriptor, wgpu::CallbackMode::WaitAnyOnly,
                                 [](wgpu::RequestDeviceStatus status, wgpu::Device device, wgpu::StringView message) {
+                                  event(Boundary::Device, status == wgpu::RequestDeviceStatus::Success ? "ready" : "rejected",
+                                        static_cast<int>(status), std::string_view(message));
                                   if (status == wgpu::RequestDeviceStatus::Success) {
                                     g_device = std::move(device);
                                   } else {
                                     Log.warn("Device request failed: {}", message);
+                                    const std::string_view reason{message};
+                                    SDL_SetError("Graphics device unavailable: %.*s",
+                                        static_cast<int>(std::min<size_t>(reason.size(), 512)), reason.data());
                                   }
                                 });
     const auto status = g_instance.WaitAny(future, 5000000000);
     if (status != wgpu::WaitStatus::Success) {
       Log.error("Failed to create device: {}", magic_enum::enum_name(status));
+      SDL_SetError("Graphics device request did not complete within its startup deadline");
       return false;
     }
     if (!g_device) {
@@ -772,6 +826,7 @@ bool initialize(AuroraBackend auroraBackend) {
   g_queue = g_device.GetQueue();
 
   const wgpu::Status status = g_surface.GetCapabilities(g_adapter, &g_surfaceCapabilities);
+  event(Boundary::Surface, status == wgpu::Status::Success ? "capabilities_ready" : "capabilities_failed", static_cast<int>(status));
   if (status != wgpu::Status::Success) {
     Log.error("Failed to get surface capabilities: {}", magic_enum::enum_name(status));
     return false;
@@ -782,6 +837,11 @@ bool initialize(AuroraBackend auroraBackend) {
   }
   if (g_surfaceCapabilities.presentModeCount == 0) {
     Log.error("Surface has no present modes");
+    return false;
+  }
+  const wgpu::TextureUsage neededUsage = wgpu::TextureUsage::RenderAttachment | wgpu::TextureUsage::CopySrc;
+  if ((static_cast<uint64_t>(g_surfaceCapabilities.usages) & static_cast<uint64_t>(neededUsage)) != static_cast<uint64_t>(neededUsage)) {
+    event(Boundary::Surface, "required_usage_missing", static_cast<long long>(g_surfaceCapabilities.usages), "requires RenderAttachment and CopySrc");
     return false;
   }
   auto surfaceFormat = best_surface_format();
@@ -808,6 +868,7 @@ bool initialize(AuroraBackend auroraBackend) {
     window::SurfaceLock surfaceLock;
     resize_swapchain(size.fb_width, size.fb_height, size.native_fb_width, size.native_fb_height, true);
   }
+  event(Boundary::Backend, "ready", static_cast<int>(auroraBackend));
   g_initialized.store(true, std::memory_order_release);
   return true;
 }
@@ -937,16 +998,22 @@ void resize_swapchain(uint32_t width, uint32_t height, uint32_t native_width, ui
         render_height);
   }
 
+  const auto presentMode = best_present_mode();
+  const bool presentModeChanged = g_graphicsConfig.surfaceConfiguration.presentMode != presentMode;
   const bool sizeChanged = g_graphicsConfig.surfaceConfiguration.width != native_width ||
                            g_graphicsConfig.surfaceConfiguration.height != native_height ||
                            g_frameBuffer.size.width != render_width || g_frameBuffer.size.height != render_height;
-  if (!force && !sizeChanged) {
+  if (!force && !sizeChanged && !presentModeChanged) {
     return;
   }
   if (sizeChanged) {
     gx::clear_display_copy_cache();
     gfx::clear_caches();
     clear_present_source_override();
+  }
+  if (presentModeChanged) {
+    Log.info("Changing surface present mode to {}", magic_enum::enum_name(presentMode));
+    g_graphicsConfig.surfaceConfiguration.presentMode = presentMode;
   }
   g_graphicsConfig.surfaceConfiguration.width = native_width;
   g_graphicsConfig.surfaceConfiguration.height = native_height;

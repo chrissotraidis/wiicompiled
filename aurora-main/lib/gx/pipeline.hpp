@@ -13,8 +13,10 @@ struct DrawData {
   uint32_t vtxCount;
   uint32_t indexCount;
   uint32_t instanceCount;
+  bool expandedPrimitive;
   GXBindGroups bindGroups;
   uint32_t dstAlpha;
+  gfx::PipelineRef diagnosticOriginalPipeline = 0;
 };
 
 constexpr uint32_t GXPipelineConfigVersion = 19;

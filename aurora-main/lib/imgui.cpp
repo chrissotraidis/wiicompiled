@@ -10,6 +10,7 @@
 #include <SDL3/SDL_events.h>
 #include <SDL3/SDL_render.h>
 
+#include "fs_helper.hpp"
 #include "internal.hpp"
 #include "webgpu/gpu.hpp"
 #include "window.hpp"
@@ -37,7 +38,7 @@ void remove_legacy_ini_file(const char* basePath) noexcept {
   }
 
   std::error_code ec;
-  std::filesystem::remove(std::filesystem::path{basePath} / "imgui.ini", ec);
+  std::filesystem::remove(fs_path_from_string(basePath) / "imgui.ini", ec);
 }
 
 void create_context() noexcept {
@@ -74,18 +75,30 @@ void initialize() noexcept {
 
 void shutdown() noexcept {
   ZoneScoped;
-  if (g_useSdlRenderer) {
-    ImGui_ImplSDLRenderer3_Shutdown();
-  } else {
-    ImGui_ImplWGPU_Shutdown();
+  // Startup can fail before either backend initializes. A context alone does
+  // not mean its renderer/platform backend owns resources to release.
+  if (ImGui::GetCurrentContext() != nullptr) {
+    ImGuiIO& io = ImGui::GetIO();
+    if (io.BackendRendererUserData != nullptr) {
+      if (g_useSdlRenderer) {
+        ImGui_ImplSDLRenderer3_Shutdown();
+      } else {
+        ImGui_ImplWGPU_Shutdown();
+      }
+    }
+    if (io.BackendPlatformUserData != nullptr) {
+      ImGui_ImplSDL3_Shutdown();
+    }
+    ImGui::DestroyContext();
   }
-  ImGui_ImplSDL3_Shutdown();
-  ImGui::DestroyContext();
   for (const auto& texture : g_sdlTextures) {
     SDL_DestroyTexture(texture);
   }
   g_sdlTextures.clear();
   g_wgpuTextures.clear();
+  g_useSdlRenderer = false;
+  g_scale = 0.f;
+  g_frameDataBuilt = false;
 }
 
 void process_event(const SDL_Event& event) noexcept {
