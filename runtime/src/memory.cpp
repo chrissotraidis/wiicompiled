@@ -20,10 +20,10 @@
 #include <sstream>
 #include <unordered_map>
 
+#if defined(_WIN32)
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
-#if defined(_WIN32)
 #include <windows.h>
 #include <dbghelp.h>
 #endif

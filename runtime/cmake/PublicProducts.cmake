@@ -1,4 +1,4 @@
-﻿# Public WiiCompiled product graph.
+# Public WiiCompiled product graph.
 #
 # The translator owns the translated build graph. Mario Kart's profile-neutral
 # functions are compiled once into mkw_base_shared; only callers whose direct
@@ -78,6 +78,10 @@ target_compile_definitions(mkw_runtime_common PRIVATE
 target_link_libraries(mkw_runtime_common PRIVATE
     aurora::gx aurora::pad aurora::si aurora::vi aurora::mtx)
 target_link_libraries(mkw_runtime_common PRIVATE mkw::pugixml mkw::toml11 mkw::cryptopp)
+if(ANDROID)
+    target_link_libraries(mkw_runtime_common PRIVATE mkw::libco)
+endif()
+
 target_link_libraries(mkw_runtime_common PRIVATE "-framework Foundation")
 if(MKW_CPPWINRT_INCLUDE_DIR)
     if(NOT EXISTS "${MKW_CPPWINRT_INCLUDE_DIR}/winrt/base.h")
@@ -168,6 +172,10 @@ if(MKW_HAVE_RETRO_REWIND)
 endif()
 
 function(mkw_configure_product target)
+    if(ANDROID)
+        target_link_libraries(${target} PRIVATE mkw::libco)
+    endif()
+
     target_sources(${target} PRIVATE $<TARGET_OBJECTS:mkw_runtime_common>)
     # Startup CPU check. Must stay a separate object library so it keeps the
     # plain baseline ISA while everything around it is built for x86-64-v3.

@@ -232,7 +232,7 @@ enum class ImGuiFramePolicy {
 bool begin_frame_impl(bool pumpEvents, ImGuiFramePolicy imguiPolicy = ImGuiFramePolicy::Immediate,
                       bool* imguiNewFrameOwed = nullptr) noexcept;
 bool begin_frame_render_state_impl(ImGuiFramePolicy imguiPolicy, bool* imguiNewFrameOwed) noexcept;
-void end_frame_impl(bool pumpEvents, bool drainFifo) noexcept;
+void end_frame_impl(bool pumpEvents, bool drainFifo);
 
 // The two publication points of a frame-worker cycle, cleared together under `mutex`. Sealed:
 // producer-shared renderer state is free again. Done: slots encoded, presented, ImGui restarted.
@@ -262,6 +262,14 @@ FrameWorkerState g_frameWorker;
 bool frame_worker_requested() noexcept {
 #ifdef AURORA_ENABLE_GX
   static const bool enabled = [] {
+#if defined(__APPLE__)
+    // ImGui's SDL backend may raise an SDL window from ImGui::NewFrame(). On
+    // macOS that reaches AppKit, whose window operations are main-thread-only;
+    // doing it on the frame worker terminates the process with EXC_BREAKPOINT.
+    // Keep all SDL/ImGui work on the calling thread until the worker no longer
+    // owns frame preparation on Apple platforms.
+    return false;
+#endif
 #if defined(_WIN32)
     // RenderDoc's D3D12 layer is injected before Aurora starts and needs device and command
     // ownership on one thread, so keep frame submission synchronous there.
@@ -688,15 +696,23 @@ AuroraInfo initialize(int argc, char* argv[], const AuroraConfig& config) noexce
   const AuroraBackend requestedBackend = config.desiredBackend;
   AuroraBackend selectedBackend = requestedBackend;
   bool windowCreated = false;
+  std::string firstGraphicsError;
+  const auto rememberGraphicsError = [&] {
+    if (firstGraphicsError.empty() && SDL_GetError()[0] != '\0') {
+      firstGraphicsError = SDL_GetError();
+    }
+  };
   if (selectedBackend != BACKEND_AUTO) {
     Log.info("Requested graphics backend: {}", backend_name(selectedBackend));
     if (window::create_window(selectedBackend)) {
       if (webgpu::initialize(selectedBackend)) {
         windowCreated = true;
       } else {
+        rememberGraphicsError();
         window::destroy_window();
       }
     } else {
+      rememberGraphicsError();
       Log.error("Failed to create a window for backend {}: {}", backend_name(selectedBackend),
                 SDL_GetError());
     }
@@ -713,18 +729,28 @@ AuroraInfo initialize(int argc, char* argv[], const AuroraConfig& config) noexce
     for (const auto backendType : PreferredBackendOrder) {
       selectedBackend = backendType;
       if (!window::create_window(selectedBackend)) {
+        rememberGraphicsError();
         continue;
       }
       if (webgpu::initialize(selectedBackend)) {
         windowCreated = true;
         break;
       } else {
+        rememberGraphicsError();
         window::destroy_window();
       }
     }
   }
 
-  ASSERT(windowCreated, "Error creating window: {}", SDL_GetError());
+  if (!windowCreated) {
+    if (firstGraphicsError.empty()) firstGraphicsError = "No supported graphics backend is available";
+    SDL_SetError("%s", firstGraphicsError.c_str());
+    Log.error("Graphics initialization failed: {}", firstGraphicsError);
+    return {
+        .initializationStatus = AURORA_INITIALIZATION_GRAPHICS_UNAVAILABLE,
+        .initializationError = SDL_GetError(),
+    };
+  }
   if (requestedBackend != BACKEND_AUTO && selectedBackend != requestedBackend) {
     Log.error("Graphics backend fallback in effect: video.graphics_api requested {}, "
               "running on {}",
@@ -1524,6 +1550,15 @@ std::vector<PresentationJob> encode_sealed_frame(gfx::SealedFrame& sealedFrame, 
 
 // Phase 3: hand the encoded group to whoever owns presentation.
 void publish_presentations(std::vector<PresentationJob>&& presentationJobs, bool interpolationActive) {
+#if defined(__APPLE__)
+  (void)interpolationActive;
+  // Presenting reaches SDL/AppKit, whose window operations must stay on the
+  // main thread. Interpolation normally starts the presenter worker, so keep
+  // its jobs synchronous on Apple platforms.
+  for (const auto& job : presentationJobs) {
+    present_presentation_job(job);
+  }
+#else
   // Keep presentation on the presenter whenever the async frame worker runs, even with
   // interpolation off, so every mode shares one surface/resize path. RenderDoc keeps the sync path.
   if (frame_worker_requested() || interpolationActive ||
@@ -1534,6 +1569,7 @@ void publish_presentations(std::vector<PresentationJob>&& presentationJobs, bool
       present_presentation_job(job);
     }
   }
+#endif
 }
 
 void record_frame_telemetry() {
@@ -1651,7 +1687,7 @@ bool run_frame_worker_cycle(gfx::SealedFrame& sealedFrame) noexcept {
 
 // Synchronous frame submission: seal, encode and present inline on the calling thread. Used when
 // the frame worker is disabled (RenderDoc captures) and on the boot path.
-void end_frame_impl(bool pumpEvents, bool drainFifo) noexcept {
+void end_frame_impl(bool pumpEvents, bool drainFifo) {
   ZoneScoped;
 #ifdef AURORA_ENABLE_GX
   webgpu::fail_if_device_lost();
@@ -1661,11 +1697,9 @@ void end_frame_impl(bool pumpEvents, bool drainFifo) noexcept {
   gfx::SealedFrame sealedFrame;
   SealedFrameContext ctx;
   std::vector<PresentationJob> presentationJobs;
+  if (drainFifo) gx::fifo::drain();
   {
     std::lock_guard gpuLock(g_rendererGpuMutex);
-    if (drainFifo) {
-      gx::fifo::drain();
-    }
     seal_frame_locked(sealedFrame, ctx);
     presentationJobs = encode_sealed_frame(sealedFrame, ctx);
   }
@@ -1742,7 +1776,7 @@ bool begin_frame() noexcept {
   return prepared;
 }
 
-void end_frame() noexcept {
+void end_frame() {
 #ifdef AURORA_ENABLE_GX
   webgpu::fail_if_device_lost();
 #endif
@@ -1758,10 +1792,7 @@ void end_frame() noexcept {
 
   // Seal all current GX work on the CPU while the renderer is known ready.
   // Later FIFO writes belong exclusively to the next frame.
-  {
-    std::lock_guard gpuLock(g_rendererGpuMutex);
-    gx::fifo::drain();
-  }
+  gx::fifo::drain();
   {
     std::lock_guard lock(g_frameWorker.mutex);
     g_frameWorker.framePrepared = false;
@@ -1787,6 +1818,10 @@ bool wait_for_frame_worker_for(std::chrono::microseconds timeout) noexcept {
   return wait_for_frame_worker_private_for(FrameWorkerPhase::Done, timeout);
 }
 std::recursive_mutex& renderer_gpu_mutex() noexcept { return g_rendererGpuMutex; }
+void submit_staging_commands(const wgpu::CommandBuffer& commands) {
+  std::lock_guard submitLock(g_queueSubmitMutex);
+  webgpu::g_queue.Submit(1, &commands);
+}
 } // namespace aurora
 
 // C API bindings
@@ -1849,10 +1884,6 @@ bool aurora_flush_efb_copies_to_ram() {
   if (!aurora::gfx::efb_ram::has_pending()) {
     return true;
   }
-  if (!aurora::gfx::efb_ram::prepare_downloads()) {
-    return false;
-  }
-
   // This finalizes the frame still being recorded, on the producer thread, so join the whole cycle
   // first: the encode phase owns the previous passes, EFB targets and image pool.
   aurora::wait_for_frame_worker();
@@ -1860,6 +1891,7 @@ bool aurora_flush_efb_copies_to_ram() {
   // suffix cannot safely be replayed against the same mutable EFB resources.
   aurora::gx::mark_frame_interpolation_replay_unsafe();
   aurora::gx::fifo::drain();
+  if (!aurora::gfx::efb_ram::prepare_downloads()) return false;
   const wgpu::CommandEncoderDescriptor encoderDescriptor{
       .label = "GX CPU-visible EFB copy encoder",
   };
@@ -1885,8 +1917,7 @@ bool aurora_flush_efb_copies_to_ram() {
 }
 bool aurora_flush_efb_copy_to_ram(void* dest) {
 #ifdef AURORA_ENABLE_GX
-  if (dest == nullptr || !aurora::gfx::efb_ram::has_pending(dest) ||
-      !aurora::gfx::efb_ram::prepare_downloads(dest)) {
+  if (dest == nullptr || !aurora::gfx::efb_ram::has_pending(dest)) {
     return false;
   }
 
@@ -1897,6 +1928,7 @@ bool aurora_flush_efb_copy_to_ram(void* dest) {
   // image instead of replaying this split frame.
   aurora::gx::mark_frame_interpolation_replay_unsafe();
   aurora::gx::fifo::drain();
+  if (!aurora::gfx::efb_ram::prepare_downloads(dest)) return false;
   const wgpu::CommandEncoderDescriptor encoderDescriptor{
       .label = "GX demanded EFB copy encoder",
   };

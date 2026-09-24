@@ -30,6 +30,9 @@ extern "C" void GxNotifyGuestRamDmaWrite(uint32_t addr, uint32_t size);
 #include <mutex>
 #include <sstream>
 #include <utility>
+#include <cctype>
+
+#include <aurora/gfx.h>
 
 namespace fs = std::filesystem;
 
@@ -40,7 +43,7 @@ namespace fs = std::filesystem;
 // The extracted ISO "DATA" folder. We map its "files" subfolder to the DVD
 // root "/" and its "sys" subfolder to "/sys/". The root is user-owned input:
 // it is never embedded into or copied by the public runtime.
-static std::string g_dvdRoot;
+static fs::path g_dvdRoot;
 static std::once_flag g_dvdRootOnce;
 
 static uint32_t CurrentDiscGameCode() {
@@ -66,7 +69,7 @@ static uint32_t CurrentDiscGameCode() {
 #define DVD_FILEINFO_OFFSET_LEN   0x34
 
 struct DVDFileEntry {
-    std::string hostPath; // Full Windows path
+    fs::path hostPath;
     std::string dvdPath;  // Virtual Wii path (e.g., "/Race/Course.szs")
     uint32_t size;
     uint32_t discOffsetWords = 0;
@@ -78,7 +81,7 @@ struct FstFileEntry {
     uint32_t end;
     uint32_t size;
     std::string dvdPath;
-    std::string hostPath;
+    fs::path hostPath;
 };
 
 // Global State
@@ -103,19 +106,22 @@ extern "C" void DVDInit_8015EA1C();
 extern "C" uint32_t g_dvdFstReservedBase;
 extern "C" uint32_t g_dvdFstReservedSize;
 
-// Byte-wise copy into guest RAM plus the DMA notification the GX caches need.
+// DVD DMA normally targets ordinary RAM. Keep scalar writes for executable
+// ranges so the translated-code write guard still sees every modified byte.
 static void CopyToGuestAsDma(uint32_t dest, const uint8_t* data, size_t size) {
-    for (size_t i = 0; i < size; ++i) {
-        Memory::Write8(dest + static_cast<uint32_t>(i), data[i]);
+    if (size != 0 && !RecompMod::ExecutableWriteGuardMayHit(dest, size)) {
+        std::memcpy(Memory::GetPointer(dest, size), data, size);
+    } else {
+        for (size_t i = 0; i < size; ++i) {
+            Memory::Write8(dest + static_cast<uint32_t>(i), data[i]);
+        }
     }
     GxNotifyGuestRamDmaWrite(dest, static_cast<uint32_t>(size));
 }
 
-static std::string NormalizeDvdHostPath(std::string path) {
-    while (!path.empty() && (path.back() == '\\' || path.back() == '/')) {
-        path.pop_back();
-    }
-    return path;
+// Host path strings only ever leave this module as UTF-8 display text.
+static std::string HostPathText(const fs::path& path) {
+    return RuntimeConfigFile::PathToUtf8(path);
 }
 
 static bool IsDvdDataRoot(const fs::path& path) {
@@ -134,13 +140,13 @@ static bool IsDvdDataRoot(const fs::path& path) {
     SetRuntimeExitCode(EXIT_FAILURE);
     ShowRuntimeFatalPopup(category, details);
     MarkFatalErrorReported();
-    std::exit(EXIT_FAILURE);
+    RuntimeCrash::RuntimeTerminate(EXIT_FAILURE, details);
 }
 
 [[noreturn]] static void FailDvdRoot(const char* source, const fs::path& path = {}) {
     RT_LOGF(RT_TAG_DVD, "ERROR: %s", source);
     if (!path.empty()) {
-        std::fprintf(stderr, ": %s", path.string().c_str());
+        std::fprintf(stderr, ": %s", HostPathText(path).c_str());
     }
     std::fprintf(stderr,
                  "\n[dvd] Set [paths] dvd_root in Config.toml "
@@ -148,14 +154,14 @@ static bool IsDvdDataRoot(const fs::path& path) {
     std::string details = source ? source : "The configured DVD root could not be opened.";
     if (!path.empty()) {
         details += "\n\nPath: ";
-        details += path.string();
+        details += HostPathText(path);
     }
     details += "\n\nSet [paths] dvd_root in Config.toml to the extracted "
                "Mario Kart Wii DATA directory.";
     FailDvd("dvd_root", "DVD data is unavailable", details);
 }
 
-static const std::string& GetDvdRoot() {
+static const fs::path& GetDvdRoot() {
     std::call_once(g_dvdRootOnce, []() {
         const fs::path path = RuntimeConfigFile::ResolvedDvdRoot();
         if (path.empty()) {
@@ -164,14 +170,14 @@ static const std::string& GetDvdRoot() {
         if (!IsDvdDataRoot(path)) {
             FailDvdRoot("Configured DVD root is not an extracted DATA directory", path);
         }
-        g_dvdRoot = NormalizeDvdHostPath(path.string());
+        g_dvdRoot = path;
     });
 
     return g_dvdRoot;
 }
 
 static std::string NormalizePath(const std::string& path);
-static std::string ResolveDvdMappedHostPath(const std::string& dvdPath, const std::string& fallbackHostPath);
+static fs::path ResolveDvdMappedHostPath(const std::string& dvdPath, const fs::path& fallbackHostPath);
 
 static void InvokeDvdCallback(uint32_t callbackPtr, int32_t result, uint32_t fileInfoPtr) {
     if (callbackPtr == 0) {
@@ -240,7 +246,7 @@ static void LoadFstIndex() {
     }
     g_fstLoaded = true;
 
-    fs::path fstPath = fs::path(GetDvdRoot()) / "sys" / "fst.bin";
+    const fs::path fstPath = GetDvdRoot() / "sys" / "fst.bin";
     std::ifstream fstFile(fstPath, std::ios::binary);
     if (!fstFile.is_open()) {
         return;
@@ -333,7 +339,7 @@ static void LoadFstIndex() {
         entry.end = endBytes;
         entry.size = fileSize;
         entry.dvdPath = "/" + relPath;
-        const std::string baseHostPath = (fs::path(GetDvdRoot()) / "files" / fs::path(relPath)).string();
+        const fs::path baseHostPath = GetDvdRoot() / "files" / fs::path(relPath);
         entry.hostPath = ResolveDvdMappedHostPath(entry.dvdPath, baseHostPath);
         g_fstFiles.push_back(std::move(entry));
     }
@@ -399,6 +405,38 @@ static bool ResolveAbsRead(uint32_t offset, uint32_t length, AbsReadResult& out)
     return true;
 }
 
+// A course archive read marks the start of a race load. The renderer records the
+// pipelines used while that course is active and compiles them during its next load
+// (vanilla Race/Course/*.szs; Retro Rewind .../Tracks/*.szs). Other files are ignored.
+static void NotePipelineSceneForRead(const DVDFileEntry& entry) {
+    static std::string lastPath;
+    if (entry.dvdPath == lastPath) {
+        return;
+    }
+    lastPath = entry.dvdPath;
+    std::string lower = entry.dvdPath;
+    std::transform(lower.begin(), lower.end(), lower.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    if (lower.size() < 5 || lower.compare(lower.size() - 4, 4, ".szs") != 0) {
+        return;
+    }
+    const size_t nameSlash = lower.rfind('/');
+    if (nameSlash == std::string::npos || nameSlash == 0) {
+        return;
+    }
+    const size_t dirSlash = lower.rfind('/', nameSlash - 1);
+    const std::string dir = lower.substr(dirSlash == std::string::npos ? 0 : dirSlash + 1,
+                                         nameSlash - (dirSlash == std::string::npos ? 0 : dirSlash + 1));
+    if (dir != "course" && dir != "tracks") {
+        return;
+    }
+    uint64_t key = 1469598103934665603ull;  // FNV-1a; stable across launches and builds
+    for (const unsigned char c : lower) {
+        key = (key ^ c) * 1099511628211ull;
+    }
+    aurora_set_pipeline_scene(key == 0 ? 1 : key);
+}
+
 // Helper: Normalize paths (Windows backslash -> forward slash, lowercase for lookup)
 static std::string NormalizePath(const std::string& path) {
     return DvdFstContract::NormalizeLookupPath(path);
@@ -408,7 +446,7 @@ static void RegisterFileEntry(std::string dvdPath, const fs::path& hostPath, uin
     dvdPath = DvdFstContract::CanonicalizePath(dvdPath);
 
     DVDFileEntry fileEntry;
-    fileEntry.hostPath = hostPath.string();
+    fileEntry.hostPath = hostPath;
     fileEntry.dvdPath = dvdPath;
     fileEntry.size = size;
 
@@ -445,7 +483,7 @@ static void WalkDirectory(const fs::path& root, bool recursive, bool announceErr
     fs::recursive_directory_iterator it(root, fs::directory_options::skip_permission_denied, ec);
     if (ec) {
         if (announceErrors) {
-            RT_LOG(RT_TAG_DVD) << "WARNING: cannot enumerate " << root.string() << ": "
+            RT_LOG(RT_TAG_DVD) << "WARNING: cannot enumerate " << HostPathText(root) << ": "
                       << ec.message() << std::endl;
         }
         return;
@@ -458,7 +496,7 @@ static void WalkDirectory(const fs::path& root, bool recursive, bool announceErr
         it.increment(ec);
         if (ec) {
             if (announceErrors) {
-                RT_LOG(RT_TAG_DVD) << "WARNING: stopped enumerating " << root.string() << ": "
+                RT_LOG(RT_TAG_DVD) << "WARNING: stopped enumerating " << HostPathText(root) << ": "
                           << ec.message() << std::endl;
                 return;
             }
@@ -488,7 +526,7 @@ static void ScanDirectory(const fs::path& root, const std::string& virtualPrefix
 
         const std::uintmax_t size = fs::file_size(entry.path(), entryEc);
         if (entryEc) {
-            RT_LOG(RT_TAG_DVD) << "WARNING: skipping " << entry.path().string() << ": "
+            RT_LOG(RT_TAG_DVD) << "WARNING: skipping " << HostPathText(entry.path()) << ": "
                       << entryEc.message() << std::endl;
             return;
         }
@@ -502,7 +540,7 @@ static void ScanDirectory(const fs::path& root, const std::string& virtualPrefix
         if (prefix.back() != '/' && prefix.back() != '\\') {
             prefix += "/";
         }
-        std::string dvdPath = prefix + relative.string();
+        std::string dvdPath = prefix + HostPathText(relative);
         if (!addNewFiles && !DvdEntryExists(dvdPath)) {
             return;
         }
@@ -536,7 +574,7 @@ static void ApplyFolderByNameMapping(const RuntimeRiivolution::Mapping& mapping)
         if (!entry.is_regular_file(entryEc) || entryEc) {
             return;
         }
-        std::string name = entry.path().filename().string();
+        std::string name = HostPathText(entry.path().filename());
         RuntimeHle::LowerInPlace(name);
         const auto matches = discPathsByName.find(name);
         if (matches == discPathsByName.end()) {
@@ -554,7 +592,7 @@ static void ApplyFolderByNameMapping(const RuntimeRiivolution::Mapping& mapping)
 
     WalkDirectory(mapping.hostPath, mapping.recursive, /*announceErrors=*/false, applyEntry);
 
-    RT_LOG(RT_TAG_DVD) << mapping.hostPath.string() << ": replaced " << replaced
+    RT_LOG(RT_TAG_DVD) << HostPathText(mapping.hostPath) << ": replaced " << replaced
               << " disc file(s) by filename" << std::endl;
 }
 
@@ -562,7 +600,7 @@ static void ScanOverlayRoot(const RuntimeRiivolution::Overlay& overlay) {
     if (!overlay.patches) {
         // Fallback for mod roots that mirror the disc filesystem directly (not a
         // Riivolution pack, which wouldn't map anything useful this way).
-        RT_LOG(RT_TAG_DVD) << overlay.root.string()
+        RT_LOG(RT_TAG_DVD) << HostPathText(overlay.root)
                   << ": no Riivolution XML found, treating the root as a disc-shaped overlay"
                   << std::endl;
         ScanDirectory(overlay.root, "/");
@@ -592,7 +630,7 @@ static void ScanOverlayRoot(const RuntimeRiivolution::Overlay& overlay) {
     }
 }
 
-static std::string ResolveDvdMappedHostPath(const std::string& dvdPath, const std::string& fallbackHostPath) {
+static fs::path ResolveDvdMappedHostPath(const std::string& dvdPath, const fs::path& fallbackHostPath) {
     const std::string normalized = NormalizePath(dvdPath);
     const auto it = g_pathToEntry.find(normalized);
     if (it != g_pathToEntry.end() && it->second >= 0 &&
@@ -604,7 +642,7 @@ static std::string ResolveDvdMappedHostPath(const std::string& dvdPath, const st
         const fs::path candidate = overlay.root / fs::path(normalized.substr(1));
         std::error_code ec;
         if (fs::is_regular_file(candidate, ec)) {
-            return candidate.string();
+            return candidate;
         }
     }
 
@@ -637,7 +675,8 @@ static void BuildAndPublishRuntimeFst() {
     for (const DVDFileEntry& entry : g_fileEntries) {
         if (entry.discOffsetWords != 0) {
             nextFreeBytes = std::max(
-                nextFreeBytes, static_cast<uint64_t>(entry.discOffsetWords) * 4ull + entry.size);
+                nextFreeBytes, static_cast<uint64_t>(entry.discOffsetWords) * UINT64_C(4) +
+                                   static_cast<uint64_t>(entry.size));
         }
     }
     for (DVDFileEntry& entry : g_fileEntries) {
@@ -740,7 +779,7 @@ extern "C" const char* DVDResolveHostPathForTest(const char* dvdPath)
         return nullptr;
     }
 
-    resolved = g_fileEntries[it->second].hostPath;
+    resolved = HostPathText(g_fileEntries[it->second].hostPath);
     return resolved.c_str();
 }
 
@@ -808,7 +847,7 @@ extern "C" void DVDInit_8015EA1C()
     Memory::Write16(diskHeader + 0x04, 0x3031);     // '01' (Maker)
     Memory::Write8(diskHeader + 0x06, 0x01);        // Disk #1
     // 4. Scan Files
-    fs::path rootPath(GetDvdRoot());
+    const fs::path& rootPath = GetDvdRoot();
     
     // Map "<dvd_root>/files" -> "/"
     ScanDirectory(rootPath / "files", "/");
@@ -877,9 +916,10 @@ extern "C" int32_t DVDReadPrio_8015E834(uint32_t fileInfoPtr, uint32_t bufferPtr
     }
 
     const DVDFileEntry& entry = g_fileEntries[extent->entryIndex];
+    NotePipelineSceneForRead(entry);
 
     if (offset < 0 || length < 0) {
-        return DvdReadFatal(fileInfoPtr, entry.hostPath, offset,
+        return DvdReadFatal(fileInfoPtr, HostPathText(entry.hostPath), offset,
                             length > 0 ? static_cast<uint32_t>(length) : 0,
                             "negative DVD read offset or length");
     }
@@ -889,7 +929,7 @@ extern "C" int32_t DVDReadPrio_8015E834(uint32_t fileInfoPtr, uint32_t bufferPtr
     uint32_t uLength = (uint32_t)length;
 
     if (requestedOffset >= entry.size) {
-        return DvdReadFatal(fileInfoPtr, entry.hostPath, offset, uLength,
+        return DvdReadFatal(fileInfoPtr, HostPathText(entry.hostPath), offset, uLength,
                             "read offset is outside the indexed DVD file");
     }
     const uint32_t uOffset = static_cast<uint32_t>(requestedOffset);
@@ -899,14 +939,14 @@ extern "C" int32_t DVDReadPrio_8015E834(uint32_t fileInfoPtr, uint32_t bufferPtr
     }
 
     if (uLength != 0 && !Memory::Contains(bufferPtr, uLength)) {
-        return DvdReadFatal(fileInfoPtr, entry.hostPath, offset, uLength,
+        return DvdReadFatal(fileInfoPtr, HostPathText(entry.hostPath), offset, uLength,
                             "DVD read destination is outside guest memory");
     }
 
     std::vector<uint8_t> tempBuf;
     DvdReadContract::HostReadFailure failure;
     if (!DvdReadContract::ReadExact(entry.hostPath, uOffset, uLength, tempBuf, failure)) {
-        return DvdReadFatal(fileInfoPtr, entry.hostPath, offset, uLength,
+        return DvdReadFatal(fileInfoPtr, HostPathText(entry.hostPath), offset, uLength,
                             DvdReadContract::Describe(failure));
     }
 
@@ -962,11 +1002,11 @@ extern "C" int32_t DVD__ReadAbsAsyncPrio_HLE_801628cc(uint32_t cmdBlockPtr,
                                      requestedLength,
                                      "absolute DVD read offset is not mapped to a host file");
         } else if (requestedLength != 0 && readInfo.readLength != requestedLength) {
-            bytesRead = DvdReadFatal(cmdBlockPtr, readInfo.entry->hostPath,
+            bytesRead = DvdReadFatal(cmdBlockPtr, HostPathText(readInfo.entry->hostPath),
                                      readInfo.fileOffset, requestedLength,
                                      "requested range extends beyond the indexed DVD file");
         } else if (requestedLength != 0 && !Memory::Contains(bufferPtr, requestedLength)) {
-            bytesRead = DvdReadFatal(cmdBlockPtr, readInfo.entry->hostPath,
+            bytesRead = DvdReadFatal(cmdBlockPtr, HostPathText(readInfo.entry->hostPath),
                                      readInfo.fileOffset, requestedLength,
                                      "DVD read destination is outside guest memory");
         } else {
@@ -977,12 +1017,13 @@ extern "C" int32_t DVD__ReadAbsAsyncPrio_HLE_801628cc(uint32_t cmdBlockPtr,
                                             readInfo.readLength,
                                             tempBuf,
                                             failure)) {
-                bytesRead = DvdReadFatal(cmdBlockPtr, readInfo.entry->hostPath,
+                bytesRead = DvdReadFatal(cmdBlockPtr, HostPathText(readInfo.entry->hostPath),
                                          readInfo.fileOffset, readInfo.readLength,
                                          DvdReadContract::Describe(failure));
             } else {
                 CopyToGuestAsDma(bufferPtr, tempBuf.data(), tempBuf.size());
                 bytesRead = static_cast<int32_t>(tempBuf.size());
+                NotePipelineSceneForRead(*readInfo.entry);
             }
         }
 
@@ -1076,12 +1117,12 @@ extern "C" int32_t DVDLowRead_80166330(uint32_t buffer, uint32_t length, uint32_
         return finish(false);
     }
     if (readInfo.readLength != length) {
-        ReportDvdReadError(readInfo.entry->hostPath, readInfo.fileOffset, length,
+        ReportDvdReadError(HostPathText(readInfo.entry->hostPath), readInfo.fileOffset, length,
                            "requested range extends beyond the indexed DVD file");
         return finish(false);
     }
     if (!Memory::Contains(buffer, length)) {
-        ReportDvdReadError(readInfo.entry->hostPath, readInfo.fileOffset, length,
+        ReportDvdReadError(HostPathText(readInfo.entry->hostPath), readInfo.fileOffset, length,
                            "DVD read destination is outside guest memory");
         return finish(false);
     }
@@ -1093,7 +1134,7 @@ extern "C" int32_t DVDLowRead_80166330(uint32_t buffer, uint32_t length, uint32_
                                     readInfo.readLength,
                                     tempBuf,
                                     failure)) {
-        ReportDvdReadError(readInfo.entry->hostPath, readInfo.fileOffset,
+        ReportDvdReadError(HostPathText(readInfo.entry->hostPath), readInfo.fileOffset,
                            readInfo.readLength, DvdReadContract::Describe(failure));
         return finish(false);
     }
