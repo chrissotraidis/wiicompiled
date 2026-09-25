@@ -1552,8 +1552,10 @@ static bool wait_pipeline_impl(PipelineRef ref, wgpu::RenderPipeline& pipeline, 
     auto previous = lastReportNanos.load(std::memory_order_relaxed);
     if (now - previous >= 1'000'000'000 &&
         lastReportNanos.compare_exchange_strong(previous, now, std::memory_order_relaxed)) {
-      KartPadAndroidLogMetric("KartPadPipelineWait", "wait_ms=%.3f persistent=%d",
-          std::chrono::duration<double, std::milli>(waited).count(), persistentPass ? 1 : 0);
+      // ref is the stable config hash, so repeated misses can be matched to recipe rows.
+      KartPadAndroidLogMetric("KartPadPipelineWait", "wait_ms=%.3f persistent=%d ref=0x%016llx",
+          std::chrono::duration<double, std::milli>(waited).count(), persistentPass ? 1 : 0,
+          static_cast<unsigned long long>(ref));
     }
   }
 #endif
