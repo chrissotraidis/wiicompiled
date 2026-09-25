@@ -215,9 +215,16 @@ void render(const wgpu::RenderPassEncoder& pass, uint32_t targetWidth, uint32_t 
     if (width > static_cast<int>(targetWidth) || height > static_cast<int>(targetHeight)) {
       return;
     }
+    // Debug groups are diagnostic-only, as in gfx/common.cpp. Release Android
+    // builds must not record Vulkan debug-utils labels: an Adreno 740 driver
+    // (512.676) faults in vkCmdEndDebugUtilsLabelEXT on the first overlay pass.
+#ifdef AURORA_GFX_DEBUG_GROUPS
     pass.PushDebugGroup("Aurora: Dear Imgui");
+#endif
     ImGui_ImplWGPU_RenderDrawData(data, pass.Get());
+#ifdef AURORA_GFX_DEBUG_GROUPS
     pass.PopDebugGroup();
+#endif
   }
 }
 
