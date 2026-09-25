@@ -16,6 +16,9 @@
 #include <mutex>
 #if defined(__ANDROID__)
 #include <android/api-level.h>
+#include <sys/system_properties.h>
+
+#include <cstring>
 #endif
 
 #include <thread>
@@ -1244,9 +1247,16 @@ static void build_synchronous_pipelines_for_frame() {
 
 static bool pipeline_workers_supported() {
 #if defined(__ANDROID__)
-  // Android 10's Goldfish Vulkan transport serializes object-handle mapping
-  // internally and can deadlock when pipeline creation races submission.
-  return android_get_device_api_level() > 29;
+  // The Android 10 emulator's Goldfish Vulkan transport serializes object-handle
+  // mapping and can deadlock when pipeline creation races submission. That was
+  // observed only on the emulator; physical Android 9/10 phones need workers,
+  // or every new pipeline compiles on the frame path (issue #320, Mali-G51).
+  if (android_get_device_api_level() > 29) {
+    return true;
+  }
+  char hardware[PROP_VALUE_MAX]{};
+  __system_property_get("ro.hardware", hardware);
+  return std::strcmp(hardware, "ranchu") != 0 && std::strcmp(hardware, "goldfish") != 0;
 #else
   return true;
 #endif
