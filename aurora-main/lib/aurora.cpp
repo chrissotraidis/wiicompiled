@@ -157,6 +157,18 @@ void record_successful_present(bool, uint32_t,
     g_presentTimingSampleCount = std::min(g_presentTimingSampleCount + 1, g_presentTimingSamples.size());
     ++g_totalPresentCount;
   }
+  // The FPS overlay is a one-second rolling window, logged only every 300 presents.
+  // Preserve long gaps when they happen instead of losing them before the next sample.
+  if (interval >= std::chrono::milliseconds(50)) {
+    static std::atomic<int64_t> lastReportNanos{0};
+    const auto nanos = std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()).count();
+    auto previous = lastReportNanos.load(std::memory_order_relaxed);
+    if (nanos - previous >= 1'000'000'000 &&
+        lastReportNanos.compare_exchange_strong(previous, nanos, std::memory_order_relaxed)) {
+      Log.info("Long present interval: {:.3f} ms (includes loading and lifecycle pauses)",
+          std::chrono::duration<double, std::milli>(interval).count());
+    }
+  }
 }
 
 AuroraPresentTiming snapshot_present_timing() noexcept {

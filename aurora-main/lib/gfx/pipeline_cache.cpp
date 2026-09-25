@@ -1481,6 +1481,7 @@ bool try_pipeline(PipelineRef ref, wgpu::RenderPipeline& pipeline) {
 
 static bool wait_pipeline_impl(PipelineRef ref, wgpu::RenderPipeline& pipeline, bool fatalIfMissing,
                                bool persistentPass) {
+  std::chrono::nanoseconds waited{};
   std::unique_lock lock{g_pipelineMutex};
   if (!g_pipelines.contains(ref) && g_pendingPipelines.contains(ref)) {
     ZoneScopedN("wait_pipeline");
@@ -1494,7 +1495,9 @@ static bool wait_pipeline_impl(PipelineRef ref, wgpu::RenderPipeline& pipeline, 
       // A persistent resolve is the last chance to produce its texture, so timing out here corrupts it
       // permanently. Only a pass marked requireReadyPipelines takes this path.
     }
+    const auto waitStarted = std::chrono::steady_clock::now();
     g_pipelineCv.wait(lock, finished);
+    waited = std::chrono::steady_clock::now() - waitStarted;
   }
   const auto it = g_pipelines.find(ref);
   if (it == g_pipelines.end()) {
@@ -1507,6 +1510,19 @@ static bool wait_pipeline_impl(PipelineRef ref, wgpu::RenderPipeline& pipeline, 
     return false;
   }
   pipeline = it->second.pipeline;
+  lock.unlock();
+  if (waited >= std::chrono::milliseconds(8)) {
+    static std::atomic<int64_t> lastReportNanos{0};
+    const auto now = std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+    auto previous = lastReportNanos.load(std::memory_order_relaxed);
+    if (now - previous >= 1'000'000'000 &&
+        lastReportNanos.compare_exchange_strong(previous, now, std::memory_order_relaxed)) {
+      Log.info("Pipeline wait: {:.3f} ms persistent={} ref=0x{:016x}",
+          std::chrono::duration<double, std::milli>(waited).count(), persistentPass,
+          static_cast<uint64_t>(ref));
+    }
+  }
   return true;
 }
 
