@@ -535,7 +535,9 @@ static PipelineRef find_pipeline_impl(ShaderType type, const PipelineConfig& con
 
         // Keep the pipeline queued past the cap rather than compiling synchronously: the recorded draw
         // references this hash forever, and dropping it baked one-shot EFB copies incomplete.
-        if (!cachePreload && g_pendingPipelines.size() >= MaxQueuedPipelineBuilds && !skipUnreadyGxPipeline) {
+        // Speculative prewarm entries do not count: they are dropped above or promoted on demand, and
+        // a large launch prewarm must not push first-use builds onto the game thread.
+        if (!cachePreload && g_priorityPipelines.size() >= MaxQueuedPipelineBuilds && !skipUnreadyGxPipeline) {
           syncCreate = true;
         } else {
           // Scene replay runs during a loading screen: use every worker, as for first use.
