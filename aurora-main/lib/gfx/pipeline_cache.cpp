@@ -17,6 +17,11 @@
 #include <thread>
 #include <vector>
 
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#include <sys/sysctl.h>
+#endif
+
 #include <SDL3/SDL_iostream.h>
 #include <absl/container/flat_hash_map.h>
 #include <absl/container/flat_hash_set.h>
@@ -68,14 +73,24 @@ constexpr size_t ReservedLogicalProcessors = 2;
 constexpr size_t MaxPipelineWorkers = 22;
 // Speculative cache replay must leave compilation capacity for the current frame.
 // A cold Dawn/driver cache can make each job expensive in both CPU and memory.
-constexpr size_t MaxBackgroundPipelineWorkers = 1;
-// Replay only the earliest-use recipes. Rebuilding every course ever visited
-// retains thousands of unused driver pipelines and can exhaust mobile memory.
-// The disk cache remains intact; omitted recipes compile normally on first use.
-// 512 covers the title and menus seen in roughly the first minute of play
-// (measured on an iPad cache: 559 recipes, 299 outside any course scene); menu
-// thumbnail copies must wait for these, so first use stalls visibly.
-constexpr size_t MaxPrewarmPipelineBuilds = 512;
+// Workers always take first-use (priority) builds before speculative ones.
+constexpr size_t MaxBackgroundPipelineWorkers = 2;
+// Launch prewarm replays recorded recipes in first-use order. An OS update empties
+// the system shader cache, after which each recipe first needed during a race costs
+// 200-300 ms on iPad (measured on iPadOS 26.7) and texture copies must wait for it.
+// Compiling every recorded recipe in the background restores the driver cache after
+// such an update. Memory is small (an iPad session with 552 pipelines peaked near
+// 0.85 GB), but low-memory devices keep the earlier bound.
+static size_t max_prewarm_pipeline_builds() {
+#if defined(__APPLE__)
+  uint64_t memory = 0;
+  size_t length = sizeof(memory);
+  if (sysctlbyname("hw.memsize", &memory, &length, nullptr, 0) == 0 && memory >= (6ull << 30)) {
+    return 4096;
+  }
+#endif
+  return 512;
+}
 // For synchronous pipeline fallback (OpenGL)
 #ifdef NDEBUG
 constexpr size_t BuildPipelinesPerFrame = 5;
@@ -522,7 +537,9 @@ static PipelineRef find_pipeline_impl(ShaderType type, const PipelineConfig& con
       if (g_pipelineFrameActive && !deferGxPipeline) {
         syncCreate = true;
       } else {
-        if (!cachePreload && deferGxPipeline && g_pendingPipelines.size() >= MaxQueuedPipelineBuilds &&
+        // Launch prewarm is bounded by max_prewarm_pipeline_builds(); drop its newest recipe only
+        // when first-use work alone reaches the cap, so the race recipes it restores survive menus.
+        if (!cachePreload && deferGxPipeline && g_priorityPipelines.size() >= MaxQueuedPipelineBuilds &&
             !g_backgroundPipelines.empty()) {
           g_pendingPipelines.erase(g_backgroundPipelines.back().hash);
           g_backgroundPipelines.pop_back();
@@ -1313,7 +1330,7 @@ static void load_pipeline_cache() {
   if (g_pipelineCacheBroken) {
     return;
   }
-  size_t prewarmRemaining = MaxPrewarmPipelineBuilds;
+  size_t prewarmRemaining = max_prewarm_pipeline_builds();
   load_pipeline_cache_entries<clear::PipelineConfig>(ShaderType::Clear, clear::ClearPipelineConfigVersion,
                                                      clear::create_pipeline, prewarmRemaining);
   load_pipeline_cache_entries<gx::PipelineConfig>(ShaderType::GX, gx::GXPipelineConfigVersion,
