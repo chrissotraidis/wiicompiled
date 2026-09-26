@@ -79,6 +79,8 @@ uint32_t aurora_get_frame_interpolation_fps();
 // ready are skipped rather than stalling submission, and pick it up once compilation finishes.
 void aurora_set_skip_unready_pipelines(bool enabled);
 bool aurora_get_skip_unready_pipelines();
+// Called on course/menu archive loads: races may let recurring EFB copies skip unready draws.
+void aurora_set_race_copy_skip(bool raceActive);
 uint32_t aurora_get_queued_pipeline_count();
 // True while launch prewarm runs; reports recipes remaining of those queued at launch.
 bool aurora_get_pipeline_prewarm_progress(uint32_t* remaining, uint32_t* total);

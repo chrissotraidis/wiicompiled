@@ -455,6 +455,7 @@ static void NotePipelineSceneForRead(const DVDFileEntry& entry) {
             return;
         }
         lastMenuScene = key;
+        aurora_set_race_copy_skip(false);
         aurora_set_pipeline_scene(key);
         return;
     }
@@ -462,6 +463,7 @@ static void NotePipelineSceneForRead(const DVDFileEntry& entry) {
         return;
     }
     lastMenuScene = 0;
+    aurora_set_race_copy_skip(true);
     hash(lower);
     aurora_set_pipeline_scene(key == 0 ? 1 : key);
 }
