@@ -710,6 +710,7 @@ kartpad::android::ClassicInputState ReadAndroidClassicInput(uint32_t chan)
                      chan, connected ? "connected" : "disconnected");
     }
     if (!connected) {
+        (void)ApplyControllerAutoAccelerate(chan, 0, false);
         return MapGamepadToClassic(raw);
     }
 
@@ -723,7 +724,9 @@ kartpad::android::ClassicInputState ReadAndroidClassicInput(uint32_t chan)
     raw.left_y = snapshot.leftY;
     raw.left_trigger = 0; // Trigger presses are part of the remapping above.
     raw.right_trigger = 0;
-    return MapGamepadToClassic(raw);
+    auto classic = MapGamepadToClassic(raw);
+    classic.buttons = ApplyControllerAutoAccelerate(chan, classic.buttons, true);
+    return classic;
 }
 
 kartpad::android::TouchInputState ReadAndroidTouchInput(uint32_t chan)
