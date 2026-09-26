@@ -90,6 +90,8 @@
 extern std::atomic_bool g_auroraFrameActive;
 extern "C" int g_gxFrameCount;
 extern "C" const char* DVDResolveHostPathForTest(const char* dvdPath);
+// Defined in runtime/src/hle/storage/dvd.cpp; virtual Wii paths only.
+std::string DvdRecentReadsForCrashLog() noexcept;
 bool OS_HLE_InterruptsEnabled() noexcept;
 
 namespace {
@@ -706,6 +708,7 @@ void WriteFatalLogImpl(std::string_view reason, std::string_view extraDetails = 
     out << "[runtime] reason: " << reason << std::endl;
     out << "[runtime] timestamp(seconds): " << nowSecs << std::endl;
     out << "[runtime] entry: " << (g_lastEntryLabel.empty() ? "<unknown>" : g_lastEntryLabel) << std::endl;
+    out << "[runtime] recent DVD reads (oldest first): " << DvdRecentReadsForCrashLog() << std::endl;
     if (!extraDetails.empty()) {
         out << "[runtime] details: " << extraDetails << std::endl;
     }

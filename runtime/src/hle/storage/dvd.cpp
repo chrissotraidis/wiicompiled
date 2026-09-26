@@ -405,6 +405,53 @@ static bool ResolveAbsRead(uint32_t offset, uint32_t length, AbsReadResult& out)
     return true;
 }
 
+// Last eight distinct disc files read, oldest first, for crash reports. Streamed
+// music interleaves with archive reads, so a repeated path moves to the end
+// instead of taking another slot. Only virtual Wii paths (for example
+// /Scene/UI/Award.szs) are kept; host paths never leave this module. This names
+// the archive behind failures such as ARCInitHandle panics.
+namespace {
+constexpr size_t kRecentDvdReads = 8;
+std::mutex g_recentDvdReadsMutex;
+std::vector<std::string> g_recentDvdReads;
+}  // namespace
+
+static void NoteRecentDvdRead(const std::string& dvdPath) {
+    const std::lock_guard lock(g_recentDvdReadsMutex);
+    const auto existing = std::find(g_recentDvdReads.begin(), g_recentDvdReads.end(), dvdPath);
+    if (existing != g_recentDvdReads.end()) {
+        std::rotate(existing, existing + 1, g_recentDvdReads.end());
+        return;
+    }
+    if (g_recentDvdReads.size() == kRecentDvdReads) {
+        g_recentDvdReads.erase(g_recentDvdReads.begin());
+    }
+    g_recentDvdReads.push_back(dvdPath);
+}
+
+// Called from fatal paths; never blocks on a read that crashed mid-update.
+std::string DvdRecentReadsForCrashLog() noexcept {
+    try {
+        std::unique_lock lock(g_recentDvdReadsMutex, std::try_to_lock);
+        if (!lock.owns_lock()) {
+            return "unavailable (read in progress)";
+        }
+        if (g_recentDvdReads.empty()) {
+            return "none";
+        }
+        std::string text;
+        for (const std::string& path : g_recentDvdReads) {
+            if (!text.empty()) {
+                text += " | ";
+            }
+            text += path;
+        }
+        return text;
+    } catch (...) {
+        return "unavailable";
+    }
+}
+
 // A course archive read marks the start of a race load. The renderer records the
 // pipelines used while that course is active and compiles them during its next load
 // (vanilla Race/Course/*.szs; Retro Rewind .../Tracks/*.szs).
@@ -417,10 +464,12 @@ static bool ResolveAbsRead(uint32_t offset, uint32_t length, AbsReadResult& out)
 static void NotePipelineSceneForRead(const DVDFileEntry& entry) {
     static std::string lastPath;
     static uint64_t lastMenuScene = 0;
+    static uint64_t lastCourseScene = 0;
     if (entry.dvdPath == lastPath) {
         return;
     }
     lastPath = entry.dvdPath;
+    NoteRecentDvdRead(entry.dvdPath);
     std::string lower = entry.dvdPath;
     std::transform(lower.begin(), lower.end(), lower.begin(),
                    [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
@@ -455,6 +504,8 @@ static void NotePipelineSceneForRead(const DVDFileEntry& entry) {
             return;
         }
         lastMenuScene = key;
+        lastCourseScene = 0;
+        RT_LOG(RT_TAG_DVD) << "scene archive " << entry.dvdPath << std::endl;
         aurora_set_pipeline_scene(key);
         return;
     }
@@ -463,6 +514,10 @@ static void NotePipelineSceneForRead(const DVDFileEntry& entry) {
     }
     lastMenuScene = 0;
     hash(lower);
+    if (key != lastCourseScene) {
+        lastCourseScene = key;
+        RT_LOG(RT_TAG_DVD) << "course archive " << entry.dvdPath << std::endl;
+    }
     aurora_set_pipeline_scene(key == 0 ? 1 : key);
 }
 

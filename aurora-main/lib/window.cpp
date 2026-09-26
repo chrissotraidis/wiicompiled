@@ -223,6 +223,10 @@ bool SDLCALL lifecycle_event_watch(void*, SDL_Event* event) {
 #if defined(SDL_PLATFORM_ANDROID) || defined(SDL_PLATFORM_APPLE)
   case SDL_EVENT_WILL_ENTER_BACKGROUND:
   case SDL_EVENT_WINDOW_MINIMIZED:
+    if (!g_backgrounded.load(std::memory_order_acquire)) {
+      // Device loss soon after this line usually comes from the OS reclaiming the GPU.
+      Log.info("App entered background");
+    }
     g_backgrounded.store(true, std::memory_order_release);
 #if defined(SDL_PLATFORM_ANDROID)
     input::set_standard_gamepads_active(false);
@@ -240,6 +244,9 @@ bool SDLCALL lifecycle_event_watch(void*, SDL_Event* event) {
     break;
   case SDL_EVENT_DID_ENTER_FOREGROUND:
   case SDL_EVENT_WINDOW_RESTORED:
+    if (g_backgrounded.load(std::memory_order_acquire)) {
+      Log.info("App returned to foreground");
+    }
     g_backgrounded.store(false, std::memory_order_release);
 #if defined(SDL_PLATFORM_ANDROID)
     input::set_standard_gamepads_active(
