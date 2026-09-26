@@ -505,6 +505,7 @@ static void NotePipelineSceneForRead(const DVDFileEntry& entry) {
         }
         lastMenuScene = key;
         lastCourseScene = 0;
+        aurora_set_race_copy_skip(false);
         RT_LOG(RT_TAG_DVD) << "scene archive " << entry.dvdPath << std::endl;
         aurora_set_pipeline_scene(key);
         return;
@@ -513,6 +514,7 @@ static void NotePipelineSceneForRead(const DVDFileEntry& entry) {
         return;
     }
     lastMenuScene = 0;
+    aurora_set_race_copy_skip(true);
     hash(lower);
     if (key != lastCourseScene) {
         lastCourseScene = key;

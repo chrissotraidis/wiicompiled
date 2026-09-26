@@ -22,6 +22,8 @@ void begin_pipeline_frame();
 void end_pipeline_frame();
 void set_skip_unready_pipelines(bool enabled) noexcept;
 bool skip_unready_pipelines() noexcept;
+void set_race_copy_skip(bool raceActive) noexcept;
+bool race_copy_skip_active() noexcept;
 uint32_t queued_pipeline_count() noexcept;
 // Changes when a course scene changes so GX's draw memos can record reused pipelines.
 uint32_t pipeline_scene_generation() noexcept;
