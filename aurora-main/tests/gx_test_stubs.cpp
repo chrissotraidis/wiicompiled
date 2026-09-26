@@ -83,6 +83,7 @@ uint32_t g_mergedDrawCallCount = 0;
 
 namespace aurora::webgpu {
 GraphicsConfig g_graphicsConfig{};
+bool g_adapterIsQualcomm = false;
 } // namespace aurora::webgpu
 
 // --- GXState (the real instance -- tests validate this) ---
@@ -104,6 +105,7 @@ uint64_t staging_uniform_bytes(uint64_t bytes) { return bytes; }
 uint64_t staging_storage_bytes(uint64_t bytes) { return bytes; }
 bool staging_has_space(const StagingSizes&) { return true; }
 void split_staging_batch() {}
+uint32_t pipeline_scene_generation() noexcept { return 0; }
 } // namespace aurora::gfx
 
 namespace aurora::gfx::efb_ram {
@@ -196,6 +198,10 @@ namespace aurora::gx {
 void populate_pipeline_config(PipelineConfig& config, GXPrimitive primitive, GXVtxFmt fmt) noexcept {
   // No-op for tests
 }
+u8 populate_vertex_layout(std::array<AttrConfig, MaxVtxAttr>& attrs, GXVtxFmt) noexcept {
+  attrs = {};
+  return 0;
+}
 GXBindGroups build_bind_groups(const ShaderInfo& info) noexcept { return {}; }
 void resolve_sampled_textures(const ShaderInfo& info) noexcept {}
 u8 color_channel(GXChannelID id) noexcept { return 0; }
@@ -287,6 +293,7 @@ Range push_verts(const uint8_t* data, size_t length) {
   s_lastPushedVertices.assign(data, data + length);
   return {};
 }
+Range push_verts_aligned(const uint8_t* data, size_t length, size_t) { return push_verts(data, length); }
 Range push_indices(const uint8_t* data, size_t length) {
   CHECK(length % sizeof(uint16_t) == 0, "unaligned test index upload");
   s_lastPushedIndices.resize(length / sizeof(uint16_t));

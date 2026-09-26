@@ -10,6 +10,7 @@
 #include "dolphin/gx/GXAurora.h"
 #include "gx.hpp"
 #include "gx_fmt.hpp"
+#include "kartpad_vertex_repack.hpp"
 #include "pipeline.hpp"
 #include "shader_info.hpp"
 #include "../internal.hpp"
@@ -2145,8 +2146,21 @@ static const CachedPipelineState& resolve_pipeline_state(GXPrimitive prim, GXVtx
       config.shaderConfig.kartpadConstantPnMtx = 1;
     }
   }
+  // Adreno workaround: PNMTXIDX-direct draws upload CPU-repacked, aligned, fully direct vertices.
+  HashType repackSourceHash = 0;
+  u32 repackSourceStride = 0;
+  if (config.shaderConfig.lineMode == 0 && config.shaderConfig.attrs[GX_VA_PNMTXIDX].attrType == GX_DIRECT &&
+      kartpad_repack::enabled()) {
+    repackSourceHash = xxh3_hash(config, static_cast<HashType>(gfx::ShaderType::GX));
+    repackSourceStride = config.shaderConfig.vtxStride;
+    config.shaderConfig.vtxStride = kartpad_repack::repacked_layout(config.shaderConfig.attrs);
+  }
   // cached_pipeline_state hands back a reference into a fixed direct-mapped table, so the address stays valid; the entry it points at can only be rewritten by another call to that function, and every such call goes through this miss path and replaces the memo in the same breath.
   const CachedPipelineState& state = cached_pipeline_state(config);
+  if (repackSourceStride != 0) {
+    kartpad_repack::note_pipeline(repackSourceHash, state.configHash, repackSourceStride,
+                                  config.shaderConfig.vtxStride);
+  }
   memo = Memo{
       .state = &state,
       .generation = generation,
@@ -2254,17 +2268,29 @@ bool submit_raw_draw(GXPrimitive prim, GXVtxFmt fmt, const uint8_t* vertices, ui
 
   if (!has_complete_primitive(prim, vtxCount)) return true;
 
+  const bool repack = kartpad_repack::applies(prim);
+  const uint8_t* upload = vertices;
+  uint32_t uploadBytes = vertexBytes;
+  if (repack) {
+    const auto& packed = kartpad_repack::repack(fmt, vertices, vtxCount, vtxSize);
+    upload = packed.data();
+    uploadBytes = static_cast<uint32_t>(packed.size());
+  }
+  // Aligning the repacked start can add up to 3 bytes of padding.
+  const uint32_t admitBytes = uploadBytes + (repack ? 3u : 0u);
+
   // This entry point bypasses process(), so it owns the renderer lock itself.
   std::unique_lock gpuLock(aurora::renderer_gpu_mutex());
-  if (!admit_draw(prim, fmt, vtxCount, vertexBytes)) {
+  if (!admit_draw(prim, fmt, vtxCount, admitBytes)) {
     gpuLock.unlock();
     gfx::split_staging_batch();
     gpuLock.lock();
-    if (!admit_draw(prim, fmt, vtxCount, vertexBytes))
+    if (!admit_draw(prim, fmt, vtxCount, admitBytes))
       throw gfx::StagingCapacityError("Raw draw does not fit after capacity submission");
   }
   kartpad_audit_draw(prim, fmt, vertices, vtxCount, vtxSize, vertexBytes);
-  const gfx::Range vertRange = gfx::push_verts(vertices, vertexBytes);
+  const gfx::Range vertRange =
+      repack ? gfx::push_verts_aligned(upload, uploadBytes, 4) : gfx::push_verts(vertices, vertexBytes);
   const bool interpolationIdentityActive = frame_interpolation_identity_needed();
   const PnMtxUsage matrixUsage = interpolationIdentityActive
                                      ? pn_mtx_usage(vertices, vtxCount, vtxSize)
@@ -2322,10 +2348,21 @@ static bool handle_draw(u8 cmd, const u8* data, u32& pos, u32 size, bool bigEndi
       mergeTarget = lastDraw;
     }
   }
-  if (!admit_draw(prim, fmt, vtxCount, totalVtxBytes, mergeTarget != nullptr)) throw gfx::StagingBatchFull{};
   const uint8_t* vertices = data + pos;
+  const bool repack = kartpad_repack::applies(prim);
+  const uint8_t* upload = vertices;
+  u32 uploadBytes = totalVtxBytes;
+  if (repack) {
+    const auto& packed = kartpad_repack::repack(fmt, vertices, vtxCount, vtxSize);
+    upload = packed.data();
+    uploadBytes = static_cast<u32>(packed.size());
+  }
+  // Aligning the repacked start can add up to 3 bytes of padding.
+  if (!admit_draw(prim, fmt, vtxCount, uploadBytes + (repack ? 3u : 0u), mergeTarget != nullptr))
+    throw gfx::StagingBatchFull{};
   kartpad_audit_draw(prim, fmt, vertices, vtxCount, vtxSize, totalVtxBytes);
-  gfx::Range vertRange = gfx::push_verts(vertices, totalVtxBytes);
+  gfx::Range vertRange =
+      repack ? gfx::push_verts_aligned(upload, uploadBytes, 4) : gfx::push_verts(vertices, totalVtxBytes);
   pos += totalVtxBytes;
   if (auto* lastDraw = mergeTarget) {
       const auto& indexTemplate = cached_index_template(prim, vtxCount);

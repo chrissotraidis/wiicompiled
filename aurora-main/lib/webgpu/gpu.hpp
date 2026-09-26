@@ -58,6 +58,8 @@ extern wgpu::RenderPipeline g_CopyPipeline;
 extern wgpu::BindGroup g_CopyBindGroup;
 extern wgpu::Instance g_instance;
 extern bool g_bcTexturesSupported;
+// Qualcomm/Adreno adapter; selects the KartPad vertex repack workaround by default.
+extern bool g_adapterIsQualcomm;
 
 bool initialize(AuroraBackend backend);
 void shutdown();

@@ -345,6 +345,8 @@ struct ConvRequest;
 void queue_palette_conv(tex_palette_conv::ConvRequest req);
 
 Range push_verts(const uint8_t* data, size_t length);
+// Like push_verts, but the returned range starts at a multiple of `alignment`.
+Range push_verts_aligned(const uint8_t* data, size_t length, size_t alignment);
 template <typename T>
 static Range push_verts(ArrayRef<T> data) {
   return push_verts(reinterpret_cast<const uint8_t*>(data.data()), data.size() * sizeof(T));

@@ -1669,6 +1669,12 @@ static inline Range map(ByteBuffer& target, size_t length, size_t alignment) {
   return {static_cast<uint32_t>(begin), static_cast<uint32_t>(length + padding)};
 }
 Range push_verts(const uint8_t* data, size_t length) { return push(g_verts, data, length, 0); }
+Range push_verts_aligned(const uint8_t* data, size_t length, size_t alignment) {
+  if (const size_t remainder = g_verts.size() % alignment; remainder != 0) {
+    g_verts.append_zeroes(alignment - remainder);
+  }
+  return push(g_verts, data, length, 0);
+}
 Range push_indices(const uint8_t* data, size_t length) { return push(g_indices, data, length, 0); }
 Range push_uniform(const uint8_t* data, size_t length) {
   return push(g_uniforms, data, length, g_cachedLimits.minUniformBufferOffsetAlignment);
