@@ -1573,6 +1573,25 @@ void set_skip_unready_pipelines(bool enabled) noexcept {
 
 bool skip_unready_pipelines() noexcept { return g_skipUnreadyGxPipelines.load(std::memory_order_relaxed); }
 
+// Race copy relaxation. During a race the game copies the EFB to the same targets
+// every frame (screen effects), so each persistent copy pass otherwise waits on every
+// first-use pipeline and a new shader freezes the race for 50-300 ms. Once a race has
+// run for two seconds (its one-shot bakes are done), a copy whose target was also
+// produced in the previous frame may skip an unready draw: the next frame redraws it.
+// Menus stay strict; their thumbnail copies reuse targets while baking retained images.
+constexpr uint32_t RaceCopySkipDelayFrames = 120;
+static std::atomic<uint32_t> g_raceCopySkipFromFrame{UINT32_MAX};
+
+void set_race_copy_skip(bool raceActive) noexcept {
+  g_raceCopySkipFromFrame.store(raceActive ? current_frame() + RaceCopySkipDelayFrames : UINT32_MAX,
+                                std::memory_order_relaxed);
+}
+
+bool race_copy_skip_active() noexcept {
+  const uint32_t from = g_raceCopySkipFromFrame.load(std::memory_order_relaxed);
+  return from != UINT32_MAX && current_frame() >= from && skip_unready_pipelines();
+}
+
 uint32_t queued_pipeline_count() noexcept {
 #if defined(__cpp_lib_atomic_ref)
   return queuedPipelines.load(std::memory_order_relaxed);
@@ -1652,6 +1671,8 @@ bool wait_pipeline_for_persistent_pass(PipelineRef ref, wgpu::RenderPipeline& pi
 void aurora_set_skip_unready_pipelines(const bool enabled) { aurora::gfx::set_skip_unready_pipelines(enabled); }
 
 bool aurora_get_skip_unready_pipelines() { return aurora::gfx::skip_unready_pipelines(); }
+
+void aurora_set_race_copy_skip(bool raceActive) { aurora::gfx::set_race_copy_skip(raceActive); }
 
 uint32_t aurora_get_queued_pipeline_count() { return aurora::gfx::queued_pipeline_count(); }
 bool aurora_get_pipeline_prewarm_progress(uint32_t* remaining, uint32_t* total) {
