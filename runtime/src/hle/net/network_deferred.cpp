@@ -5,6 +5,8 @@
 #include "ppc_runtime.h"
 #include "runtime_log.h"
 
+#include <kartpad/network/blocking_stream_wait.h>
+
 #include <algorithm>
 #include <chrono>
 #include <fstream>
@@ -131,6 +133,19 @@ struct DeferredConnectWork {
     std::optional<int32_t> initialResult;
 };
 
+// A logically blocking TCP receive with nothing readable yet. The guest data
+// buffer stays owned by the parked caller, so only its address is retained.
+struct DeferredReceiveWork {
+    DeferredNetworkRoute route{};
+    NetworkPollContract::Timeout timeout{};
+    uint32_t wiiFd = 0;
+    NativeSocket nativeFd = kInvalidSocket;
+    uint64_t socketGeneration = 0;
+    uint32_t flags = 0;
+    uint32_t dataAddress = 0;
+    uint32_t dataSize = 0;
+};
+
 using DeferredDnsPreparation =
     NetworkDeferredContract::Preparation<DeferredDnsWork>;
 using DeferredPollPreparation =
@@ -146,6 +161,7 @@ struct DeferredNetworkStore {
     // thread, so unlike DNS worker completions they need no cross-thread lock.
     std::vector<DeferredPollWork> pendingPolls;
     std::vector<DeferredConnectWork> pendingConnects;
+    std::vector<DeferredReceiveWork> pendingReceives;
     std::mutex resultMutex;
     std::unordered_map<uint64_t, int32_t> syncResults;
     std::mutex schedulerThreadMutex;
@@ -845,6 +861,91 @@ static DeferredStartOutcome StartScalarDeferredIoctl(
                          initializeRoute, InstallDeferredDns);
 }
 
+// Zero-timeout form of WaitForReadable. A failed poll counts as ready so that
+// the receive itself reports the host error.
+static bool ReceiveIsReady(NativeSocket socket) {
+    pollfd descriptor{};
+    descriptor.fd = socket;
+    descriptor.events = POLLRDNORM;
+#ifdef _WIN32
+    const int ret = WSAPoll(&descriptor, 1, 0);
+#else
+    const int ret = poll(&descriptor, 1, 0);
+#endif
+    return ret < 0 ||
+           (ret > 0 && (descriptor.revents &
+                        (POLLRDNORM | POLLIN | POLLERR | POLLHUP | POLLNVAL)) != 0);
+}
+
+// The direct IOCTLV_SO_RECVFROM handler waits up to five seconds in poll() on
+// the emulation thread for exactly one case: a logically blocking stream
+// receive without a source address and with nothing readable yet. Only that
+// case is parked here. Everything else, including every malformed request and
+// every receive that can complete now, stays on the direct path so its result
+// is produced by the same code as before.
+static std::optional<DeferredReceiveWork> PrepareDeferredReceive(
+    uint32_t numIn, uint32_t numOut, uint32_t vectorPtr) {
+    const uint64_t vectorCount = static_cast<uint64_t>(numIn) + numOut;
+    if (numIn == 0 || numOut == 0 || vectorCount > kMaxIoVectors || !vectorPtr ||
+        !Memory::Contains(vectorPtr, static_cast<size_t>(vectorCount) * 8u)) {
+        return std::nullopt;
+    }
+    const std::vector<IoVector> vectors =
+        ReadVectors(vectorPtr, static_cast<uint32_t>(vectorCount));
+    const IoVector& control = vectors[0];
+    const IoVector& data = vectors[numIn];
+    if (!Memory::Contains(control.address, 8u) || !data.address || !data.size ||
+        data.size > static_cast<uint32_t>(INT32_MAX) ||
+        !Memory::Contains(data.address, data.size)) {
+        return std::nullopt;
+    }
+    if (numOut > 1 && vectors[numIn + 1].address && vectors[numIn + 1].size >= 8u) {
+        return std::nullopt;
+    }
+
+    const uint32_t wiiFd = Memory::Read32(control.address);
+    WiiSocket* socket = GetWiiSocket(wiiFd);
+    if (!socket || socket->type != SOCK_STREAM) {
+        return std::nullopt;
+    }
+    const uint32_t rawFlags = Memory::Read32(control.address + 4u);
+    const int waitMilliseconds = KartPad::Network::StreamReceiveWaitMilliseconds(
+        (rawFlags & 0x04u) != 0, socket->nonblocking);
+    if (waitMilliseconds <= 0 || ReceiveIsReady(socket->native)) {
+        return std::nullopt;
+    }
+
+    DeferredReceiveWork work{};
+    work.timeout = NetworkPollContract::Timeout::FromMilliseconds(waitMilliseconds);
+    work.wiiFd = wiiFd;
+    work.nativeFd = socket->native;
+    work.socketGeneration = socket->generation;
+    work.flags = rawFlags & 0x03u;
+    work.dataAddress = data.address;
+    work.dataSize = data.size;
+    return work;
+}
+
+// Any failure before the caller is parked falls back to the direct handler,
+// which reproduces the previous result for that request.
+template <typename InitializeRoute>
+static DeferredStartOutcome StartDeferredReceive(uint32_t numIn, uint32_t numOut,
+                                                 uint32_t vectorPtr,
+                                                 InitializeRoute initializeRoute) {
+    try {
+        std::optional<DeferredReceiveWork> work =
+            PrepareDeferredReceive(numIn, numOut, vectorPtr);
+        if (!work || !initializeRoute(work->route)) {
+            return DeferredStartOutcome::NotApplicable();
+        }
+        const uint64_t token = work->route.token;
+        GetDeferredNetworkStore().pendingReceives.push_back(std::move(*work));
+        return DeferredStartOutcome::Started(token);
+    } catch (...) {
+        return DeferredStartOutcome::NotApplicable();
+    }
+}
+
 NetworkDeferredContract::StartOutcome Network_HLE_StartIoctlSync(
     uint32_t fd, uint32_t cmd, uint32_t inBuf, uint32_t inLen,
     uint32_t outBuf, uint32_t outLen, uint32_t waitQueue) {
@@ -861,6 +962,9 @@ NetworkDeferredContract::StartOutcome Network_HLE_StartIoctlSync(
 NetworkDeferredContract::StartOutcome Network_HLE_StartIoctlvSync(
     uint32_t fd, uint32_t cmd, uint32_t numIn, uint32_t numOut,
     uint32_t vectorPtr, uint32_t waitQueue) {
+    if (IsIpTopCommand(fd, cmd, IOCTLV_SO_RECVFROM)) {
+        return StartDeferredReceive(numIn, numOut, vectorPtr, SyncRoute(waitQueue));
+    }
     if (!IsIpTopCommand(fd, cmd, IOCTLV_SO_GETADDRINFO)) {
         return DeferredStartOutcome::NotApplicable();
     }
@@ -886,6 +990,10 @@ NetworkDeferredContract::StartOutcome Network_HLE_StartIoctlAsync(
 NetworkDeferredContract::StartOutcome Network_HLE_StartIoctlvAsync(
     uint32_t fd, uint32_t cmd, uint32_t numIn, uint32_t numOut,
     uint32_t vectorPtr, uint32_t callback, uint32_t callbackArg) {
+    if (IsIpTopCommand(fd, cmd, IOCTLV_SO_RECVFROM)) {
+        return StartDeferredReceive(numIn, numOut, vectorPtr,
+                                    AsyncRoute(callback, callbackArg));
+    }
     if (!IsIpTopCommand(fd, cmd, IOCTLV_SO_GETADDRINFO)) {
         return DeferredStartOutcome::NotApplicable();
     }
@@ -1018,6 +1126,32 @@ static std::optional<int32_t> ProbeDeferredConnect(
     return ClassifySettledConnect(work.nativeFd);
 }
 
+// Runs on the emulation thread once the socket is readable, has failed, has
+// been closed, or the five-second wait has run out. At the deadline the
+// receive still runs once, so it returns data that arrived in time and
+// otherwise the same would-block result the direct handler reported.
+static int32_t CompleteDeferredReceive(const DeferredReceiveWork& work) {
+    if (!SocketIdentityIsCurrent(work.wiiFd, work.nativeFd, work.socketGeneration)) {
+        // Dolphin fails operations parked on a socket with -SO_ENOTCONN when
+        // the descriptor closes.
+        return -SO_ENOTCONN;
+    }
+    WiiSocket& socket = g_sockets[work.wiiFd];
+    char* data = reinterpret_cast<char*>(Memory::GetPointer(work.dataAddress, work.dataSize));
+    if (!data) {
+        return -SO_EINVAL;
+    }
+    const int ret = recvfrom(work.nativeFd, data, static_cast<int>(work.dataSize),
+                             static_cast<int>(work.flags), nullptr, nullptr);
+    const int nativeErr = ret < 0 ? NativeLastError() : 0;
+    const int32_t result = ret >= 0 ? SocketResult(ret) : SocketErrorResult(nativeErr);
+    if (ret < 0 && result != -SO_EAGAIN && result != socket.lastLoggedRecvError) {
+        socket.lastLoggedRecvError = result;
+        NetFail("recv failed fd=%u host=%d wii=%d", work.wiiFd, nativeErr, result);
+    }
+    return result;
+}
+
 bool Network_HLE_ProcessCompletions(CpuContext* cpu) {
     if (!cpu) {
         return false;
@@ -1130,6 +1264,35 @@ bool Network_HLE_ProcessCompletions(CpuContext* cpu) {
                     static_cast<unsigned>(ntohs(work.peerAddress.sin_port)), result);
         }
         it = store.pendingConnects.erase(it);
+        DeliverDeferredNetworkResult(cpu, store, route, result);
+        handledAny = true;
+    }
+
+    for (auto it = store.pendingReceives.begin(); it != store.pendingReceives.end();) {
+        const DeferredReceiveWork& work = *it;
+        const DeferredNetworkRoute route = work.route;
+        if (route.kind == DeferredNetworkCompletionKind::SyncWaitQueue &&
+            !DeferredNetworkWaiterIsValid(route)) {
+            it = store.pendingReceives.erase(it);
+            continue;
+        }
+        const bool settled =
+            !SocketIdentityIsCurrent(work.wiiFd, work.nativeFd, work.socketGeneration) ||
+            ReceiveIsReady(work.nativeFd) || work.timeout.IsExpired(now);
+        if (!settled) {
+            ++it;
+            continue;
+        }
+
+        int32_t result = -SO_EINVAL;
+        try {
+            result = CompleteDeferredReceive(work);
+        } catch (const Memory::AccessViolation& error) {
+            const std::string_view reason = error.reason();
+            NetFail("SO_RECVFROM(wait) fd=%u result write faulted: %.*s -> wii=%d",
+                    work.wiiFd, static_cast<int>(reason.size()), reason.data(), -SO_EINVAL);
+        }
+        it = store.pendingReceives.erase(it);
         DeliverDeferredNetworkResult(cpu, store, route, result);
         handledAny = true;
     }
