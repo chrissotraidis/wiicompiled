@@ -1153,6 +1153,17 @@ static std::atomic_bool g_prewarmActive{false};
 static std::chrono::steady_clock::time_point g_prewarmStart{};
 static uint32_t g_prewarmCount = 0;
 
+// Launch prewarm progress for the on-screen notice: recipes still queued of those
+// queued at launch. First-use builds during prewarm share the counter, so clamp.
+bool pipeline_prewarm_progress(uint32_t& remaining, uint32_t& total) noexcept {
+  if (!g_prewarmActive.load(std::memory_order_acquire)) {
+    return false;
+  }
+  total = g_prewarmCount;
+  remaining = std::min<uint32_t>(static_cast<uint32_t>(queuedPipelines.load()), total);
+  return true;
+}
+
 static void note_pipeline_queue_drained() {
   if (!g_prewarmActive.exchange(false, std::memory_order_acq_rel)) {
     return;
@@ -1587,5 +1598,15 @@ void aurora_set_skip_unready_pipelines(const bool enabled) { aurora::gfx::set_sk
 bool aurora_get_skip_unready_pipelines() { return aurora::gfx::skip_unready_pipelines(); }
 
 uint32_t aurora_get_queued_pipeline_count() { return aurora::gfx::queued_pipeline_count(); }
+bool aurora_get_pipeline_prewarm_progress(uint32_t* remaining, uint32_t* total) {
+  uint32_t left = 0;
+  uint32_t all = 0;
+  if (remaining == nullptr || total == nullptr || !aurora::gfx::pipeline_prewarm_progress(left, all)) {
+    return false;
+  }
+  *remaining = left;
+  *total = all;
+  return true;
+}
 
 void aurora_set_pipeline_scene(uint64_t scene) { aurora::gfx::set_pipeline_scene(scene); }
