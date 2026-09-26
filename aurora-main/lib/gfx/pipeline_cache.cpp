@@ -76,7 +76,10 @@ constexpr size_t MaxBackgroundPipelineWorkers = 1;
 // Replay only the earliest-use recipes. Rebuilding every course ever visited
 // retains thousands of unused driver pipelines and can exhaust mobile memory.
 // The disk cache remains intact; omitted recipes compile normally on first use.
-constexpr size_t MaxPrewarmPipelineBuilds = 128;
+// 512 covers the title and menus seen in roughly the first minute of play
+// (measured on an iPad cache: 559 recipes, 299 outside any course scene); menu
+// thumbnail copies must wait for these, so first use stalls visibly.
+constexpr size_t MaxPrewarmPipelineBuilds = 512;
 // For synchronous pipeline fallback (OpenGL)
 #ifdef NDEBUG
 constexpr size_t BuildPipelinesPerFrame = 5;
