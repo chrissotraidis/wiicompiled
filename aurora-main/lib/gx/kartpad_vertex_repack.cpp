@@ -124,9 +124,11 @@ bool enabled() noexcept {
   static const bool on = [] {
     const int mode = override_mode();
     const bool qualcomm = webgpu::g_adapterIsQualcomm;
-    const bool result = mode < 0 ? qualcomm : mode == 1;
+    // Off unless explicitly enabled (Android: Character Graphics Test setting). Untested on
+    // the affected Adreno phones, so it is not applied automatically.
+    const bool result = mode == 1;
     Log.info("KartPadPNMTX repack mode={} qualcomm={} enabled={}",
-             mode < 0 ? "auto" : (mode == 1 ? "forced_on" : "forced_off"), qualcomm, result);
+             mode < 0 ? "default_off" : (mode == 1 ? "on" : "off"), qualcomm, result);
     return result;
   }();
   return on;
