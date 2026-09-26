@@ -451,6 +451,8 @@ bool read_standard_gamepad_state(uint32_t player, bool allowSingleUnassigned,
   state->leftY = controller->m_standardLeftY;
   state->leftTrigger = controller->m_standardLeftTrigger;
   state->rightTrigger = controller->m_standardRightTrigger;
+  state->vendor = SDL_GetGamepadVendor(controller->m_controller);
+  state->product = SDL_GetGamepadProduct(controller->m_controller);
   return true;
 }
 

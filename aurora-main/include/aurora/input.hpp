@@ -34,6 +34,8 @@ struct StandardGamepadState {
   int16_t leftY = 0;
   int16_t leftTrigger = 0;
   int16_t rightTrigger = 0;
+  uint16_t vendor = 0;
+  uint16_t product = 0;
 };
 
 // Reads an explicitly assigned controller. Player zero may opt into a lone,
