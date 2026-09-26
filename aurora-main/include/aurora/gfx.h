@@ -80,6 +80,8 @@ uint32_t aurora_get_frame_interpolation_fps();
 void aurora_set_skip_unready_pipelines(bool enabled);
 bool aurora_get_skip_unready_pipelines();
 uint32_t aurora_get_queued_pipeline_count();
+// True while launch prewarm runs; reports recipes remaining of those queued at launch.
+bool aurora_get_pipeline_prewarm_progress(uint32_t* remaining, uint32_t* total);
 // Identifies the scene (for example a course archive) that is starting to load. Pipelines used
 // while it is active are recorded, and recorded ones are compiled during its next load. 0 clears.
 void aurora_set_pipeline_scene(uint64_t scene);

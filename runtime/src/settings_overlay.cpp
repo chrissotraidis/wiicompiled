@@ -1041,7 +1041,11 @@ void DrawFpsOverlay() {
 
 void DrawShaderCompilationStatus() {
     const uint32_t queuedPipelines = aurora_get_queued_pipeline_count();
-    if (queuedPipelines == 0) {
+    uint32_t prewarmRemaining = 0;
+    uint32_t prewarmTotal = 0;
+    const bool preparing = aurora_get_pipeline_prewarm_progress(&prewarmRemaining, &prewarmTotal) &&
+                           prewarmTotal > 0 && prewarmRemaining > 0;
+    if (queuedPipelines == 0 && !preparing) {
         return;
     }
 
@@ -1059,7 +1063,15 @@ void DrawShaderCompilationStatus() {
                                         ImGuiWindowFlags_NoSavedSettings;
     if (ImGui::Begin("Shader Compilation Status", nullptr, kFlags)) {
         ImGui::SetWindowFontScale(0.85f);
-        ImGui::Text("%u shader%s compiling", queuedPipelines, queuedPipelines == 1 ? "" : "s");
+        if (preparing) {
+            // Launch prewarm restores compiled graphics (for example after an OS update).
+            // Racing before it finishes can pause briefly when a missing shader is needed.
+            ImGui::Text("Preparing graphics: %u of %u", prewarmTotal - prewarmRemaining, prewarmTotal);
+            ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.35f, 1.0f),
+                               "Racing before this finishes may stutter");
+        } else {
+            ImGui::Text("%u shader%s compiling", queuedPipelines, queuedPipelines == 1 ? "" : "s");
+        }
     }
     ImGui::End();
     ImGui::PopStyleVar();
