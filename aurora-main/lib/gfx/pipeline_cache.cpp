@@ -23,6 +23,9 @@
 
 #include <thread>
 #include <vector>
+#if defined(__ANDROID__)
+#include <unistd.h>
+#endif
 
 #if defined(__APPLE__)
 #include <TargetConditionals.h>
@@ -84,6 +87,20 @@ constexpr size_t MaxBackgroundPipelineWorkers = 1;
 // retains thousands of unused driver pipelines and can exhaust mobile memory.
 // The disk cache remains intact; omitted recipes compile normally on first use.
 constexpr size_t MaxPrewarmPipelineBuilds = 128;
+// Phones with 6 GB or more replay 512 recipes, which covers the menus and most
+// raced courses (a Pixel 9 Pro XL session still waited 9-24 ms on 11 unreplayed
+// race recipes with 128). Smaller phones keep the lower bound for memory.
+static size_t prewarm_pipeline_budget() {
+#if defined(__ANDROID__)
+  const long pages = sysconf(_SC_PHYS_PAGES);
+  const long pageSize = sysconf(_SC_PAGE_SIZE);
+  if (pages > 0 && pageSize > 0 &&
+      static_cast<uint64_t>(pages) * static_cast<uint64_t>(pageSize) >= (6ull << 30)) {
+    return 512;
+  }
+#endif
+  return MaxPrewarmPipelineBuilds;
+}
 // For synchronous pipeline fallback (OpenGL)
 #ifdef NDEBUG
 constexpr size_t BuildPipelinesPerFrame = 5;
@@ -531,7 +548,8 @@ static PipelineRef find_pipeline_impl(ShaderType type, const PipelineConfig& con
       if (g_pipelineFrameActive && !deferGxPipeline) {
         syncCreate = true;
       } else {
-        if (!cachePreload && deferGxPipeline && g_pendingPipelines.size() >= MaxQueuedPipelineBuilds &&
+        // Count only first-use work: launch prewarm is bounded separately and must not be dropped by menus.
+        if (!cachePreload && deferGxPipeline && g_priorityPipelines.size() >= MaxQueuedPipelineBuilds &&
             !g_backgroundPipelines.empty()) {
           g_pendingPipelines.erase(g_backgroundPipelines.back().hash);
           g_backgroundPipelines.pop_back();
@@ -540,7 +558,7 @@ static PipelineRef find_pipeline_impl(ShaderType type, const PipelineConfig& con
 
         // Keep the pipeline queued past the cap rather than compiling synchronously: the recorded draw
         // references this hash forever, and dropping it baked one-shot EFB copies incomplete.
-        if (!cachePreload && g_pendingPipelines.size() >= MaxQueuedPipelineBuilds && !skipUnreadyGxPipeline) {
+        if (!cachePreload && g_priorityPipelines.size() >= MaxQueuedPipelineBuilds && !skipUnreadyGxPipeline) {
           syncCreate = true;
         } else {
           // Scene replay runs during a loading screen: use every worker, as for first use.
@@ -1352,7 +1370,7 @@ static void load_pipeline_cache() {
   if (g_pipelineCacheBroken) {
     return;
   }
-  size_t prewarmRemaining = MaxPrewarmPipelineBuilds;
+  size_t prewarmRemaining = prewarm_pipeline_budget();
   load_pipeline_cache_entries<clear::PipelineConfig>(ShaderType::Clear, clear::ClearPipelineConfigVersion,
                                                      clear::create_pipeline, prewarmRemaining);
   load_pipeline_cache_entries<gx::PipelineConfig>(ShaderType::GX, gx::GXPipelineConfigVersion,
