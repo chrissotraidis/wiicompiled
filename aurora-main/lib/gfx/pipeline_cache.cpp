@@ -74,7 +74,8 @@ constexpr size_t MaxPipelineWorkers = 22;
 // Speculative cache replay must leave compilation capacity for the current frame.
 // A cold Dawn/driver cache can make each job expensive in both CPU and memory.
 // Workers always take first-use (priority) builds before speculative ones.
-constexpr size_t MaxBackgroundPipelineWorkers = 2;
+// Set at startup to half the compile workers (at least one).
+static size_t g_maxBackgroundPipelineWorkers = 1;
 // Launch prewarm replays recorded recipes in first-use order. An OS update empties
 // the system shader cache, after which each recipe first needed during a race costs
 // 200-300 ms on iPad (measured on iPadOS 26.7) and texture copies must wait for it.
@@ -1058,6 +1059,8 @@ static void replay_pipeline_scene(uint64_t scene) {
   }
   uint32_t recorded = 0;
   uint32_t queued = 0;
+  uint32_t alreadyBuilt = 0;
+  uint32_t alreadyPending = 0;
   int ret;
   while ((ret = sqlite3_step(stmt)) == SQLITE_ROW) {
     ++recorded;
@@ -1066,12 +1069,16 @@ static void replay_pipeline_scene(uint64_t scene) {
     const auto* blob = static_cast<const uint8_t*>(sqlite3_column_blob(stmt, 2));
     const int size = sqlite3_column_bytes(stmt, 2);
     const auto firstFrameUsed = static_cast<uint32_t>(sqlite3_column_int64(stmt, 3));
-    bool known;
+    bool built;
+    bool pending;
     {
       std::scoped_lock guard{g_pipelineMutex};
-      known = g_pipelines.contains(hash) || g_pendingPipelines.contains(hash);
+      built = g_pipelines.contains(hash);
+      pending = !built && g_pendingPipelines.contains(hash);
     }
-    if (known) {
+    if (built || pending) {
+      alreadyBuilt += built ? 1 : 0;
+      alreadyPending += pending ? 1 : 0;
       continue;
     }
     bool replayed = false;
@@ -1090,7 +1097,8 @@ static void replay_pipeline_scene(uint64_t scene) {
   }
   sqlite3_reset(stmt);
   sqlite3_clear_bindings(stmt);
-  Log.info("Pipeline scene replay: scene {:016x}, {} recorded, {} queued", scene, recorded, queued);
+  Log.info("Pipeline scene replay: scene {:016x}, {} recorded, {} queued, {} built, {} pending, {} rejected", scene,
+           recorded, queued, alreadyBuilt, alreadyPending, recorded - queued - alreadyBuilt - alreadyPending);
 }
 
 static void pipeline_cache_writer() {
@@ -1163,6 +1171,17 @@ static std::atomic_bool g_prewarmActive{false};
 static std::chrono::steady_clock::time_point g_prewarmStart{};
 static uint32_t g_prewarmCount = 0;
 
+// Launch prewarm progress for the on-screen notice: recipes still queued of those
+// queued at launch. First-use builds during prewarm share the counter, so clamp.
+bool pipeline_prewarm_progress(uint32_t& remaining, uint32_t& total) noexcept {
+  if (!g_prewarmActive.load(std::memory_order_acquire)) {
+    return false;
+  }
+  total = g_prewarmCount;
+  remaining = std::min<uint32_t>(static_cast<uint32_t>(queuedPipelines.load()), total);
+  return true;
+}
+
 static void note_pipeline_queue_drained() {
   if (!g_prewarmActive.exchange(false, std::memory_order_acq_rel)) {
     return;
@@ -1213,7 +1232,7 @@ static void pipeline_worker() {
       g_pipelineCv.wait(lock, [] {
         return !g_priorityPipelines.empty() ||
                (!g_backgroundPipelines.empty() &&
-                g_activeBackgroundPipelineWorkers < MaxBackgroundPipelineWorkers) ||
+                g_activeBackgroundPipelineWorkers < g_maxBackgroundPipelineWorkers) ||
                g_pipelineThreadEnd;
       });
       if (g_pipelineThreadEnd) {
@@ -1397,12 +1416,13 @@ void initialize_pipeline_cache() {
   } else {
     g_hasPipelineThread = true;
     const size_t workerCount = pipeline_worker_count();
+    g_maxBackgroundPipelineWorkers = std::max<size_t>(1, workerCount / 2);
     g_pipelineThreads.reserve(workerCount);
     for (size_t i = 0; i < workerCount; ++i) {
       g_pipelineThreads.emplace_back(pipeline_worker);
     }
     Log.info("Enabled {} priority pipeline compilation workers ({} background prewarm)",
-             workerCount, std::min(workerCount, MaxBackgroundPipelineWorkers));
+             workerCount, g_maxBackgroundPipelineWorkers);
   }
 
   load_pipeline_cache();
@@ -1567,5 +1587,15 @@ void aurora_set_skip_unready_pipelines(const bool enabled) { aurora::gfx::set_sk
 bool aurora_get_skip_unready_pipelines() { return aurora::gfx::skip_unready_pipelines(); }
 
 uint32_t aurora_get_queued_pipeline_count() { return aurora::gfx::queued_pipeline_count(); }
+bool aurora_get_pipeline_prewarm_progress(uint32_t* remaining, uint32_t* total) {
+  uint32_t left = 0;
+  uint32_t all = 0;
+  if (remaining == nullptr || total == nullptr || !aurora::gfx::pipeline_prewarm_progress(left, all)) {
+    return false;
+  }
+  *remaining = left;
+  *total = all;
+  return true;
+}
 
 void aurora_set_pipeline_scene(uint64_t scene) { aurora::gfx::set_pipeline_scene(scene); }
