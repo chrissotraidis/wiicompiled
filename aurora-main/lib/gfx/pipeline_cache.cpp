@@ -12,6 +12,8 @@
 #include <condition_variable>
 #include <deque>
 #include <filesystem>
+#include <fstream>
+#include <string>
 #include <limits>
 #include <mutex>
 #include <thread>
@@ -44,6 +46,8 @@ struct PendingPipeline {
   PipelineRef hash;
   uint32_t firstFrameUsed = UINT32_MAX;
   NewPipelineCallback create;
+  // False only for launch warm-up recipes: compile to refill the driver cache, then release.
+  bool retain = true;
 };
 
 struct PipelineCacheWrite {
@@ -76,22 +80,60 @@ constexpr size_t MaxPipelineWorkers = 22;
 // Workers always take first-use (priority) builds before speculative ones.
 // Set at startup to half the compile workers (at least one).
 static size_t g_maxBackgroundPipelineWorkers = 1;
-// Launch prewarm replays recorded recipes in first-use order. An OS update empties
-// the system shader cache, after which each recipe first needed during a race costs
-// 200-300 ms on iPad (measured on iPadOS 26.7) and texture copies must wait for it.
-// Compiling every recorded recipe in the background restores the driver cache after
-// such an update. Memory is small (an iPad session with 552 pipelines peaked near
-// 0.85 GB), but low-memory devices keep the earlier bound.
-static size_t max_prewarm_pipeline_builds() {
+// Launch prewarm keeps the earliest-use recipes compiled in memory. Each retained
+// pipeline costs about 0.9 MB on iPad, and retaining ~1300 pushed an iPad session to
+// 2.4 GB and 20 FPS on the cup-select screen, so the retained set stays bounded.
+constexpr size_t RetainedPrewarmPipelineBuilds = 512;
+// An OS update empties the system shader cache; afterwards a recipe first needed in
+// a race costs 200-300 ms on iPad (measured on iPadOS 26.7) and texture copies must
+// wait for it, while a cached one takes about 8 ms. Once per OS version, compile the
+// remaining recorded recipes to refill that cache and release them immediately.
+constexpr size_t MaxWarmPipelineBuilds = 4096;
+static bool g_prewarmWarmOnly = false;       // guarded by the loading thread
+static size_t prewarmLoaded = 0;
+static bool g_warmPassRan = false;
+static absl::flat_hash_set<PipelineRef> g_retainDemanded;  // guarded by g_pipelineMutex
+
+static std::string current_os_build() {
 #if defined(__APPLE__)
-  uint64_t memory = 0;
-  size_t length = sizeof(memory);
-  if (sysctlbyname("hw.memsize", &memory, &length, nullptr, 0) == 0 && memory >= (6ull << 30)) {
-    return 4096;
+  char build[64] = {};
+  size_t length = sizeof(build);
+  if (sysctlbyname("kern.osversion", build, &length, nullptr, 0) == 0) {
+    return std::string(build);
   }
 #endif
-  return 512;
+  return {};
 }
+
+static std::filesystem::path warm_marker_path() {
+  return fs_path_from_string(g_config.pipelineCachePath) / "pipeline_warm_os.txt";
+}
+
+static std::string warm_marker_value() {
+  const auto os = current_os_build();
+  return os.empty() ? std::string{} : os + ":" + std::to_string(gx::GXPipelineConfigVersion);
+}
+
+static bool warm_pass_needed() {
+  const auto expected = warm_marker_value();
+  if (expected.empty()) {
+    return false;
+  }
+  std::ifstream in(warm_marker_path());
+  std::string stored;
+  std::getline(in, stored);
+  return stored != expected;
+}
+
+static void record_warm_pass() {
+  const auto value = warm_marker_value();
+  if (value.empty()) {
+    return;
+  }
+  std::ofstream out(warm_marker_path(), std::ios::trunc);
+  out << value << '\n';
+}
+
 // For synchronous pipeline fallback (OpenGL)
 #ifdef NDEBUG
 constexpr size_t BuildPipelinesPerFrame = 5;
@@ -525,6 +567,14 @@ static PipelineRef find_pipeline_impl(ShaderType type, const PipelineConfig& con
       }
     } else if (g_pendingPipelines.contains(hash)) {
       auto* pending = touch_pending_pipeline(hash, g_pipelineFrameActive);
+      if (!cachePreload) {
+        // A warm-up recipe the game now needs must stay compiled, even if a worker holds it.
+        if (pending != nullptr) {
+          pending->retain = true;
+        } else {
+          g_retainDemanded.insert(hash);
+        }
+      }
       if (pending != nullptr && firstFrameUsed < pending->firstFrameUsed) {
         pending->firstFrameUsed = firstFrameUsed;
         if (persist) {
@@ -538,7 +588,7 @@ static PipelineRef find_pipeline_impl(ShaderType type, const PipelineConfig& con
       if (g_pipelineFrameActive && !deferGxPipeline) {
         syncCreate = true;
       } else {
-        // Launch prewarm is bounded by max_prewarm_pipeline_builds(); drop its newest recipe only
+        // Launch prewarm is bounded (RetainedPrewarmPipelineBuilds / warm-up); drop its newest recipe only
         // when first-use work alone reaches the cap, so the race recipes it restores survive menus.
         if (!cachePreload && deferGxPipeline && g_priorityPipelines.size() >= MaxQueuedPipelineBuilds &&
             !g_backgroundPipelines.empty()) {
@@ -561,6 +611,7 @@ static PipelineRef find_pipeline_impl(ShaderType type, const PipelineConfig& con
               .hash = hash,
               .firstFrameUsed = firstFrameUsed,
               .create = std::move(cb),
+              .retain = !(cachePreload && !sceneReplay && g_prewarmWarmOnly),
           });
           g_pendingPipelines.insert(hash);
           ++queuedPipelines;
@@ -1190,12 +1241,15 @@ static void note_pipeline_queue_drained() {
   // every drained burst stalls the device lock mid-race. Later first-use compiles are
   // covered by the shutdown serialize.
   webgpu::serialize_pipeline_caches();
+  if (g_warmPassRan) {
+    record_warm_pass();
+  }
   const auto elapsed =
       std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - g_prewarmStart);
   const auto stats = webgpu::blob_cache_stats();
-  Log.info("Pipeline prewarm finished: {} pipelines in {:.1f} s (Dawn blob cache: {}/{} hits, {} stores, {:.1f} MiB "
-           "loaded)",
-           g_prewarmCount, elapsed.count() / 1000.0, stats.hits, stats.lookups, stats.stores,
+  Log.info("Pipeline prewarm finished: {} pipelines in {:.1f} s, warm-up pass {} (Dawn blob cache: {}/{} hits, {} "
+           "stores, {:.1f} MiB loaded)",
+           g_prewarmCount, elapsed.count() / 1000.0, g_warmPassRan ? "ran" : "skipped", stats.hits, stats.lookups, stats.stores,
            static_cast<double>(stats.hitBytes) / (1024.0 * 1024.0));
 }
 
@@ -1203,14 +1257,17 @@ static void compile_pending_pipeline(PendingPipeline pending) {
   auto result = pending.create();
   {
     std::lock_guard lock{g_pipelineMutex};
-    const auto [_, inserted] = g_pipelines.try_emplace(pending.hash, CachedPipeline{
-                                                                         .pipeline = std::move(result),
-                                                                         .firstFrameUsed = pending.firstFrameUsed,
-                                                                     });
-    g_pendingPipelines.erase(pending.hash);
-    if (inserted) {
-      ++createdPipelines;
+    const bool retain = pending.retain || g_retainDemanded.erase(pending.hash) > 0;
+    if (retain) {
+      const auto [_, inserted] = g_pipelines.try_emplace(pending.hash, CachedPipeline{
+                                                                           .pipeline = std::move(result),
+                                                                           .firstFrameUsed = pending.firstFrameUsed,
+                                                                       });
+      if (inserted) {
+        ++createdPipelines;
+      }
     }
+    g_pendingPipelines.erase(pending.hash);
   }
   g_pipelineCv.notify_all();
   --queuedPipelines;
@@ -1332,7 +1389,9 @@ static void load_pipeline_cache_entries(ShaderType type, uint32_t configVersion,
       }
     }
 
+    g_prewarmWarmOnly = prewarmLoaded++ >= RetainedPrewarmPipelineBuilds;
     find_pipeline_impl(type, config, [=] { return create(config); }, false, firstFrameUsed);
+    g_prewarmWarmOnly = false;
     --prewarmRemaining;
   }
 
@@ -1353,7 +1412,9 @@ static void load_pipeline_cache() {
   if (g_pipelineCacheBroken) {
     return;
   }
-  size_t prewarmRemaining = max_prewarm_pipeline_builds();
+  g_warmPassRan = warm_pass_needed();
+  size_t prewarmRemaining = g_warmPassRan ? MaxWarmPipelineBuilds : RetainedPrewarmPipelineBuilds;
+  prewarmLoaded = 0;
   load_pipeline_cache_entries<clear::PipelineConfig>(ShaderType::Clear, clear::ClearPipelineConfigVersion,
                                                      clear::create_pipeline, prewarmRemaining);
   load_pipeline_cache_entries<gx::PipelineConfig>(ShaderType::GX, gx::GXPipelineConfigVersion,
@@ -1531,6 +1592,7 @@ static bool wait_pipeline_impl(PipelineRef ref, wgpu::RenderPipeline& pipeline, 
   std::unique_lock lock{g_pipelineMutex};
   if (!g_pipelines.contains(ref) && g_pendingPipelines.contains(ref)) {
     ZoneScopedN("wait_pipeline");
+    g_retainDemanded.insert(ref);
     const auto finished = [ref] {
       return g_pipelines.contains(ref) || !g_pendingPipelines.contains(ref) || g_pipelineThreadEnd;
     };
