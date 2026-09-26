@@ -1049,6 +1049,25 @@ bool present_presentation_job(const PresentationJob& job) {
   constexpr auto kStallRebuildCooldown = std::chrono::seconds(5);
   static int s_consecutiveStalledPresents = 0;
   static PresentClock::time_point s_lastStallRebuild{};
+  // Moderate presentation jobs (30-250 ms) explain steady low frame rates, such as a
+  // 50 ms cadence, that never reach the stall threshold. Rate-limited to one per second.
+  if (totalDuration >= std::chrono::milliseconds(30) && totalDuration < kSurfaceStallThreshold) {
+    static PresentClock::time_point s_lastSlowPresentLog{};
+    const auto now = PresentClock::now();
+    if (now - s_lastSlowPresentLog >= std::chrono::seconds(1)) {
+      s_lastSlowPresentLog = now;
+      Log.info("Slow presentation job {:.1f} ms (surface lock {:.1f}, acquire {:.1f}, encode {:.1f}, finish {:.1f}, "
+               "submit {:.1f}, schedule wait {:.1f}, present {:.1f})",
+               std::chrono::duration<double, std::milli>(totalDuration).count(),
+               std::chrono::duration<double, std::milli>(surfaceLockDuration).count(),
+               std::chrono::duration<double, std::milli>(acquireDuration).count(),
+               std::chrono::duration<double, std::milli>(encodeDuration).count(),
+               std::chrono::duration<double, std::milli>(finishDuration).count(),
+               std::chrono::duration<double, std::milli>(submitDuration).count(),
+               std::chrono::duration<double, std::milli>(scheduleWaitDuration).count(),
+               std::chrono::duration<double, std::milli>(presentDuration).count());
+    }
+  }
   if (totalDuration >= kSurfaceStallThreshold) {
     const auto surfaceWorkDuration =
         acquireDuration + encodeDuration + finishDuration + submitDuration + presentDuration;

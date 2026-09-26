@@ -605,9 +605,9 @@ void GXCopyTex(void* dest, GXBool clear) {
   // Mario Kart Wii menus copy the same destinations every frame while baking
   // different thumbnails, so a long run of copies does not prove a redraw
   // either (a 120-frame "streaming" exemption reproduced black thumbnails).
-  // Exception: a race copy whose target was also produced last frame is redrawn next
-  // frame, so it may skip an unready draw instead of stalling (see set_race_copy_skip).
-  const bool recurringRaceCopy = handle.revision > 0 && currentFrame - handle.lastProducedFrame <= 1 &&
+  // Exception: a race copy whose target was produced within the last few frames recurs
+  // (some effects refresh every other frame), so it may skip an unready draw instead of stalling (see set_race_copy_skip).
+  const bool recurringRaceCopy = handle.revision > 0 && currentFrame - handle.lastProducedFrame <= 4 &&
                                  aurora::gfx::race_copy_skip_active();
   const bool persistentCopy = !recurringRaceCopy;
   g_textureCopies.fetch_add(1, std::memory_order_relaxed);
