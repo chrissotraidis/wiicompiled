@@ -6,8 +6,8 @@ namespace NetworkHle {
 
 // Explicit developer launch diagnostic: metadata only, never tokens, payloads,
 // profile IDs, addresses or serials. Does not alter DNS or socket routing.
-static void TraceWfcTcp(const char* operation, uint32_t fd, WiiSocket* socket,
-                        const char* data, int bytes, int error) {
+void TraceWfcTcp(const char* operation, uint32_t fd, WiiSocket* socket,
+                 const char* data, int bytes, int error) {
     const char* enabled = std::getenv("KARTPAD_WFC_TRACE");
     if (!enabled || std::strcmp(enabled, "1") != 0 || socket->type != SOCK_STREAM ||
         (socket->peerPort != 29900 && socket->peerPort != 29901 && socket->peerPort != 28910)) return;

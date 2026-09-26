@@ -250,6 +250,8 @@ void WritePollResults(uint32_t outAddress,
 
 // network_socket.cpp
 void CleanupAllWiiSockets();
+void TraceWfcTcp(const char* operation, uint32_t fd, WiiSocket* socket,
+                 const char* data, int bytes, int error);
 sockaddr_in ReadWiiSockAddr(uint32_t addr);
 int32_t HandleIpTopIoctl(uint32_t cmd, uint32_t inBuf, uint32_t inLen, uint32_t outBuf,
                          uint32_t outLen);
