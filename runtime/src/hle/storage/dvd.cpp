@@ -407,9 +407,16 @@ static bool ResolveAbsRead(uint32_t offset, uint32_t length, AbsReadResult& out)
 
 // A course archive read marks the start of a race load. The renderer records the
 // pipelines used while that course is active and compiles them during its next load
-// (vanilla Race/Course/*.szs; Retro Rewind .../Tracks/*.szs). Other files are ignored.
+// (vanilla Race/Course/*.szs; Retro Rewind .../Tracks/*.szs).
+//
+// Menu archives (Scene/UI/*.szs) get the same treatment. Menus bake thumbnails
+// with texture copies, and every draw feeding a copy must wait for its shader, so
+// first-use compilation stalls menus most visibly. The language suffix is removed
+// (MenuSingle_E.szs and MenuSingle.szs are one scene). Race and Font archives
+// load during races and must not end the course recording. Other files are ignored.
 static void NotePipelineSceneForRead(const DVDFileEntry& entry) {
     static std::string lastPath;
+    static uint64_t lastMenuScene = 0;
     if (entry.dvdPath == lastPath) {
         return;
     }
@@ -427,13 +434,35 @@ static void NotePipelineSceneForRead(const DVDFileEntry& entry) {
     const size_t dirSlash = lower.rfind('/', nameSlash - 1);
     const std::string dir = lower.substr(dirSlash == std::string::npos ? 0 : dirSlash + 1,
                                          nameSlash - (dirSlash == std::string::npos ? 0 : dirSlash + 1));
+    uint64_t key = 1469598103934665603ull;  // FNV-1a; stable across launches and builds
+    const auto hash = [&key](const std::string& text) {
+        for (const unsigned char c : text) {
+            key = (key ^ c) * 1099511628211ull;
+        }
+    };
+    if (dir == "ui") {
+        std::string name = lower.substr(nameSlash + 1, lower.size() - nameSlash - 5);
+        if (name.size() > 2 && name[name.size() - 2] == '_') {
+            name.resize(name.size() - 2);
+        }
+        if (name.empty() || name.rfind("race", 0) == 0 || name.rfind("font", 0) == 0) {
+            return;
+        }
+        hash("scene/ui/" + name);
+        key = key == 0 ? 1 : key;
+        // The localized and shared archives of one menu load back to back.
+        if (key == lastMenuScene) {
+            return;
+        }
+        lastMenuScene = key;
+        aurora_set_pipeline_scene(key);
+        return;
+    }
     if (dir != "course" && dir != "tracks") {
         return;
     }
-    uint64_t key = 1469598103934665603ull;  // FNV-1a; stable across launches and builds
-    for (const unsigned char c : lower) {
-        key = (key ^ c) * 1099511628211ull;
-    }
+    lastMenuScene = 0;
+    hash(lower);
     aurora_set_pipeline_scene(key == 0 ? 1 : key);
 }
 
@@ -1159,4 +1188,3 @@ PPC_NATIVE_OVERRIDE(801643FC, DVDCheckDevice_801643FC, int32_t, (), ());
 
 extern "C" int32_t DVDLowClearCoverInterrupt_80166964(uint32_t cb) { return 1; }
 PPC_NATIVE_OVERRIDE(80166964, DVDLowClearCoverInterrupt_80166964, int32_t, (uint32_t cb), (cb));
-
