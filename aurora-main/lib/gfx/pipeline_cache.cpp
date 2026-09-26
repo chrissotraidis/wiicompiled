@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cstdlib>
 #include <condition_variable>
 #include <deque>
 #include <filesystem>
@@ -92,6 +93,8 @@ constexpr size_t MaxWarmPipelineBuilds = 4096;
 static bool g_prewarmWarmOnly = false;       // guarded by the loading thread
 static size_t prewarmLoaded = 0;
 static bool g_warmPassRan = false;
+// Bundled seed version: a new seed adds recipes, so it warms once more on the same OS.
+static int g_seedVersion = 0;
 static absl::flat_hash_set<PipelineRef> g_retainDemanded;  // guarded by g_pipelineMutex
 
 static std::string current_os_build() {
@@ -111,7 +114,8 @@ static std::filesystem::path warm_marker_path() {
 
 static std::string warm_marker_value() {
   const auto os = current_os_build();
-  return os.empty() ? std::string{} : os + ":" + std::to_string(gx::GXPipelineConfigVersion);
+  return os.empty() ? std::string{}
+                    : os + ":" + std::to_string(gx::GXPipelineConfigVersion) + ":seed" + std::to_string(g_seedVersion);
 }
 
 static bool warm_pass_needed() {
@@ -755,6 +759,11 @@ static void seed_pipeline_cache() {
   if (seedDb == nullptr) {
     return;
   }
+  sqlite::exec(seedDb, "SELECT MAX(version) FROM pipeline_seed_metadata", [](int count, char** values, char**) {
+    if (count > 0 && values[0] != nullptr) {
+      g_seedVersion = std::atoi(values[0]);
+    }
+  });
 
   sqlite3_stmt* seedStmt = nullptr;
   auto closeSeed = [&] {
