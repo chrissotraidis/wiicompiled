@@ -16,6 +16,15 @@
 #include <SDL3/SDL_gamepad.h>
 #include <dolphin/pad.h>
 
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#endif
+#if defined(__APPLE__) && TARGET_OS_SIMULATOR
+#include <chrono>
+#include <string>
+#include <vector>
+#endif
+
 namespace {
 
 std::atomic<bool> g_rumbleEnabled{true};
@@ -88,6 +97,65 @@ void WritePadStatus(uint32_t base, const PADStatus& status) {
     uint8_t* dst = Memory::GetPointer(base, guestStatus.size());
     std::memcpy(dst, guestStatus.data(), guestStatus.size());
 }
+
+#if defined(__APPLE__) && TARGET_OS_SIMULATOR
+// Simulator-only scripted input for automated checks; never compiled into device builds.
+// KARTPAD_SIM_INPUT="A@5000,DOWN@7000,A@7500+20000" presses a GameCube button on port 0 at a
+// time in ms after the first PAD read, held 150 ms or for the given +duration. Pass it with
+// SIMCTL_CHILD_KARTPAD_SIM_INPUT=... xcrun simctl launch.
+struct SimPress {
+    uint16_t button;
+    uint64_t at;
+    uint64_t until;
+};
+
+uint16_t SimButton(const std::string& name) {
+    static const std::pair<const char*, uint16_t> kNames[] = {
+        {"A", PAD_BUTTON_A}, {"B", PAD_BUTTON_B}, {"X", PAD_BUTTON_X}, {"Y", PAD_BUTTON_Y},
+        {"START", PAD_BUTTON_START}, {"Z", PAD_TRIGGER_Z}, {"L", PAD_TRIGGER_L}, {"R", PAD_TRIGGER_R},
+        {"UP", PAD_BUTTON_UP}, {"DOWN", PAD_BUTTON_DOWN}, {"LEFT", PAD_BUTTON_LEFT}, {"RIGHT", PAD_BUTTON_RIGHT},
+    };
+    for (const auto& [key, value] : kNames) {
+        if (name == key) return value;
+    }
+    return 0;
+}
+
+std::vector<SimPress> ParseSimInput() {
+    std::vector<SimPress> presses;
+    const char* script = std::getenv("KARTPAD_SIM_INPUT");
+    if (script == nullptr) return presses;
+    std::string all(script);
+    size_t start = 0;
+    while (start < all.size()) {
+        size_t end = all.find(',', start);
+        if (end == std::string::npos) end = all.size();
+        const std::string item = all.substr(start, end - start);
+        start = end + 1;
+        const size_t atPos = item.find('@');
+        if (atPos == std::string::npos) continue;
+        const uint16_t button = SimButton(item.substr(0, atPos));
+        const size_t plus = item.find('+', atPos);
+        const uint64_t at = std::strtoull(item.c_str() + atPos + 1, nullptr, 10);
+        const uint64_t hold = plus == std::string::npos ? 150 : std::strtoull(item.c_str() + plus + 1, nullptr, 10);
+        if (button != 0) presses.push_back({button, at, at + hold});
+    }
+    std::fprintf(stderr, "[input] simulator script with %zu presses\n", presses.size());
+    return presses;
+}
+
+void ApplySimInput(PADStatus& status) {
+    static const std::vector<SimPress> presses = ParseSimInput();
+    if (presses.empty()) return;
+    static const auto origin = std::chrono::steady_clock::now();
+    const auto now = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - origin).count());
+    for (const auto& press : presses) {
+        if (now >= press.at && now < press.until) status.button |= press.button;
+    }
+    status.err = PAD_ERR_NONE;
+}
+#endif
 
 void ConfigureDefaultKeyboardPort() {
     constexpr std::array buttonBindings{
@@ -162,6 +230,9 @@ extern "C" uint32_t PAD__Read_HLE(uint32_t statusPtr)
 
     FillTriggersHeldByButtons(statuses);
     InputBindings::Apply(statuses);
+#if defined(__APPLE__) && TARGET_OS_SIMULATOR
+    ApplySimInput(statuses[0]);
+#endif
 
     try {
         for (uint32_t i = 0; i < PAD_CHANMAX; ++i) {
