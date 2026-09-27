@@ -293,8 +293,10 @@ inline double PpcLoadPairPsqFloatFastInline(uint32_t addr)
     {
         return PpcLoadPairPsqFloatFromHostInline(host);
     }
+    // Checked-access hosts (16 KiB pages: every Apple device) always land here. Memory::Read64
+    // still tries the page-table fast path before the locked deferred-read slow path.
     return PpcBitCastToDoubleInline(
-        PpcLoadPairPsqFloatBitsPackedInline(MemoryInline::Read64Slow(addr)));
+        PpcLoadPairPsqFloatBitsPackedInline(Memory::Read64(addr)));
 }
 
 inline double PpcLoadSinglePsqFloatFastInline(uint32_t addr)
@@ -349,7 +351,7 @@ inline void PpcStorePairPsqFloatFastInline(uint32_t addr, double value)
         PpcStorePairPsqFloatToHostInline(host, value);
         return;
     }
-    MemoryInline::Write64Slow(
+    Memory::Write64(
         addr, PpcStorePairPsqFloatBitsPackedInline(PpcBitCastToU64Inline(value)));
 }
 
