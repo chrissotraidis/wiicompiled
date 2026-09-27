@@ -79,6 +79,7 @@ static wgpu::AdapterInfo g_adapterInfo;
 static wgpu::SurfaceCapabilities g_surfaceCapabilities;
 bool g_bcTexturesSupported;
 bool g_adapterIsQualcomm;
+int g_adapterAdrenoModel;
 // Written by Dawn's device-loss callback and consumed at ordered frame boundaries. Keep the
 // callback free of logging, allocation, teardown and renderer state mutation.
 static std::atomic_bool g_deviceLost{false};
@@ -666,6 +667,12 @@ bool initialize(AuroraBackend auroraBackend) {
     };
     g_adapterIsQualcomm = g_adapterInfo.vendorID == 0x5143 || contains(g_adapterInfo.device, "Adreno") ||
                           contains(g_adapterInfo.vendor, "Qualcomm") || contains(g_adapterInfo.description, "Adreno");
+    g_adapterAdrenoModel = 0;
+    for (const wgpu::StringView text : {g_adapterInfo.device, g_adapterInfo.description}) {
+      if (!text.IsUndefined() && g_adapterAdrenoModel == 0) {
+        g_adapterAdrenoModel = adreno_model_from_name(std::string_view(text.data, text.length));
+      }
+    }
   }
   const auto backendName = magic_enum::enum_name(g_backendType);
   auto adapterName = g_adapterInfo.device;

@@ -126,13 +126,17 @@ int active_mode() noexcept {
   static const int mode = [] {
     const int value = override_mode();
     const bool qualcomm = webgpu::g_adapterIsQualcomm;
-    // Off unless explicitly enabled (Android: Character Graphics Test setting).
-    // 1 = PNMTXIDX-direct (skinned character) draws; 2 = every triangle draw, for the
-    // Adreno 8xx track/wall texture corruption that remains after mode 1 (#102).
-    Log.info("KartPadPNMTX repack mode={} qualcomm={} enabled={}",
-             value < 0 ? "default_off" : (value == 2 ? "all_draws" : (value == 1 ? "on" : "off")), qualcomm,
-             value >= 1);
-    return value < 0 ? 0 : value;
+    // 1 = PNMTXIDX-direct (skinned character) draws; 2 = every triangle draw.
+    // Without an explicit choice (Android "Automatic"), Adreno 8xx gets mode 2: testers on
+    // Adreno 840 (Z Fold 8 #102/#329, OnePlus 15 #316) confirmed it fixes both characters and
+    // track textures. Everything else stays off by default.
+    const int adreno = webgpu::g_adapterAdrenoModel;
+    const bool automatic = value < 0;
+    const int result = automatic ? ((qualcomm && adreno >= 800 && adreno < 1000) ? 2 : 0) : value;
+    Log.info("KartPadPNMTX repack mode={} source={} qualcomm={} adreno={} enabled={}",
+             result == 2 ? "all_draws" : (result == 1 ? "on" : "off"), automatic ? "auto" : "override", qualcomm,
+             adreno, result >= 1);
+    return result;
   }();
   return mode;
 }
