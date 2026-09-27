@@ -85,30 +85,6 @@ static size_t g_maxBackgroundPipelineWorkers = 1;
 // pipeline costs about 0.9 MB on iPad, and retaining ~1300 pushed an iPad session to
 // 2.4 GB and 20 FPS on the cup-select screen, so the retained set stays bounded.
 constexpr size_t RetainedPrewarmPipelineBuilds = 512;
-// Devices under 6 GB (A10X/A12 iPads, 4 GB iPhones) keep the earlier launch prewarm of 128
-// retained pipelines and skip the full warm-up pass: holding 512 (~460 MB) and compiling every
-// recorded recipe on three or four cores slowed their menus to 10-20 FPS (#135), and the pass
-// restarts on every launch until it finishes once.
-constexpr size_t LowMemoryRetainedPrewarmPipelineBuilds = 128;
-static bool low_memory_device() {
-  // Test override: KARTPAD_PREWARM_LOW_MEMORY=1 takes the under-6 GB path on any device.
-  if (const char* value = std::getenv("KARTPAD_PREWARM_LOW_MEMORY"); value != nullptr && value[0] == '1') {
-    return true;
-  }
-#if defined(__APPLE__)
-  uint64_t memory = 0;
-  size_t length = sizeof(memory);
-  if (sysctlbyname("hw.memsize", &memory, &length, nullptr, 0) == 0) {
-    return memory < (6ull << 30);
-  }
-#endif
-  return false;
-}
-static size_t retained_prewarm_pipeline_builds() {
-  static const size_t count =
-      low_memory_device() ? LowMemoryRetainedPrewarmPipelineBuilds : RetainedPrewarmPipelineBuilds;
-  return count;
-}
 // An OS update empties the system shader cache; afterwards a recipe first needed in
 // a race costs 200-300 ms on iPad (measured on iPadOS 26.7) and texture copies must
 // wait for it, while a cached one takes about 8 ms. Once per OS version, compile the
@@ -1422,7 +1398,7 @@ static void load_pipeline_cache_entries(ShaderType type, uint32_t configVersion,
       }
     }
 
-    g_prewarmWarmOnly = prewarmLoaded++ >= retained_prewarm_pipeline_builds();
+    g_prewarmWarmOnly = prewarmLoaded++ >= RetainedPrewarmPipelineBuilds;
     find_pipeline_impl(type, config, [=] { return create(config); }, false, firstFrameUsed);
     g_prewarmWarmOnly = false;
     --prewarmRemaining;
@@ -1445,10 +1421,8 @@ static void load_pipeline_cache() {
   if (g_pipelineCacheBroken) {
     return;
   }
-  g_warmPassRan = !low_memory_device() && warm_pass_needed();
-  size_t prewarmRemaining = g_warmPassRan ? MaxWarmPipelineBuilds : retained_prewarm_pipeline_builds();
-  Log.info("Pipeline prewarm plan: retain {}, warm-up pass {}{}", retained_prewarm_pipeline_builds(),
-           g_warmPassRan ? "yes" : "no", low_memory_device() ? " (under 6 GB)" : "");
+  g_warmPassRan = warm_pass_needed();
+  size_t prewarmRemaining = g_warmPassRan ? MaxWarmPipelineBuilds : RetainedPrewarmPipelineBuilds;
   prewarmLoaded = 0;
   load_pipeline_cache_entries<clear::PipelineConfig>(ShaderType::Clear, clear::ClearPipelineConfigVersion,
                                                      clear::create_pipeline, prewarmRemaining);
