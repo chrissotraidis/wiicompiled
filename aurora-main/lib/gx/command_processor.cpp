@@ -2152,8 +2152,12 @@ static const CachedPipelineState& resolve_pipeline_state(GXPrimitive prim, GXVtx
         static unsigned reports = 0;
         if (reports < 24) {
           ++reports;
-          Log.info("KartPadPNMTX constant lookup (all eligible) recipe={:016x} report={}/24",
-                   xxh3_hash(config, static_cast<HashType>(gfx::ShaderType::GX)), reports);
+          u32 texMtxIndices = 0;
+          for (u32 t = 0; t < 8; ++t) {
+            if (info.indexAttr.test(GX_VA_TEX0MTXIDX + t)) ++texMtxIndices;
+          }
+          Log.info("KartPadPNMTX constant lookup (all eligible) recipe={:016x} tex_mtx_indices={} report={}/24",
+                   xxh3_hash(config, static_cast<HashType>(gfx::ShaderType::GX)), texMtxIndices, reports);
         }
       }
     }
