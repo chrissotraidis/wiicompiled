@@ -8,6 +8,7 @@
 #include "fiber_manager.h"
 #include "platform/host_platform.h"
 #include "runtime_log.h"
+#include "vi_pacing.h"
 
 #include <dolphin/vi.h>
 
@@ -367,7 +368,19 @@ void AdvanceRetrace(CpuContext* ctx, Clock::time_point retraceStamp, bool servic
         g_vi.fieldOdd = !g_vi.fieldOdd;
         g_vi.currentFrameBuffer = g_vi.nextFrameBuffer;
         currentFb = g_vi.currentFrameBuffer;
-        g_vi.lastRetrace = retraceStamp;
+        {
+            const auto now = Clock::now();
+            g_vi.lastRetrace = vi_pacing::NextRetraceStamp(retraceStamp, now);
+            if (g_vi.lastRetrace != retraceStamp) {
+                static int reported = 0;
+                if (reported < 20) {
+                    ++reported;
+                    RT_LOG(RT_TAG_VI) << "dropped "
+                                      << std::chrono::duration_cast<std::chrono::milliseconds>(now - retraceStamp).count()
+                                      << " ms retrace backlog after a stall\n";
+                }
+            }
+        }
         retraceValue = g_vi.retraceCount;
         preCb = g_vi.preRetraceCallback;
         postCb = g_vi.postRetraceCallback;
