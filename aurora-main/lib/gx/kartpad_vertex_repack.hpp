@@ -18,15 +18,16 @@
 // lookup itself is unchanged.
 namespace aurora::gx::kartpad_repack {
 
-// Process-constant decision. KARTPAD_RENDERER_VERTEX_REPACK=1/0 forces it on/off;
-// on Android the debug.kartpad.vertex_repack system property (1/0) does the same
-// (settable with `adb shell setprop`); otherwise it is on for Qualcomm adapters.
+// Process-constant decision. KARTPAD_RENDERER_VERTEX_REPACK=1 repacks PNMTXIDX-direct
+// draws, 2 repacks every triangle draw, 0 or unset leaves it off; on Android the
+// debug.kartpad.vertex_repack system property does the same (`adb shell setprop`).
 bool enabled() noexcept;
+bool all_draws() noexcept;
 
 // Whether the current GX state and primitive take the repacked path.
 inline bool applies(GXPrimitive prim) noexcept {
-  return g_gxState.vtxDesc[GX_VA_PNMTXIDX] == GX_DIRECT && prim != GX_LINES && prim != GX_LINESTRIP &&
-         prim != GX_POINTS && enabled();
+  return (g_gxState.vtxDesc[GX_VA_PNMTXIDX] == GX_DIRECT || all_draws()) && prim != GX_LINES &&
+         prim != GX_LINESTRIP && prim != GX_POINTS && enabled();
 }
 
 // Rewrites a source vertex layout into the repacked layout in place; returns the new stride.

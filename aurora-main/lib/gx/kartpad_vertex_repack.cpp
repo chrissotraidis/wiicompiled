@@ -18,6 +18,7 @@ Module Log("aurora::gx::fifo");
 int parse_mode(const char* value) noexcept {
   if (value == nullptr) return -1;
   if (std::strcmp(value, "1") == 0) return 1;
+  if (std::strcmp(value, "2") == 0) return 2;
   if (std::strcmp(value, "0") == 0) return 0;
   return -1;
 }
@@ -120,19 +121,25 @@ u32 dst_size(const AttrConfig& d, u32 attr) noexcept {
 }
 } // namespace
 
-bool enabled() noexcept {
-  static const bool on = [] {
-    const int mode = override_mode();
+namespace {
+int active_mode() noexcept {
+  static const int mode = [] {
+    const int value = override_mode();
     const bool qualcomm = webgpu::g_adapterIsQualcomm;
-    // Off unless explicitly enabled (Android: Character Graphics Test setting). Untested on
-    // the affected Adreno phones, so it is not applied automatically.
-    const bool result = mode == 1;
+    // Off unless explicitly enabled (Android: Character Graphics Test setting).
+    // 1 = PNMTXIDX-direct (skinned character) draws; 2 = every triangle draw, for the
+    // Adreno 8xx track/wall texture corruption that remains after mode 1 (#102).
     Log.info("KartPadPNMTX repack mode={} qualcomm={} enabled={}",
-             mode < 0 ? "default_off" : (mode == 1 ? "on" : "off"), qualcomm, result);
-    return result;
+             value < 0 ? "default_off" : (value == 2 ? "all_draws" : (value == 1 ? "on" : "off")), qualcomm,
+             value >= 1);
+    return value < 0 ? 0 : value;
   }();
-  return on;
+  return mode;
 }
+} // namespace
+
+bool enabled() noexcept { return active_mode() >= 1; }
+bool all_draws() noexcept { return active_mode() == 2; }
 
 u8 repacked_layout(std::array<AttrConfig, MaxVtxAttr>& attrs) noexcept {
   u32 offset = 0;

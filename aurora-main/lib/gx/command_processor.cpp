@@ -2146,10 +2146,12 @@ static const CachedPipelineState& resolve_pipeline_state(GXPrimitive prim, GXVtx
       config.shaderConfig.kartpadConstantPnMtx = 1;
     }
   }
-  // Adreno workaround: PNMTXIDX-direct draws upload CPU-repacked, aligned, fully direct vertices.
+  // Adreno workaround: PNMTXIDX-direct draws (or every triangle draw in all-draws mode) upload
+  // CPU-repacked, aligned, fully direct vertices. Must match kartpad_repack::applies().
   HashType repackSourceHash = 0;
   u32 repackSourceStride = 0;
-  if (config.shaderConfig.lineMode == 0 && config.shaderConfig.attrs[GX_VA_PNMTXIDX].attrType == GX_DIRECT &&
+  if (config.shaderConfig.lineMode == 0 &&
+      (config.shaderConfig.attrs[GX_VA_PNMTXIDX].attrType == GX_DIRECT || kartpad_repack::all_draws()) &&
       kartpad_repack::enabled()) {
     repackSourceHash = xxh3_hash(config, static_cast<HashType>(gfx::ShaderType::GX));
     repackSourceStride = config.shaderConfig.vtxStride;
