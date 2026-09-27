@@ -106,6 +106,7 @@ uint64_t staging_storage_bytes(uint64_t bytes) { return bytes; }
 bool staging_has_space(const StagingSizes&) { return true; }
 void split_staging_batch() {}
 uint32_t pipeline_scene_generation() noexcept { return 0; }
+bool race_copy_skip_active() noexcept { return false; }
 } // namespace aurora::gfx
 
 namespace aurora::gfx::efb_ram {
