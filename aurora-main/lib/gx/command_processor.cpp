@@ -2049,6 +2049,9 @@ static ArrayRef<u16> offset_index_template(const CachedIndexTemplate& indexTempl
 static int kartpad_pnmtx_mode() {
   static const int mode = [] {
     const char* value = std::getenv("KARTPAD_RENDERER_CONST_PNMTX");
+    // 2 = constant (switch) matrix lookup for every eligible PNMTXIDX-direct draw, not just the
+    // two historical target recipes; used with the vertex repack for Adreno 750 invisible bodies.
+    if (value && std::strcmp(value, "2") == 0) return 2;
     if (value && std::strcmp(value, "1") == 0) return 1;
     if (value && std::strcmp(value, "0") == 0) return 0;
     return -1;
@@ -2136,14 +2139,23 @@ static const CachedPipelineState& resolve_pipeline_state(GXPrimitive prim, GXVtx
 
   PipelineConfig config{};
   populate_pipeline_config(config, prim, fmt);
-  if (kartpad_pnmtx_mode() == 1 &&
-      kartpad_pnmtx_target(xxh3_hash(config, static_cast<HashType>(gfx::ShaderType::GX)))) {
+  if (kartpad_pnmtx_mode() == 2 ||
+      (kartpad_pnmtx_mode() == 1 &&
+       kartpad_pnmtx_target(xxh3_hash(config, static_cast<HashType>(gfx::ShaderType::GX))))) {
     const auto info = build_shader_info(config.shaderConfig);
     if (config.shaderConfig.lineMode == 0 &&
         config.shaderConfig.attrs[GX_VA_PNMTXIDX].attrType == GX_DIRECT &&
         info.matrixLayout.absolutePosRegion && info.matrixLayout.postexCount == 20 &&
         info.matrixLayout.nrmCount == MaxPnMtx) {
       config.shaderConfig.kartpadConstantPnMtx = 1;
+      if (kartpad_pnmtx_mode() == 2) {
+        static unsigned reports = 0;
+        if (reports < 24) {
+          ++reports;
+          Log.info("KartPadPNMTX constant lookup (all eligible) recipe={:016x} report={}/24",
+                   xxh3_hash(config, static_cast<HashType>(gfx::ShaderType::GX)), reports);
+        }
+      }
     }
   }
   // Adreno workaround: PNMTXIDX-direct draws (or every triangle draw in all-draws mode) upload
