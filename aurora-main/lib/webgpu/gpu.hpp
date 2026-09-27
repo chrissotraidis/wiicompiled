@@ -7,6 +7,7 @@
 
 #include <array>
 #include <cstdint>
+#include <string_view>
 
 struct SDL_Window;
 
@@ -60,6 +61,18 @@ extern wgpu::Instance g_instance;
 extern bool g_bcTexturesSupported;
 // Qualcomm/Adreno adapter; selects the KartPad vertex repack workaround by default.
 extern bool g_adapterIsQualcomm;
+extern int g_adapterAdrenoModel;
+
+// "Adreno (TM) 840" -> 840; 0 when the name has no Adreno model number.
+inline int adreno_model_from_name(std::string_view name) noexcept {
+  const auto at = name.find("Adreno");
+  if (at == std::string_view::npos) return 0;
+  size_t i = at + 6;
+  while (i < name.size() && (name[i] < '0' || name[i] > '9')) ++i;
+  int model = 0;
+  while (i < name.size() && name[i] >= '0' && name[i] <= '9' && model < 100000) model = model * 10 + (name[i++] - '0');
+  return model;
+}
 
 bool initialize(AuroraBackend backend);
 void shutdown();
