@@ -163,6 +163,20 @@ u8 repacked_layout(std::array<AttrConfig, MaxVtxAttr>& attrs) noexcept {
 void repack_with_layout(const std::array<AttrConfig, MaxVtxAttr>& src, u32 srcStride,
                         const std::array<AttrConfig, MaxVtxAttr>& dst, u32 dstStride, const u8* vertices,
                         u16 count, const std::array<AttrArray, MaxVtxAttr>& arrays, std::vector<u8>& out) {
+  // Already-repacked layouts (every attribute direct, same type, count and offset) decode to the
+  // same bytes, so copy them. Common in all-draws mode (#316), where it saves a per-component decode.
+  bool identical = srcStride == dstStride;
+  for (u32 attr = GX_VA_PNMTXIDX; identical && attr <= GX_VA_TEX7; ++attr) {
+    const auto& s = src[attr];
+    const auto& d = dst[attr];
+    if (s.attrType == GX_NONE) continue;
+    identical = s.attrType == GX_DIRECT && d.attrType == GX_DIRECT && s.compType == d.compType &&
+                s.cnt == d.cnt && s.offset == d.offset && (s.compType == GX_F32 || is_color_attr(attr));
+  }
+  if (identical) {
+    out.assign(vertices, vertices + static_cast<size_t>(count) * dstStride);
+    return;
+  }
   out.assign(static_cast<size_t>(count) * dstStride, 0);
   for (u32 v = 0; v < count; ++v) {
     const u8* in = vertices + static_cast<size_t>(v) * srcStride;

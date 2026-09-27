@@ -140,3 +140,51 @@ TEST(KartPadVertexRepack, Index16Nbt3LittleEndianColorsAndOutOfRange) {
   EXPECT_EQ(be_float(out, 64 + 4), 0.0f);
   EXPECT_EQ(be_float(out, 64 + 16), 1.0f);
 }
+
+// All-draws mode (#316): a layout that is already direct, aligned f32 plus RGBA8 is copied as is,
+// and the copy must equal what the per-component decode produces.
+TEST(KartPadVertexRepack, AlreadyRepackedLayoutIsCopiedUnchanged) {
+  std::array<AttrConfig, MaxVtxAttr> src{};
+  src[GX_VA_POS] = attr(GX_DIRECT, 3, GX_F32, 0);
+  src[GX_VA_CLR0] = attr(GX_DIRECT, 1, GX_RGBA8, 12);
+  src[GX_VA_TEX0] = attr(GX_DIRECT, 2, GX_F32, 16);
+  auto dst = src;
+  const u8 stride = kartpad_repack::repacked_layout(dst);
+  ASSERT_EQ(stride, 24);
+
+  u8 vertices[48]{};
+  const float values[] = {1.5f, -2.25f, 1024.0f, 0.0f, 0.75f, -0.5f};
+  for (u32 v = 0; v < 2; ++v) {
+    u8* p = vertices + v * 24;
+    put_be_float(p, values[0] + v);
+    put_be_float(p + 4, values[1]);
+    put_be_float(p + 8, values[2]);
+    p[12] = 0x10, p[13] = 0x20, p[14] = 0x30, p[15] = u8(0x40 + v);
+    put_be_float(p + 16, values[4]);
+    put_be_float(p + 20, values[5]);
+  }
+  std::array<AttrArray, MaxVtxAttr> arrays{};
+  std::vector<u8> out;
+  kartpad_repack::repack_with_layout(src, 24, dst, stride, vertices, 2, arrays, out);
+  ASSERT_EQ(out.size(), sizeof(vertices));
+  EXPECT_EQ(std::memcmp(out.data(), vertices, sizeof(vertices)), 0);
+  EXPECT_EQ(be_float(out, 24), 2.5f);
+  EXPECT_EQ(out[24 + 15], 0x41);
+}
+
+// A direct layout that still needs conversion (s16 positions) keeps the full decode.
+TEST(KartPadVertexRepack, DirectNonFloatLayoutStillDecodes) {
+  std::array<AttrConfig, MaxVtxAttr> src{};
+  src[GX_VA_POS] = attr(GX_DIRECT, 3, GX_S16, 0, 0, 8);
+  auto dst = src;
+  const u8 stride = kartpad_repack::repacked_layout(dst);
+  ASSERT_EQ(stride, 12);
+  const u8 vertices[6] = {0x01, 0x80, 0xFF, 0x00, 0x00, 0x40};
+  std::array<AttrArray, MaxVtxAttr> arrays{};
+  std::vector<u8> out;
+  kartpad_repack::repack_with_layout(src, 6, dst, stride, vertices, 1, arrays, out);
+  ASSERT_EQ(out.size(), 12u);
+  EXPECT_EQ(be_float(out, 0), 1.5f);
+  EXPECT_EQ(be_float(out, 4), -1.0f);
+  EXPECT_EQ(be_float(out, 8), 0.25f);
+}
