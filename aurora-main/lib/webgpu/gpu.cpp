@@ -734,6 +734,8 @@ bool initialize(AuroraBackend auroraBackend) {
         requiredLimits.maxTextureDimension3D, requiredLimits.maxTextureArrayLayers,
         requiredLimits.maxDynamicStorageBuffersPerPipelineLayout, requiredLimits.maxStorageBuffersPerShaderStage,
         requiredLimits.minUniformBufferOffsetAlignment, requiredLimits.minStorageBufferOffsetAlignment);
+    // PowerVR drivers report the Vulkan floor here (14 with the relaxed Dawn check, #304).
+    Log.info("Adapter maxInterStageShaderVariables: {}", supportedLimits.maxInterStageShaderVariables);
     std::vector<wgpu::FeatureName> requiredFeatures;
     bool implicitDeviceSynchronizationSupported = false;
     wgpu::SupportedFeatures supportedFeatures;
