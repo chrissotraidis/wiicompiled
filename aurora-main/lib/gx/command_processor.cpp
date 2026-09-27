@@ -2160,6 +2160,20 @@ static const CachedPipelineState& resolve_pipeline_state(GXPrimitive prim, GXVtx
                    xxh3_hash(config, static_cast<HashType>(gfx::ShaderType::GX)), texMtxIndices, reports);
         }
       }
+    } else if (kartpad_pnmtx_mode() == 2 && config.shaderConfig.lineMode == 0 &&
+               config.shaderConfig.attrs[GX_VA_PNMTXIDX].attrType == GX_DIRECT) {
+      // Skinned draws that keep the dynamic lookup. On Adreno 750 (#193) only the unskinned
+      // eyes and mustache draw, so a body recipe that lands here would explain it.
+      static std::array<HashType, 24> skipped{};
+      static size_t skippedCount = 0;
+      const HashType recipe = xxh3_hash(config, static_cast<HashType>(gfx::ShaderType::GX));
+      if (skippedCount < skipped.size() &&
+          std::find(skipped.begin(), skipped.begin() + skippedCount, recipe) == skipped.begin() + skippedCount) {
+        skipped[skippedCount++] = recipe;
+        Log.info("KartPadPNMTX constant lookup skipped recipe={:016x} abs_pos={} postex={} nrm={} report={}/24",
+                 recipe, info.matrixLayout.absolutePosRegion, info.matrixLayout.postexCount,
+                 info.matrixLayout.nrmCount, skippedCount);
+      }
     }
   }
   // Adreno workaround: PNMTXIDX-direct draws (or every triangle draw in all-draws mode) upload
