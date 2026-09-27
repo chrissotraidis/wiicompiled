@@ -84,6 +84,7 @@ uint32_t g_mergedDrawCallCount = 0;
 namespace aurora::webgpu {
 GraphicsConfig g_graphicsConfig{};
 bool g_adapterIsQualcomm = false;
+int g_adapterAdrenoModel = 0;
 } // namespace aurora::webgpu
 
 // --- GXState (the real instance -- tests validate this) ---

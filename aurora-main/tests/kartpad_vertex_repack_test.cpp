@@ -188,3 +188,11 @@ TEST(KartPadVertexRepack, DirectNonFloatLayoutStillDecodes) {
   EXPECT_EQ(be_float(out, 4), -1.0f);
   EXPECT_EQ(be_float(out, 8), 0.25f);
 }
+
+TEST(KartPadVertexRepack, AdrenoModelParsing) {
+  EXPECT_EQ(aurora::webgpu::adreno_model_from_name("Adreno (TM) 840"), 840);
+  EXPECT_EQ(aurora::webgpu::adreno_model_from_name("Adreno (TM) 750"), 750);
+  EXPECT_EQ(aurora::webgpu::adreno_model_from_name("Adreno (TM) 610"), 610);
+  EXPECT_EQ(aurora::webgpu::adreno_model_from_name("Mali-G715"), 0);
+  EXPECT_EQ(aurora::webgpu::adreno_model_from_name("Adreno"), 0);
+}
