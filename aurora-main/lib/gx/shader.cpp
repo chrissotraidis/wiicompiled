@@ -24,11 +24,12 @@ static Module Log("aurora::gfx::gx");
 
 static std::string kartpad_const_matrix_switch(std::string_view arrayName,
                                                std::string_view localName,
-                                               std::string_view vectorExpression, u32 count) {
+                                               std::string_view vectorExpression, u32 count,
+                                               std::string_view indexExpression = "in_pnmtxidx") {
   std::string result = fmt::format(
       "\n    var {0} = vec3f(0.0);"
-      "\n    switch (in_pnmtxidx) {{",
-      localName);
+      "\n    switch ({1}) {{",
+      localName, indexExpression);
   for (u32 slot = 0; slot < count; ++slot) {
     result += fmt::format("\n      case {0}u: {{ {1} = {2} * ubuf.{3}[{0}u]; }}", slot, localName,
                           vectorExpression, arrayName);
@@ -1229,7 +1230,15 @@ wgpu::ShaderModule build_shader(const ShaderConfig& config) noexcept {
     }
     if (tcg.type == GX_TG_MTX2x4 || tcg.type == GX_TG_MTX3x4) {
       if (info.indexAttr.test(GX_VA_TEX0MTXIDX + i)) {
-        vtxXfrAttrs += fmt::format("\n    var tc{0}_tmp = tc{0} * ubuf.postex_mtx[in_texmtxidx{0} / 3u];", i);
+        if (constantPnMtx) {
+          // Adreno 750: a per-vertex texture matrix index has the same dynamic-index problem as the
+          // position matrix index, so route it through the same literal switch (#104/#193/#211).
+          vtxXfrAttrs += kartpad_const_matrix_switch("postex_mtx"sv, fmt::format("tc{}_tmp", i),
+                                                     fmt::format("tc{}", i), info.matrixLayout.postexCount,
+                                                     fmt::format("in_texmtxidx{} / 3u", i));
+        } else {
+          vtxXfrAttrs += fmt::format("\n    var tc{0}_tmp = tc{0} * ubuf.postex_mtx[in_texmtxidx{0} / 3u];", i);
+        }
       } else if (tcg.mtx == GX_IDENTITY) {
         vtxXfrAttrs += fmt::format("\n    var tc{0}_tmp = tc{0}.xyz;", i);
       } else {
