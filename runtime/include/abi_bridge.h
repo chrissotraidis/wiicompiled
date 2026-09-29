@@ -320,7 +320,7 @@ struct IndirectResolvedDispatchMemoEntry {
 };
 // Game pack (include/game_pack.h): one copy, in the app.
 #if defined(MKW_GAME_PACK_MODULE)
-extern thread_local IndirectResolvedDispatchMemoEntry
+extern __thread IndirectResolvedDispatchMemoEntry
     g_indirectResolvedDispatchMemo[kIndirectDispatchCacheEntries];
 #else
 inline thread_local IndirectResolvedDispatchMemoEntry
@@ -333,7 +333,7 @@ struct IndirectRawDispatchMemoEntry {
     const RawDispatchRecord* record;
 };
 #if defined(MKW_GAME_PACK_MODULE)
-extern thread_local IndirectRawDispatchMemoEntry
+extern __thread IndirectRawDispatchMemoEntry
     g_indirectRawDispatchMemo[kIndirectDispatchCacheEntries];
 #else
 inline thread_local IndirectRawDispatchMemoEntry

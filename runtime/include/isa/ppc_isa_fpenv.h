@@ -27,7 +27,7 @@ inline constexpr uint32_t kMkwFpControlFlushToZeroBits = (1u << 24); // FZ
 
 // Game pack (include/game_pack.h): one copy, in the app.
 #if defined(MKW_GAME_PACK_MODULE)
-extern thread_local bool g_mkwHostNiActive;
+extern __thread bool g_mkwHostNiActive;
 #else
 inline thread_local bool g_mkwHostNiActive = false;
 #endif
@@ -37,7 +37,7 @@ inline thread_local bool g_mkwHostNiActive = false;
 // needs no branch. Every writer of g_mkwHostNiActive must write this beside it in agreement.
 inline constexpr double kMkwNiFlushThreshold = 0x1p-126;  // 0x3810000000000000
 #if defined(MKW_GAME_PACK_MODULE)
-extern thread_local double g_mkwNiFlushThreshold;
+extern __thread double g_mkwNiFlushThreshold;
 #else
 inline thread_local double g_mkwNiFlushThreshold = 0.0;
 #endif
