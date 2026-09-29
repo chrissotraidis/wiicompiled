@@ -81,6 +81,14 @@ target_link_libraries(mkw_runtime_common PRIVATE mkw::pugixml mkw::toml11 mkw::c
 if(ANDROID)
     target_link_libraries(mkw_runtime_common PRIVATE mkw::libco)
 endif()
+if(MKW_GAME_PACK STREQUAL "APP")
+    # Generated constants come from the pack (game_pack/shim), and the runtime's
+    # API stays visible so the pack's translated code can bind to it.
+    target_include_directories(mkw_runtime_common BEFORE PRIVATE "${MKW_RUNTIME_SOURCE_DIR}/game_pack/shim")
+    target_compile_definitions(mkw_runtime_common PRIVATE
+        MKW_GAME_PACK_APP=1 "KARTPAD_APP_VERSION=\"${KARTPAD_APP_VERSION}\"")
+    target_compile_options(mkw_runtime_common PRIVATE -fvisibility=default)
+endif()
 
 target_link_libraries(mkw_runtime_common PRIVATE "-framework Foundation")
 if(MKW_CPPWINRT_INCLUDE_DIR)
@@ -137,6 +145,7 @@ target_compile_features(mkw_cpu_baseline PRIVATE cxx_std_17)
 set_target_properties(mkw_cpu_baseline PROPERTIES UNITY_BUILD OFF)
 target_compile_options(mkw_cpu_baseline PRIVATE -w)
 
+if(NOT MKW_GAME_PACK STREQUAL "APP")
 if(NOT MKW_BASE_COMMON_SHARDS)
     message(FATAL_ERROR "Translator build graph contains no shared base shards")
 endif()
@@ -170,6 +179,7 @@ if(MKW_HAVE_RETRO_REWIND)
     mkw_configure_translated_target(mkw_retro_rewind_functions)
     target_precompile_headers(mkw_retro_rewind_functions REUSE_FROM mkw_base_shared)
 endif()
+endif() # NOT MKW_GAME_PACK STREQUAL "APP"
 
 function(mkw_configure_product target)
     if(ANDROID)
@@ -195,8 +205,24 @@ function(mkw_configure_product target)
     # The dispatch-table and registration shards compile inside the product target itself and
     # include the same fat translated headers; bound them by the same pool.
     mkw_bound_translated_compiles(${target})
-    target_link_libraries(${target} PRIVATE
-        mkw_base_shared mkw::pugixml mkw::toml11 mkw::cryptopp)
+    if(TARGET mkw_base_shared)
+        target_link_libraries(${target} PRIVATE mkw_base_shared)
+    endif()
+    target_link_libraries(${target} PRIVATE mkw::pugixml mkw::toml11 mkw::cryptopp)
+    if(MKW_GAME_PACK STREQUAL "APP")
+        target_compile_options(${target} PRIVATE -fvisibility=default)
+        if(APPLE)
+            # Let the pack bind to the runtime's symbols in the executable.
+            target_link_options(${target} PRIVATE "-Wl,-export_dynamic" "-Wl,-unexported_symbol,_func_*")
+        else()
+            # Export the runtime's API to the pack, but not the native overrides
+            # named after guest addresses (func_*): the pack reaches those through
+            # the registry, and they have no business in the app's symbol table.
+            set(exports "${CMAKE_CURRENT_BINARY_DIR}/game_pack_app_exports.map")
+            file(WRITE "${exports}" "{\n  global: *;\n  local: func_*;\n};\n")
+            target_link_options(${target} PRIVATE "-Wl,--version-script=${exports}")
+        endif()
+    endif()
 
     target_link_libraries(${target} PRIVATE
         aurora::gx aurora::pad aurora::si aurora::vi aurora::mtx)
@@ -409,7 +435,9 @@ if(MKW_HAVE_RETRO_REWIND)
     if(TARGET mkw_retro_sensitive)
         target_sources(RetroRewind PRIVATE $<TARGET_OBJECTS:mkw_retro_sensitive>)
     endif()
-    target_sources(RetroRewind PRIVATE $<TARGET_OBJECTS:mkw_retro_rewind_functions>)
+    if(TARGET mkw_retro_rewind_functions)
+        target_sources(RetroRewind PRIVATE $<TARGET_OBJECTS:mkw_retro_rewind_functions>)
+    endif()
     if(MKW_RETRO_BLOB_OBJECTS)
         target_sources(RetroRewind PRIVATE ${MKW_RETRO_BLOB_OBJECTS})
     endif()
@@ -498,7 +526,9 @@ if(MKW_HAVE_RETRO_REWIND)
     if(TARGET mkw_retro_sensitive)
         target_sources(KartPadDual PRIVATE $<TARGET_OBJECTS:mkw_retro_sensitive>)
     endif()
-    target_sources(KartPadDual PRIVATE $<TARGET_OBJECTS:mkw_retro_rewind_functions>)
+    if(TARGET mkw_retro_rewind_functions)
+        target_sources(KartPadDual PRIVATE $<TARGET_OBJECTS:mkw_retro_rewind_functions>)
+    endif()
     if(MKW_RETRO_BLOB_OBJECTS)
         target_sources(KartPadDual PRIVATE ${MKW_RETRO_BLOB_OBJECTS})
     endif()

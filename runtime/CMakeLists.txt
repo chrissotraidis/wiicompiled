@@ -301,20 +301,37 @@ endif()
 # The translator emits the complete, content-addressed source graph. Consuming
 # this one manifest keeps configure independent of the 28k generated function
 # files and of optional Retro Rewind artifacts such as code.map.
-set(MKW_TRANSLATED_SHARD_MANIFEST
-    "${CMAKE_CURRENT_LIST_DIR}/../generated/build_shards/shards.cmake"
-    CACHE FILEPATH "Translator-owned aggregate shard manifest")
-if(NOT EXISTS "${MKW_TRANSLATED_SHARD_MANIFEST}")
-    message(FATAL_ERROR
-        "Missing translator-owned shard manifest: ${MKW_TRANSLATED_SHARD_MANIFEST}. "
-        "Run Translator.Cli emit-build-shards first; see translator/README.md.")
+#
+# MKW_GAME_PACK=APP builds the publishable app instead: the runtime and product
+# without any translated code, data sections or generated constants. The
+# player's game pack (game_pack/CMakeLists.txt, built by PadForge from their own
+# disc) supplies them at startup; see include/game_pack.h.
+set(MKW_GAME_PACK "OFF" CACHE STRING "OFF: link the game code; APP: publishable app that loads a game pack")
+set_property(CACHE MKW_GAME_PACK PROPERTY STRINGS OFF APP)
+if(MKW_GAME_PACK STREQUAL "APP")
+    set(KARTPAD_APP_VERSION "" CACHE STRING "App version a game pack must have been built for")
+    if(NOT KARTPAD_APP_VERSION)
+        message(FATAL_ERROR "MKW_GAME_PACK=APP requires KARTPAD_APP_VERSION")
+    endif()
+    # The published app is the dual product; the game pack decides what exists.
+    set(MKW_HAVE_RETRO_REWIND ON)
+    message(STATUS "Game pack app ${KARTPAD_APP_VERSION}: no translated code in this build")
+else()
+    set(MKW_TRANSLATED_SHARD_MANIFEST
+        "${CMAKE_CURRENT_LIST_DIR}/../generated/build_shards/shards.cmake"
+        CACHE FILEPATH "Translator-owned aggregate shard manifest")
+    if(NOT EXISTS "${MKW_TRANSLATED_SHARD_MANIFEST}")
+        message(FATAL_ERROR
+            "Missing translator-owned shard manifest: ${MKW_TRANSLATED_SHARD_MANIFEST}. "
+            "Run Translator.Cli emit-build-shards first; see translator/README.md.")
+    endif()
+    include("${MKW_TRANSLATED_SHARD_MANIFEST}")
+    set(MKW_HAVE_RETRO_REWIND ${MKW_HAVE_RETRO_REWIND_SHARDS})
+    message(STATUS
+        "Translator graph: ${MKW_SHARED_BASE_FUNCTION_COUNT}/${MKW_BASE_FUNCTION_COUNT} base functions shared; "
+        "${MKW_PROFILE_SENSITIVE_CALLER_COUNT} profile-sensitive callers; "
+        "${MKW_RETRO_REWIND_FUNCTION_COUNT} Retro Rewind functions")
 endif()
-include("${MKW_TRANSLATED_SHARD_MANIFEST}")
-set(MKW_HAVE_RETRO_REWIND ${MKW_HAVE_RETRO_REWIND_SHARDS})
-message(STATUS
-    "Translator graph: ${MKW_SHARED_BASE_FUNCTION_COUNT}/${MKW_BASE_FUNCTION_COUNT} base functions shared; "
-    "${MKW_PROFILE_SENSITIVE_CALLER_COUNT} profile-sensitive callers; "
-    "${MKW_RETRO_REWIND_FUNCTION_COUNT} Retro Rewind functions")
 
 set(MKW_RUNTIME_SOURCE_DIR "${CMAKE_CURRENT_LIST_DIR}")
 set(MKW_KARTPAD_RUNTIME_INCLUDE "" CACHE PATH

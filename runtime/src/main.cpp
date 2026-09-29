@@ -56,6 +56,7 @@
 #endif
 
 #include "abi_bridge.h"
+#include "game_pack.h"
 #include "guest_flat_memory.h"
 #include "gx_guest_write.h"
 #include "memory.h"
@@ -1374,6 +1375,9 @@ int RuntimeMain(int argc, char** argv) {
     std::string currentEntryLabel;
 
     try {
+        // Published app: the translated game code arrives as the player's own
+        // game pack. Load it before any profile, registry or guest code runs.
+        GamePack::EnsureLoaded();
         if (argc != 1) {
             throw std::invalid_argument("The game runtime does not accept command-line options; use Config.toml through the installed host.");
         }
