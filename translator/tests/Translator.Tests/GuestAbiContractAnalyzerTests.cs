@@ -6,6 +6,31 @@ namespace Translator.Tests;
 public sealed class GuestAbiContractAnalyzerTests
 {
     [Fact]
+    public void StatefulFloatingHelpersExposeTheirHiddenFpscrDependency()
+    {
+        var function = Function(
+            new IrCall("f3", "PPC_Fmuls", new[] { IrValue.Register("f1"), IrValue.Register("f2") }),
+            new IrReturn(null));
+
+        var contract = GuestAbiContractAnalyzer.Analyze(function);
+
+        Assert.True(contract.ReadsFpscrBeforeWrite);
+        Assert.True(contract.MayWriteFpscr);
+    }
+
+    [Fact]
+    public void MffsReadsFpscrWithoutClaimingToWriteIt()
+    {
+        var function = Function(
+            new IrCall("f3", "PPC_Mffs", Array.Empty<IrValue>()),
+            new IrReturn(null));
+
+        var contract = GuestAbiContractAnalyzer.Analyze(function);
+
+        Assert.True(contract.ReadsFpscrBeforeWrite);
+        Assert.False(contract.MayWriteFpscr);
+    }
+    [Fact]
     public void TracksResolvedMemoryAddressesSourcesAndDestinations()
     {
         var function = new IrFunction("resolved_contract", "entry", new[]
@@ -117,4 +142,7 @@ public sealed class GuestAbiContractAnalyzerTests
         Assert.True(contract.ReadsCtrBeforeWrite);
         Assert.Equal(byte.MaxValue, contract.CrReadBeforeWriteMask);
     }
+
+    private static IrFunction Function(params IrInstruction[] instructions) =>
+        new("helper_contract", "entry", new[] { new IrBasicBlock("entry", instructions) });
 }

@@ -1,4 +1,5 @@
 using System.Buffers.Binary;
+using Translator.Core.Disassembly;
 using Translator.Core.Mods;
 using Translator.Core.Parsing.Kamek;
 using Xunit;
@@ -7,6 +8,72 @@ namespace Translator.Tests;
 
 public sealed class ModFunctionDiscoveryTests
 {
+    [Fact]
+    public void DiscoversCallbackCompareEntriesAfterDispatchTableReloads()
+    {
+        const uint moduleBase = 0x81800000u;
+        var code = new byte[0x140];
+        WriteU32(code, 0x40, 0x813E81D4u); // lwz r9,-0x7e2c(r30)
+        WriteU32(code, 0x44, 0x281F00BFu); // adjacent callback entry
+        WriteU32(code, 0x78, 0x2C1F0004u); // nearby callback entry
+        WriteU32(code, 0xC8, 0x281F000Fu); // outside the callback island
+        WriteU32(code, 0x100, 0x813D81D4u); // wrong base register
+        WriteU32(code, 0x104, 0x281F0007u);
+        WriteU32(code, 0x108, 0x7C1F4840u); // cmplw, not immediate
+
+        var targets = ModFunctionDiscovery.DiscoverCallbackCompareEntries(
+            moduleBase, moduleBase + (uint)code.Length, code).ToArray();
+
+        Assert.Equal(new uint[] { moduleBase + 0x44, moduleBase + 0x78 }, targets);
+    }
+
+    [Fact]
+    public void PublishesCallbackCompareEntriesBeyondNominalKamekCodeSize()
+    {
+        const uint moduleBase = 0x81800000u;
+        var image = new byte[0x30];
+        WriteU32(image, 0x08, 0x813E81D4u);
+        WriteU32(image, 0x0C, 0x281F00BFu);
+        var chunk = new KamekChunk(
+            index: 0,
+            fileOffset: 0,
+            bssSize: 0,
+            codeSize: 8,
+            ctorStart: 0,
+            ctorEnd: 0,
+            chunkSize: KamekChunk.HeaderSize + 8,
+            codeBlob: new byte[8],
+            commands: []);
+
+        var starts = ModFunctionDiscovery.DiscoverKamekFunctions(chunk, moduleBase, image)
+            .ToDictionary(start => start.Address, start => start.Reason);
+
+        Assert.Equal("module callback compare entry", starts[moduleBase + 0x0C]);
+    }
+
+    [Fact]
+    public void DiscoversRecoveredBctrTargetsAsCallableModuleEntries()
+    {
+        const uint moduleBase = 0x81800000;
+        var instructions = new[]
+        {
+            PpcInstruction.Synthetic(
+                moduleBase + 0x20,
+                0x4E800420u,
+                "bctr",
+                Array.Empty<PpcOperand>(),
+                [moduleBase + 0x40, moduleBase + 0x64, 0x8024373Cu],
+                isReturn: false,
+                isCall: false,
+                isConditional: false),
+        };
+
+        var targets = ModFunctionDiscovery.DiscoverIndirectEntryPoints(
+            instructions, moduleBase, moduleBase + 0x80).ToArray();
+
+        Assert.Equal(new uint[] { moduleBase + 0x40, moduleBase + 0x64 }, targets);
+    }
+
     [Fact]
     public void DiscoversModuleDataPointersAndPrologues()
     {

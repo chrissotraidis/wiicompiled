@@ -139,11 +139,11 @@ public class FlagElisionCodeGenTests
     }
 
     [Theory]
-    [InlineData("blt", "if ((f1.d < f2.d))")]
-    [InlineData("bge", "if ((!(f1.d < f2.d)))")]
-    [InlineData("beq", "if ((f1.d == f2.d))")]
-    [InlineData("ble", "if ((!(f1.d > f2.d)))")]
-    public void FloatCompareFusionKeepsThePowerPcBitSemantics(string condition, string expected)
+    [InlineData("blt")]
+    [InlineData("bge")]
+    [InlineData("beq")]
+    [InlineData("ble")]
+    public void FloatCompareKeepsArchitecturalFpscrState(string condition)
     {
         // A cleared LT bit means "not less than", which is true for an unordered
         // compare; spelling it as >= would be wrong for NaN.
@@ -160,8 +160,8 @@ public class FlagElisionCodeGenTests
 
         var code = Emit(function);
 
-        Assert.Contains(expected, code, StringComparison.Ordinal);
-        Assert.DoesNotContain("SetCRFloatResident(", code, StringComparison.Ordinal);
+        Assert.Contains("PpcCompareStateInline(false, f1.d, f2.d)", code, StringComparison.Ordinal);
+        Assert.Contains("SetCRFloatResident(cr, 0, f1.d, f2.d)", code, StringComparison.Ordinal);
     }
 
     [Fact]

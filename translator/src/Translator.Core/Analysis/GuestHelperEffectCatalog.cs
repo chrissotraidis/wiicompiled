@@ -18,6 +18,8 @@ public sealed record GuestHelperEffect(
     bool WritesCtr = false,
     bool ReadsLr = false,
     bool WritesLr = false,
+    bool ReadsFpscr = false,
+    bool WritesFpscr = false,
     GuestCallBoundaryFlags BoundaryFlags = GuestCallBoundaryFlags.None);
 
 /// <summary>
@@ -33,6 +35,8 @@ public static class GuestHelperEffectCatalog
     private static readonly GuestHelperEffect NoEffect = new();
     private static readonly GuestHelperEffect CarryUpdate = new(ReadsXer: true, WritesXer: true);
     private static readonly GuestHelperEffect CarryRead = new(ReadsXer: true);
+    private static readonly GuestHelperEffect FpscrRead = new(ReadsFpscr: true);
+    private static readonly GuestHelperEffect FpscrReadWrite = new(ReadsFpscr: true, WritesFpscr: true);
     private static readonly GuestHelperEffect UnboundedStringLoad = new(GprWriteMask: uint.MaxValue, ReadsXer: true);
     private static readonly GuestHelperEffect UnboundedStringStore = new(GprReadMask: uint.MaxValue, ReadsXer: true);
     private static readonly GuestHelperEffect ConditionalStore =
@@ -81,15 +85,21 @@ public static class GuestHelperEffectCatalog
         "memset_zero_32", "PPC_Cntlzw", "PPC_Eciwx", "PPC_Ecowx", "PPC_Lwarx",
         "PPC_LoadHalfwordByteReverse", "PPC_LoadWordByteReverse",
         "PPC_StoreHalfwordByteReverse", "PPC_StoreWordByteReverse", "PPC_Stfiwx",
-        "PPC_Fadds", "PPC_Fdivs", "PPC_Fmadd", "PPC_Fmadds", "PPC_Fmsub", "PPC_Fmsubs",
-        "PPC_Fmuls", "PPC_Fnmadd", "PPC_Fnmadds", "PPC_Fnmsub", "PPC_Fnmsubs",
-        "PPC_Fres", "PPC_Frsqrte", "PPC_Fsel", "PPC_Fsqrt", "PPC_Fsubs",
-        "PPC_PsAbs", "PPC_PsAdd", "PPC_PsDiv", "PPC_PsMadd", "PPC_PsMadds0",
-        "PPC_PsMadds1", "PPC_PsMerge00", "PPC_PsMerge01", "PPC_PsMerge10",
-        "PPC_PsMerge11", "PPC_PsMsub", "PPC_PsMul", "PPC_PsMuls0", "PPC_PsMuls1",
-        "PPC_PsNabs", "PPC_PsNeg", "PPC_PsNmadd", "PPC_PsNmsub", "PPC_PsRes",
-        "PPC_PsRsqrte", "PPC_PsSel", "PPC_PsSub", "PPC_PsSum0", "PPC_PsSum1",
+        "PPC_Fsel", "PPC_PsAbs", "PPC_PsMerge00", "PPC_PsMerge01", "PPC_PsMerge10",
+        "PPC_PsMerge11", "PPC_PsNabs", "PPC_PsNeg", "PPC_PsSel",
         "PPC_Mftb", "PPC_Mftbu", "PPC_TrapWord"
+    };
+    private static readonly string[] FpscrReadWriteHelpers =
+    {
+        "PPC_Fadds", "PPC_FaddsNoNi", "PPC_Fsubs", "PPC_FsubsNoNi",
+        "PPC_Fmuls", "PPC_FmulsNoNi", "PPC_Fdivs", "PPC_FdivsNoNi",
+        "PPC_Fadd", "PPC_Fsub", "PPC_Fmul", "PPC_Fdiv", "PPC_Fsqrt", "PPC_Fsqrts",
+        "PPC_Fctiw", "PPC_Fctiwz", "PPC_Fres", "PPC_Frsqrte",
+        "PPC_Fmadd", "PPC_Fmsub", "PPC_Fnmadd", "PPC_Fnmsub",
+        "PPC_Fmadds", "PPC_Fmsubs", "PPC_Fnmadds", "PPC_Fnmsubs",
+        "PPC_PsAdd", "PPC_PsSub", "PPC_PsMul", "PPC_PsDiv", "PPC_PsMadd", "PPC_PsMsub",
+        "PPC_PsNmadd", "PPC_PsNmsub", "PPC_PsMadds0", "PPC_PsMadds1", "PPC_PsMuls0", "PPC_PsMuls1",
+        "PPC_PsRes", "PPC_PsRsqrte", "PPC_PsSum0", "PPC_PsSum1"
     };
 
     private static readonly string[] XerReadWriteHelpers =
@@ -105,9 +115,17 @@ public static class GuestHelperEffectCatalog
     /// so no GPR sync is needed; kept as explicit entries so they don't default to unknown
     /// full-context fences.
     /// </summary>
-    private static readonly string[] FpscrAndGqrHelpers =
+    private static readonly string[] FpscrReadHelpers =
     {
-        "PPC_Mffs", "PPC_Mtfsb0", "PPC_Mtfsb1", "PPC_Mtfsf", "PPC_Mtfsfi", "PPC_PsqL", "PPC_PsqSt"
+        "PPC_Mffs"
+    };
+    private static readonly string[] FpscrWriteHelpers =
+    {
+        "PPC_Mtfsb0", "PPC_Mtfsb1", "PPC_Mtfsf", "PPC_Mtfsfi"
+    };
+    private static readonly string[] GqrHelpers =
+    {
+        "PPC_PsqL", "PPC_PsqSt"
     };
 
     /// <summary>
@@ -122,8 +140,11 @@ public static class GuestHelperEffectCatalog
     {
         var entries = new Dictionary<string, GuestHelperEffect>(StringComparer.OrdinalIgnoreCase);
         foreach (var helper in PureHelpers) entries.Add(helper, NoEffect);
+        foreach (var helper in FpscrReadHelpers) entries.Add(helper, FpscrRead);
+        foreach (var helper in FpscrReadWriteHelpers) entries.Add(helper, FpscrReadWrite);
         foreach (var helper in XerReadWriteHelpers) entries.Add(helper, CarryUpdate);
-        foreach (var helper in FpscrAndGqrHelpers) entries.Add(helper, NoEffect);
+        foreach (var helper in FpscrWriteHelpers) entries.Add(helper, FpscrReadWrite);
+        foreach (var helper in GqrHelpers) entries.Add(helper, NoEffect);
         entries.Add("PPC_GetCarry", CarryRead);
         entries.Add("OSSystemCall", SystemCallBoundary);
         entries.Add("PPC_Lswx", UnboundedStringLoad);
@@ -159,7 +180,8 @@ public static class GuestHelperEffectCatalog
                 ArgumentDependentHelper.MoveConditionField =>
                     new GuestHelperEffect(CrReadMask: byte.MaxValue, CrWriteMask: FieldMask(call, 0)),
                 ArgumentDependentHelper.MoveConditionFromFpscr =>
-                    new GuestHelperEffect(CrReadMask: byte.MaxValue, CrWriteMask: FieldMask(call, 0)),
+                    new GuestHelperEffect(CrReadMask: byte.MaxValue, CrWriteMask: FieldMask(call, 0),
+                        ReadsFpscr: true, WritesFpscr: true),
                 ArgumentDependentHelper.SetConditionBit =>
                     new GuestHelperEffect(CrReadMask: byte.MaxValue, CrWriteMask: BitFieldMask(call, 0)),
                 ArgumentDependentHelper.ConditionLogical =>
@@ -169,7 +191,8 @@ public static class GuestHelperEffectCatalog
                         CrReadMask: byte.MaxValue,
                         CrWriteMask: BitFieldMask(call, 1)),
                 ArgumentDependentHelper.CompareIntoConditionField =>
-                    new GuestHelperEffect(CrReadMask: byte.MaxValue, CrWriteMask: FieldMask(call, 0)),
+                    new GuestHelperEffect(CrReadMask: byte.MaxValue, CrWriteMask: FieldMask(call, 0),
+                        ReadsFpscr: true, WritesFpscr: true),
                 ArgumentDependentHelper.ReadSpr => SprEffect(call, write: false),
                 ArgumentDependentHelper.WriteSpr => SprEffect(call, write: true),
                 _ => Complete()
@@ -220,5 +243,6 @@ public static class GuestHelperEffectCatalog
 
     private static GuestHelperEffect CreateComplete(GuestCallBoundaryFlags extra) =>
         new(uint.MaxValue, uint.MaxValue, uint.MaxValue, uint.MaxValue, byte.MaxValue, byte.MaxValue,
-            true, true, true, true, true, true, extra | GuestCallBoundaryFlags.RequiresCompleteContext);
+            true, true, true, true, true, true, true, true,
+            extra | GuestCallBoundaryFlags.RequiresCompleteContext);
 }

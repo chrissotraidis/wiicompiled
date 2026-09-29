@@ -136,6 +136,37 @@ public class GpuFifoBurstCodeGenTests
     }
 
     [Fact]
+    public void ThreeStoreDisplayListCallBecomesOneDirectBurst()
+    {
+        var code = Emit(Function("display_list_call",
+            new IrAssign("r4", IrValue.Imm(0x40)),
+            FifoStore("r4", 1),
+            FifoStore("r5", 4),
+            FifoStore("r6", 4),
+            new IrReturn(null)));
+
+        Assert.Contains("uint8_t mkw_fifo_burst_0[9];", code, StringComparison.Ordinal);
+        Assert.Contains("GX_HLE_FIFO_WriteBurst(mkw_fifo_burst_0, 9u);", code, StringComparison.Ordinal);
+        Assert.DoesNotContain("GX_HLE_FIFO_Write8(", code, StringComparison.Ordinal);
+        Assert.DoesNotContain("GX_HLE_FIFO_Write32(", code, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void OtherThreeStorePacketsStayIndividual()
+    {
+        var code = Emit(Function("other_three_store_packet",
+            new IrAssign("r4", IrValue.Imm(0x08)),
+            FifoStore("r4", 1),
+            FifoStore("r5", 4),
+            FifoStore("r6", 4),
+            new IrReturn(null)));
+
+        Assert.DoesNotContain("GX_HLE_FIFO_WriteBurst", code, StringComparison.Ordinal);
+        Assert.Equal(1, CountOccurrences(code, "GX_HLE_FIFO_Write8("));
+        Assert.Equal(2, CountOccurrences(code, "GX_HLE_FIFO_Write32("));
+    }
+
+    [Fact]
     public void OrdinaryGuestStoreSplitsTheRun()
     {
         // A store to guest RAM cannot be reordered past a FIFO write: while a

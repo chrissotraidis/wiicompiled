@@ -2575,6 +2575,8 @@ int EmitModCpp(
             .Where(attempt => attempt.Result is not null)
             .SelectMany(attempt => DirectModuleTargets(
                     attempt.Result!, overlayBuild.ModuleGuestBase, moduleEnd)
+                .Concat(ModFunctionDiscovery.DiscoverIndirectEntryPoints(
+                    attempt.Result!.Instructions, overlayBuild.ModuleGuestBase, moduleEnd))
                 .Select(target => (Target: target, Source: attempt.Work.Address)))
             .GroupBy(item => item.Target)
             .Select(group => (Target: group.Key, Source: group.Min(item => item.Source)))

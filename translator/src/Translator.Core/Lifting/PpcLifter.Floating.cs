@@ -44,19 +44,19 @@ public sealed partial class PpcLifter
 
             case "fadd" when operands.Count == 3:
             case "fadd." when operands.Count == 3:
-                return new[] { new IrBinary(operands[0], IrValue.Register(operands[1]), IrValue.Register(operands[2]), "add") };
+                return new[] { new IrCall(operands[0], "PPC_Fadd", new[] { IrValue.Register(operands[1]), IrValue.Register(operands[2]) }) };
 
             case "fsub" when operands.Count == 3:
             case "fsub." when operands.Count == 3:
-                return new[] { new IrBinary(operands[0], IrValue.Register(operands[1]), IrValue.Register(operands[2]), "sub") };
+                return new[] { new IrCall(operands[0], "PPC_Fsub", new[] { IrValue.Register(operands[1]), IrValue.Register(operands[2]) }) };
 
             case "fmul" when operands.Count == 3:
             case "fmul." when operands.Count == 3:
-                return new[] { new IrBinary(operands[0], IrValue.Register(operands[1]), IrValue.Register(operands[2]), "mul") };
+                return new[] { new IrCall(operands[0], "PPC_Fmul", new[] { IrValue.Register(operands[1]), IrValue.Register(operands[2]) }) };
 
             case "fdiv" when operands.Count == 3:
             case "fdiv." when operands.Count == 3:
-                return new[] { new IrBinary(operands[0], IrValue.Register(operands[1]), IrValue.Register(operands[2]), "fdiv") };
+                return new[] { new IrCall(operands[0], "PPC_Fdiv", new[] { IrValue.Register(operands[1]), IrValue.Register(operands[2]) }) };
 
             case "fadds" when operands.Count == 3:
             case "fadds." when operands.Count == 3:
@@ -164,11 +164,11 @@ public sealed partial class PpcLifter
 
             case "fctiw" when operands.Count == 2:
             case "fctiw." when operands.Count == 2:
-                return new[] { new IrBinary(operands[0], IrValue.Register(operands[1]), IrValue.Imm(0), "fctiw") };
+                return new[] { new IrCall(operands[0], "PPC_Fctiw", new[] { IrValue.Register(operands[1]) }) };
 
             case "fctiwz" when operands.Count == 2:
             case "fctiwz." when operands.Count == 2:
-                return new[] { new IrBinary(operands[0], IrValue.Register(operands[1]), IrValue.Imm(0), "fctiwz") };
+                return new[] { new IrCall(operands[0], "PPC_Fctiwz", new[] { IrValue.Register(operands[1]) }) };
 
             case "fsel" when operands.Count == 4:
             case "fsel." when operands.Count == 4:
@@ -203,7 +203,8 @@ public sealed partial class PpcLifter
                     return new[]
                     {
                         new IrSetCrField(destCr, IrValue.Register(operands[1]),
-                            IrValue.Register(operands[2]), false)
+                            IrValue.Register(operands[2]),
+                            ins.Mnemonic.StartsWith("fcmpo", StringComparison.Ordinal))
                     };
                 }
 
@@ -223,7 +224,7 @@ public sealed partial class PpcLifter
                         18 => new[] { new IrCall($"f{rD}", "PPC_Fdivs", new[] { IrValue.Register($"f{rA}"), IrValue.Register($"f{rB}") }) }, // fdivs
                         20 => new[] { new IrCall($"f{rD}", "PPC_Fsubs", new[] { IrValue.Register($"f{rA}"), IrValue.Register($"f{rB}") }) }, // fsubs
                         21 => new[] { new IrCall($"f{rD}", "PPC_Fadds", new[] { IrValue.Register($"f{rA}"), IrValue.Register($"f{rB}") }) }, // fadds
-                        22 => new[] { new IrCall($"f{rD}", "PPC_Fsqrt", new[] { IrValue.Register($"f{rB}") }) }, // fsqrts
+                        22 => new[] { new IrCall($"f{rD}", "PPC_Fsqrts", new[] { IrValue.Register($"f{rB}") }) }, // fsqrts
                         23 => new[] { new IrCall($"f{rD}", "PPC_Fsel", new[] { IrValue.Register($"f{rA}"), IrValue.Register($"f{rB}"), IrValue.Register($"f{rC}") }) }, // fsel
                         24 => new[] { new IrCall($"f{rD}", "PPC_Fres", new[] { IrValue.Register($"f{rB}") }) }, // fres
                         25 => new[] { new IrCall($"f{rD}", "PPC_Fmuls", new[] { IrValue.Register($"f{rA}"), IrValue.Register($"f{rC}") }) }, // fmuls (uses A and C)
@@ -249,13 +250,13 @@ public sealed partial class PpcLifter
 
                     return xo switch
                     {
-                        18 => new[] { new IrBinary($"f{rD}", IrValue.Register($"f{rA}"), IrValue.Register($"f{rB}"), "fdiv") },
-                        20 => new[] { new IrBinary($"f{rD}", IrValue.Register($"f{rA}"), IrValue.Register($"f{rB}"), "sub") },
-                        21 => new[] { new IrBinary($"f{rD}", IrValue.Register($"f{rA}"), IrValue.Register($"f{rB}"), "add") },
+                        18 => new[] { new IrCall($"f{rD}", "PPC_Fdiv", new[] { IrValue.Register($"f{rA}"), IrValue.Register($"f{rB}") }) },
+                        20 => new[] { new IrCall($"f{rD}", "PPC_Fsub", new[] { IrValue.Register($"f{rA}"), IrValue.Register($"f{rB}") }) },
+                        21 => new[] { new IrCall($"f{rD}", "PPC_Fadd", new[] { IrValue.Register($"f{rA}"), IrValue.Register($"f{rB}") }) },
                         22 => new[] { new IrCall($"f{rD}", "PPC_Fsqrt", new[] { IrValue.Register($"f{rB}") }) }, // fsqrt
                         23 => new[] { new IrCall($"f{rD}", "PPC_Fsel", new[] { IrValue.Register($"f{rA}"), IrValue.Register($"f{rB}"), IrValue.Register($"f{rC}") }) }, // fsel
                         24 => new[] { new IrCall($"f{rD}", "PPC_Fres", new[] { IrValue.Register($"f{rB}") }) }, // fres
-                        25 => new[] { new IrBinary($"f{rD}", IrValue.Register($"f{rA}"), IrValue.Register($"f{rC}"), "mul") }, // fmul uses A and C
+                        25 => new[] { new IrCall($"f{rD}", "PPC_Fmul", new[] { IrValue.Register($"f{rA}"), IrValue.Register($"f{rC}") }) }, // fmul uses A and C
                         26 => new[] { new IrCall($"f{rD}", "PPC_Frsqrte", new[] { IrValue.Register($"f{rB}") }) }, // frsqrte
                         28 => new[] { new IrCall($"f{rD}", "PPC_Fmsub", new[] { IrValue.Register($"f{rA}"), IrValue.Register($"f{rC}"), IrValue.Register($"f{rB}") }) }, // fmsub
                         29 => new[] { new IrCall($"f{rD}", "PPC_Fmadd", new[] { IrValue.Register($"f{rA}"), IrValue.Register($"f{rC}"), IrValue.Register($"f{rB}") }) }, // fmadd

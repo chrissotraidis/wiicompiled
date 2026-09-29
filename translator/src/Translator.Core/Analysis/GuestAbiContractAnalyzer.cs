@@ -438,11 +438,11 @@ public static class GuestAbiContractAnalyzer
 
     private static RegisterSet HiddenReads(GuestHelperEffect effect) =>
         new(effect.GprReadMask, effect.FprReadMask, effect.CrReadMask,
-            effect.ReadsXer, effect.ReadsCtr, effect.ReadsLr, false, 0, 0);
+            effect.ReadsXer, effect.ReadsCtr, effect.ReadsLr, effect.ReadsFpscr, 0, 0);
 
     private static RegisterSet HiddenWrites(GuestHelperEffect effect) =>
         new(effect.GprWriteMask, effect.FprWriteMask, effect.CrWriteMask,
-            effect.WritesXer, effect.WritesCtr, effect.WritesLr, false, 0, 0);
+            effect.WritesXer, effect.WritesCtr, effect.WritesLr, effect.WritesFpscr, 0, 0);
 
     private static RegisterSet ContractReads(GuestAbiContract contract) =>
         new(contract.GprReadBeforeWriteMask, contract.FprReadBeforeWriteMask,

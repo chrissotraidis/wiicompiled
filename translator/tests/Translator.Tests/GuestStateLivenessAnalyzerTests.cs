@@ -7,6 +7,18 @@ namespace Translator.Tests;
 public sealed class GuestStateLivenessAnalyzerTests
 {
     [Fact]
+    public void StatefulFloatingHelperKeepsFpscrLive()
+    {
+        var function = Function(
+            new IrCall("f3", "PPC_Fmuls", new[] { IrValue.Register("f1"), IrValue.Register("f2") }),
+            new IrReturn(null));
+
+        var result = GuestStateLivenessAnalyzer.Analyze(
+            function, new Dictionary<uint, GuestAbiContract>(), GuestStateMask.Empty);
+
+        Assert.True(result.BlockLiveIn["entry"].Fpscr);
+    }
+    [Fact]
     public void IndirectControlFlowRequiresMaterializedContext()
     {
         var indirectCall = Function(

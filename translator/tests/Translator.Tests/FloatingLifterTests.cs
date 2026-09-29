@@ -53,43 +53,40 @@ public class FloatingLifterTests
     }
 
     [Theory]
-    [InlineData("fadd", "add")]
-    [InlineData("fsub", "sub")]
-    [InlineData("fmul", "mul")]
-    [InlineData("fdiv", "fdiv")]
-    public void LiftsFloatingBinaryMnemonics(string mnemonic, string op)
+    [InlineData("fadd", "PPC_Fadd")]
+    [InlineData("fsub", "PPC_Fsub")]
+    [InlineData("fmul", "PPC_Fmul")]
+    [InlineData("fdiv", "PPC_Fdiv")]
+    public void LiftsFloatingBinaryMnemonics(string mnemonic, string target)
     {
         var instruction = FloatingInstruction(0, mnemonic, Fpr(1), Fpr(2), Fpr(3));
 
         var ir = Assert.Single(new PpcLifter().Lift(new[] { instruction })).Ir;
-        var binary = Assert.IsType<IrBinary>(Assert.Single(ir));
-        Assert.Equal("f1", binary.Destination);
-        Assert.Equal(op, binary.Op);
-        Assert.Equal("f2", binary.Left.RegisterName);
-        Assert.Equal("f3", binary.Right.RegisterName);
+        var call = Assert.IsType<IrCall>(Assert.Single(ir));
+        Assert.Equal("f1", call.Destination);
+        Assert.Equal(target, call.Target);
+        Assert.Equal(new[] { "f2", "f3" }, call.Arguments.Select(a => a.RegisterName));
     }
 
     [Theory]
-    [InlineData("fadd.", "add")]
-    [InlineData("fsub.", "sub")]
-    [InlineData("fmul.", "mul")]
-    [InlineData("fdiv.", "fdiv")]
-    public void LiftsFloatingBinaryDotMnemonics(string mnemonic, string op)
+    [InlineData("fadd.", "PPC_Fadd")]
+    [InlineData("fsub.", "PPC_Fsub")]
+    [InlineData("fmul.", "PPC_Fmul")]
+    [InlineData("fdiv.", "PPC_Fdiv")]
+    public void LiftsFloatingBinaryDotMnemonics(string mnemonic, string target)
     {
         var instruction = FloatingInstruction(0, mnemonic, Fpr(1), Fpr(2), Fpr(3));
 
         var ir = Assert.Single(new PpcLifter().Lift(new[] { instruction })).Ir;
-        var binary = Assert.IsType<IrBinary>(Assert.Single(ir));
-        Assert.Equal("f1", binary.Destination);
-        Assert.Equal(op, binary.Op);
+        var call = Assert.IsType<IrCall>(Assert.Single(ir));
+        Assert.Equal("f1", call.Destination);
+        Assert.Equal(target, call.Target);
     }
 
     [Theory]
     [InlineData("frsp", "frsp")]
     [InlineData("fneg", "fneg")]
     [InlineData("fabs", "fabs")]
-    [InlineData("fctiw", "fctiw")]
-    [InlineData("fctiwz", "fctiwz")]
     public void LiftsFloatingUnaryMnemonics(string mnemonic, string op)
     {
         var instruction = FloatingInstruction(0, mnemonic, Fpr(4), Fpr(7));
@@ -103,11 +100,24 @@ public class FloatingLifterTests
     }
 
     [Theory]
+    [InlineData("fctiw", "PPC_Fctiw")]
+    [InlineData("fctiwz", "PPC_Fctiwz")]
+    [InlineData("fctiw.", "PPC_Fctiw")]
+    [InlineData("fctiwz.", "PPC_Fctiwz")]
+    public void LiftsFloatingConversionsAsStatefulCalls(string mnemonic, string target)
+    {
+        var instruction = FloatingInstruction(0, mnemonic, Fpr(4), Fpr(7));
+        var ir = Assert.Single(new PpcLifter().Lift(new[] { instruction })).Ir;
+        var call = Assert.IsType<IrCall>(Assert.Single(ir));
+        Assert.Equal("f4", call.Destination);
+        Assert.Equal(target, call.Target);
+        Assert.Equal("f7", Assert.Single(call.Arguments).RegisterName);
+    }
+
+    [Theory]
     [InlineData("frsp.", "frsp")]
     [InlineData("fneg.", "fneg")]
     [InlineData("fabs.", "fabs")]
-    [InlineData("fctiw.", "fctiw")]
-    [InlineData("fctiwz.", "fctiwz")]
     public void LiftsFloatingUnaryDotMnemonics(string mnemonic, string op)
     {
         var instruction = FloatingInstruction(0, mnemonic, Fpr(4), Fpr(7));
@@ -205,7 +215,7 @@ public class FloatingLifterTests
     }
 
     [Theory]
-    [InlineData(22u, "PPC_Fsqrt", "f2")]
+    [InlineData(22u, "PPC_Fsqrts", "f2")]
     [InlineData(26u, "PPC_Frsqrte", "f2")]
     [InlineData(29u, "PPC_Fmadds", "f1")]
     [InlineData(30u, "PPC_Fnmsubs", "f1")]
@@ -231,9 +241,9 @@ public class FloatingLifterTests
     }
 
     [Theory]
-    [InlineData(18u, "binary", "fdiv")]
-    [InlineData(20u, "binary", "sub")]
-    [InlineData(21u, "binary", "add")]
+    [InlineData(18u, "call", "PPC_Fdiv")]
+    [InlineData(20u, "call", "PPC_Fsub")]
+    [InlineData(21u, "call", "PPC_Fadd")]
     [InlineData(22u, "call", "PPC_Fsqrt")]
     [InlineData(23u, "call", "PPC_Fsel")]
     [InlineData(24u, "call", "PPC_Fres")]

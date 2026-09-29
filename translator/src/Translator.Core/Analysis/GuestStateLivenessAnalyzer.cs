@@ -292,7 +292,16 @@ public static class GuestStateLivenessAnalyzer
                 Add(ref result, value.FirstOriginalAddress.Base); Add(ref result, value.SecondOriginalAddress.Base);
                 AddValue(ref result, value.FirstSource); AddValue(ref result, value.SecondSource);
                 break;
-            case IrCall value: foreach (var argument in value.Arguments) AddValue(ref result, argument); break;
+            case IrCall value:
+                foreach (var argument in value.Arguments) AddValue(ref result, argument);
+                if (!GuestTargetParser.TryParseAddress(value.Target, out _))
+                {
+                    var effect = GuestHelperEffectCatalog.Analyze(value);
+                    result = result.Union(new GuestStateMask(
+                        effect.GprReadMask, effect.FprReadMask, effect.CrReadMask,
+                        effect.ReadsXer, effect.ReadsCtr, effect.ReadsLr, effect.ReadsFpscr, 0, 0));
+                }
+                break;
             case IrIndirectCall value:
                 AddValue(ref result, value.Target);
                 foreach (var argument in value.Arguments) AddValue(ref result, argument);
@@ -328,7 +337,16 @@ public static class GuestStateLivenessAnalyzer
                 Add(ref result, value.FirstDestination);
                 Add(ref result, value.SecondDestination);
                 break;
-            case IrCall value: Add(ref result, value.Destination); break;
+            case IrCall value:
+                Add(ref result, value.Destination);
+                if (!GuestTargetParser.TryParseAddress(value.Target, out _))
+                {
+                    var effect = GuestHelperEffectCatalog.Analyze(value);
+                    result = result.Union(new GuestStateMask(
+                        effect.GprWriteMask, effect.FprWriteMask, effect.CrWriteMask,
+                        effect.WritesXer, effect.WritesCtr, effect.WritesLr, effect.WritesFpscr, 0, 0));
+                }
+                break;
             case IrIndirectCall value: Add(ref result, value.Destination); result = result.Union(FullState); break;
             case IrSetCrField value:
                 result = result with { Cr = (byte)(result.Cr | (1 << value.FieldIndex)) };

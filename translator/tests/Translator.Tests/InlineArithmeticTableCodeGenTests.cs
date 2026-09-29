@@ -47,19 +47,28 @@ public sealed class InlineArithmeticTableCodeGenTests
 
     public static IEnumerable<object[]> ScalarCases()
     {
-        yield return Case("PPC_Fadds", "PpcForceSingleValueInline");
-        yield return Case("PPC_FaddsNoNi", "static_cast<float>");
-        yield return Case("PPC_Fsubs", "PpcForceSingleValueInline");
-        yield return Case("PPC_FsubsNoNi", "static_cast<float>");
-        yield return Case("PPC_Fmuls", "PpcFmulsInline");
-        yield return Case("PPC_FmulsNoNi", "PpcFmulsNoNiInline");
-        yield return Case("PPC_Fdivs", "PpcForceSingleValueInline");
-        yield return Case("PPC_FdivsNoNi", "static_cast<float>");
-        yield return Case("PPC_Fsqrt", "std::sqrt");
-        yield return Case("PPC_Fmadd", "PpcFmaddInline");
-        yield return Case("PPC_Fmsub", "PpcFmsubInline");
-        yield return Case("PPC_Fnmadd", "PpcFnmaddInline");
-        yield return Case("PPC_Fnmsub", "PpcFnmsubInline");
+        yield return Case("PPC_Fadds", "PpcFaddsStateInline");
+        yield return Case("PPC_FaddsNoNi", "PpcFaddsStateInline");
+        yield return Case("PPC_Fsubs", "PpcFsubsStateInline");
+        yield return Case("PPC_FsubsNoNi", "PpcFsubsStateInline");
+        yield return Case("PPC_Fmuls", "PpcFmulsStateInline");
+        yield return Case("PPC_FmulsNoNi", "PpcFmulsStateInline");
+        yield return Case("PPC_Fdivs", "PpcFdivsStateInline");
+        yield return Case("PPC_FdivsNoNi", "PpcFdivsStateInline");
+        yield return Case("PPC_Fsqrt", "PpcFsqrtStateInline");
+        yield return Case("PPC_Fsqrts", "PpcFsqrtsStateInline");
+        yield return Case("PPC_Fctiw", "PpcFctiwStateInline");
+        yield return Case("PPC_Fctiwz", "PpcFctiwzStateInline");
+        yield return Case("PPC_Frsqrte", "PpcFrsqrteStateInline");
+        yield return Case("PPC_Fres", "PpcFresValueStateInline");
+        yield return Case("PPC_Fmadd", "PpcFmaddStateInline");
+        yield return Case("PPC_Fmsub", "PpcFmsubStateInline");
+        yield return Case("PPC_Fnmadd", "PpcFnmaddStateInline");
+        yield return Case("PPC_Fnmsub", "PpcFnmsubStateInline");
+        yield return Case("PPC_Fmadds", "PpcFmaddsStateInline");
+        yield return Case("PPC_Fmsubs", "PpcFmsubsStateInline");
+        yield return Case("PPC_Fnmadds", "PpcFnmaddsStateInline");
+        yield return Case("PPC_Fnmsubs", "PpcFnmsubsStateInline");
     }
 
     [Theory]
@@ -116,7 +125,7 @@ public sealed class InlineArithmeticTableCodeGenTests
             IrValue.Imm(2),
             IrValue.Imm(3));
 
-        Assert.Contains("PpcFmsubInline(1, 2, 3)", code, StringComparison.Ordinal);
+        Assert.Contains("PpcFmsubStateInline(f0.d, 1, 2, 3)", code, StringComparison.Ordinal);
     }
 
     [Fact]

@@ -12,8 +12,9 @@ namespace Translator.Core.CodeGen;
 /// </summary>
 public sealed partial class CxxLinearCodeGenerator
 {
-    // Below this the saved call overhead does not pay for the buffer traffic
-    // and the extra stack slot.
+    // Three stores usually do not repay the buffer traffic. A complete GX
+    // display-list call (command, address, size) is the exception: the runtime
+    // can parse those nine bytes directly without three per-word FIFO calls.
     private const int MinimumGpuFifoBurstStores = 4;
 
     private readonly record struct GpuFifoStoreInfo(bool IsFloat, int ByteLength);
@@ -163,7 +164,14 @@ public sealed partial class CxxLinearCodeGenerator
                     break;
                 }
 
-                if (members.Count >= MinimumGpuFifoBurstStores)
+                var isDirectDisplayListCall = members.Count == 3 &&
+                    members[0].Store.ByteLength == 1 &&
+                    members[1].Store.ByteLength == 4 &&
+                    members[2].Store.ByteLength == 4 &&
+                    instructions[members[0].Index] is IrStore command &&
+                    TryGetUIntConstant(command.Source, knownConstants, out var commandByte) &&
+                    commandByte == 0x40u;
+                if (members.Count >= MinimumGpuFifoBurstStores || isDirectDisplayListCall)
                 {
                     var total = members.Sum(static member => member.Store.ByteLength);
                     var run = new GpuFifoBurstRun($"mkw_fifo_burst_{runs.Count}", total);

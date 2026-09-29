@@ -176,8 +176,8 @@ public static class ModDataPatchWriter
         sb.AppendLine("    RegisterExecutableRanges();");
         sb.AppendLine("}");
         sb.AppendLine();
-        sb.AppendLine("struct RegisterModDataPatches {");
-        sb.AppendLine("    RegisterModDataPatches() {");
+        sb.AppendLine("void ActivateRetroRewindModDataPatches() {");
+        sb.AppendLine("    static const bool activated = [] {");
         sb.AppendLine("        RecompMod::RegisterMemoryReservation(kModuleGuestBase, kModuleReservedEnd, \"Kamek module\");");
         sb.AppendLine("        RecompMod::RegisterMemoryInitializer(&ApplyDataPatches);");
         if (emitCtorRunner)
@@ -201,10 +201,16 @@ public static class ModDataPatchWriter
             sb.AppendLine(
                 $"        RecompMod::RegisterRiivolutionOption(\"{EscapeCxxStringLiteral(option.Section)}\", \"{EscapeCxxStringLiteral(option.Option)}\", {option.Choice}u);");
         }
-        sb.AppendLine("    }");
+        sb.AppendLine("        return true;");
+        sb.AppendLine("    }();");
+        sb.AppendLine("    (void)activated;");
+        sb.AppendLine("}");
+        sb.AppendLine();
+        sb.AppendLine("struct QueueModDataPatches {");
+        sb.AppendLine("    QueueModDataPatches() { RecompMod::RegisterProfileInitializer(\"retro_rewind\", &ActivateRetroRewindModDataPatches); }");
         sb.AppendLine("};");
         sb.AppendLine();
-        sb.AppendLine("RegisterModDataPatches g_registerModDataPatches;");
+        sb.AppendLine("QueueModDataPatches g_queueModDataPatches;");
         sb.AppendLine();
         sb.AppendLine("} // namespace");
 

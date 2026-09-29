@@ -185,7 +185,16 @@ public static partial class TranslatedBuildShardEmitter
         var rrTraits = new Dictionary<uint, Trait>(BuildRetroTraits(activeBase, baseTraits, retroEntries));
         foreach (var address in nativeOverrides.RawTranslatedOverrides.Keys)
             rrTraits[address] = baseTraits[address];
+        var overriddenTargets = FindOverriddenTargets(baseTraits, rrTraits);
+        foreach (var address in overriddenTargets)
+        {
+            if (baseTraits.TryGetValue(address, out var baseTrait))
+                baseTraits[address] = baseTrait with { MustRemainDynamicallyDispatchable = true };
+            if (rrTraits.TryGetValue(address, out var rrTrait))
+                rrTraits[address] = rrTrait with { MustRemainDynamicallyDispatchable = true };
+        }
         var sensitiveTargets = FindProfileSensitiveTargets(baseTraits, rrTraits);
+        sensitiveTargets.UnionWith(overriddenTargets);
         var sensitiveCallers = activeBase
             .Where(record => record.DirectCalls.Any(sensitiveTargets.Contains))
             .Select(static record => record.Address)
@@ -201,10 +210,20 @@ public static partial class TranslatedBuildShardEmitter
             .Select(static record => record.Address)
             .ToHashSet();
         nonCoffSensitiveCallers.UnionWith(sensitiveCallers);
+        ExpandCallerClosure(activeBase, nonCoffSensitiveCallers);
 
         var commonBase = activeBase.Where(record => !sensitiveCallers.Contains(record.Address)).ToArray();
         var portableCommonBase = activeBase.Where(record => !nonCoffSensitiveCallers.Contains(record.Address)).ToArray();
         var portableSensitiveBase = activeBase.Where(record => nonCoffSensitiveCallers.Contains(record.Address)).ToArray();
+        var retroLinkAliases = portableSensitiveBase.ToDictionary(
+            static record => record.Symbol,
+            static record => record.Symbol + "_retro_rewind",
+            StringComparer.Ordinal);
+        var retroLinkTraits = rrTraits.ToDictionary(
+            static pair => pair.Key,
+            pair => pair.Value.WinnerSymbol is { } symbol && retroLinkAliases.TryGetValue(symbol, out var alias)
+                ? pair.Value with { WinnerSymbol = alias }
+                : pair.Value);
         var retroSourceBundlePath = options.RetroCppDirectory is { } retroCppDir && !string.IsNullOrWhiteSpace(retroCppDir)
             ? Path.Combine(Path.GetDirectoryName(Path.GetFullPath(retroCppDir))!, "translated_sources.bin")
             : null;
@@ -228,19 +247,28 @@ public static partial class TranslatedBuildShardEmitter
             "base profile", weightedSequential: false));
         shards.AddRange(WriteFunctionShards(
             outputRoot, "retro_portable_sensitive", portableSensitiveBase,
-            Math.Min(24, Math.Max(1, portableSensitiveBase.Length)), rrTraits,
-            "Retro Rewind profile", weightedSequential: false));
+            Math.Min(24, Math.Max(1, portableSensitiveBase.Length)), retroLinkTraits,
+            "Retro Rewind profile", weightedSequential: false,
+            symbolAliases: retroLinkAliases));
         shards.AddRange(WriteFunctionShards(
-            outputRoot, "retro_mod", modRecords, options.ModShardCount, rrTraits,
-            "Retro Rewind mod", weightedSequential: false));
+            outputRoot, "retro_mod", modRecords, options.ModShardCount, retroLinkTraits,
+            "Retro Rewind mod", weightedSequential: false,
+            symbolAliases: retroLinkAliases));
 
         var baseRegistration = WriteRegistrationShards(
             outputRoot, "base", activeBase, baseTraits, options.RegistrationShardCount).ToList();
         baseRegistration.Add(WriteIndirectDispatchTable(outputRoot, "base", baseTraits));
-        var rrRegistrationRecords = activeBase.Concat(modRecords).OrderBy(static record => record.Address).ThenBy(static record => record.RegistrationKind, StringComparer.Ordinal).ToArray();
+        var rrRegistrationRecords = activeBase
+            .Select(record => retroLinkAliases.TryGetValue(record.Symbol, out var alias)
+                ? CloneWithSymbol(record, alias)
+                : record)
+            .Concat(modRecords)
+            .OrderBy(static record => record.Address)
+            .ThenBy(static record => record.RegistrationKind, StringComparer.Ordinal)
+            .ToArray();
         var rrRegistration = WriteRegistrationShards(
-            outputRoot, "retro_rewind", rrRegistrationRecords, rrTraits, options.RegistrationShardCount).ToList();
-        rrRegistration.Add(WriteIndirectDispatchTable(outputRoot, "retro_rewind", rrTraits));
+            outputRoot, "retro_rewind", rrRegistrationRecords, retroLinkTraits, options.RegistrationShardCount).ToList();
+        rrRegistration.Add(WriteIndirectDispatchTable(outputRoot, "retro_rewind", retroLinkTraits));
 
         var extraRetroSources = ReadRetroExtraSources(options.RetroCppDirectory, modRecords);
         var cmakeManifestPath = Path.Combine(outputRoot, "shards.cmake");
@@ -561,6 +589,25 @@ public static partial class TranslatedBuildShardEmitter
         return result;
     }
 
+    private static HashSet<uint> FindOverriddenTargets(
+        IReadOnlyDictionary<uint, Trait> baseTraits,
+        IReadOnlyDictionary<uint, Trait> rrTraits)
+    {
+        var result = new HashSet<uint>();
+        foreach (var (address, baseTrait) in baseTraits)
+        {
+            if (!rrTraits.TryGetValue(address, out var rrTrait) ||
+                baseTrait.Available != rrTrait.Available ||
+                !string.Equals(baseTrait.WinnerSymbol, rrTrait.WinnerSymbol, StringComparison.Ordinal) ||
+                !string.Equals(baseTrait.WinnerKind, rrTrait.WinnerKind, StringComparison.OrdinalIgnoreCase) ||
+                baseTrait.WinnerPriority != rrTrait.WinnerPriority)
+            {
+                result.Add(address);
+            }
+        }
+        return result;
+    }
+
     private static string BuildTraitsHeader(
         IReadOnlyDictionary<uint, Trait> traits,
         string label)
@@ -570,10 +617,12 @@ public static partial class TranslatedBuildShardEmitter
         output.AppendLine($"// Translator-owned direct-call traits: {label}.");
         foreach (var (address, trait) in traits.OrderBy(static pair => pair.Key))
         {
-            if (!trait.Available || string.IsNullOrWhiteSpace(trait.WinnerSymbol)) continue;
-            // Dynamic-dispatch and preserves_nonvolatile_fprs are deliberately not arguments here:
-            // direct calls are always non-overridable literal edges, and the macro guard is
-            // selected by the mask alone.
+            if (!trait.Available ||
+                trait.MustRemainDynamicallyDispatchable ||
+                string.IsNullOrWhiteSpace(trait.WinnerSymbol)) continue;
+            // Only non-overridable winners receive a static specialization. Dynamic targets keep
+            // the primary template and therefore route InvokeDirectCpu through the registry.
+            // The macro guard is selected by the nonvolatile FPR mask alone.
             output.AppendLine(
                 $"MKW_TRANSLATED_TRAIT({address:X8}, {trait.WinnerSymbol}, 0x{trait.NonvolatileFprWriteMask:X8}u);");
         }
@@ -588,7 +637,8 @@ public static partial class TranslatedBuildShardEmitter
         IReadOnlyDictionary<uint, Trait> traits,
         string traitsLabel,
         bool weightedSequential,
-        ShardBoundaryTable? frozenBoundaries = null)
+        ShardBoundaryTable? frozenBoundaries = null,
+        IReadOnlyDictionary<string, string>? symbolAliases = null)
     {
         if (functions.Count == 0) return Array.Empty<ShardInfo>();
         var shardCount = Math.Min(requestedShardCount, functions.Count);
@@ -619,7 +669,7 @@ public static partial class TranslatedBuildShardEmitter
                 .Where(traits.ContainsKey)
                 .ToDictionary(address => address, address => traits[address]);
             var traitIdentity = string.Join("\n", dependencyTraits.OrderBy(static pair => pair.Key).Select(pair =>
-                $"{pair.Key:X8}:{pair.Value.Available}:{pair.Value.PreservesNonvolatileFprs}:{pair.Value.NonvolatileFprWriteMask:X8}:{pair.Value.WinnerSymbol}"));
+                $"{pair.Key:X8}:{pair.Value.Available}:{pair.Value.PreservesNonvolatileFprs}:{pair.Value.NonvolatileFprWriteMask:X8}:{pair.Value.MustRemainDynamicallyDispatchable}:{pair.Value.WinnerSymbol}"));
             var identity = string.Join("\n", group.Select(function => $"{function.Address:X8}:{function.SourceFingerprint}")) + "\n" + traitIdentity;
             var hash = ChecksumUtilities.Sha256Hex(Encoding.UTF8.GetBytes($"{partition}\n{identity}"));
             // Membership, not the transient scheduling position, is the shard
@@ -641,6 +691,7 @@ public static partial class TranslatedBuildShardEmitter
                 var functionSource = function.SourceText ?? File.ReadAllText(function.SourcePath);
                 functionSource = RegistrationMarkerRegex().Replace(functionSource, string.Empty);
                 functionSource = LowerStableDirectCalls(functionSource, traits);
+                functionSource = RewriteLinkSymbols(functionSource, symbolAliases);
                 // Diagnostics only; the named file no longer exists on disk (sources live in the
                 // bundle), so only the bare file name is kept, not the emitting machine's path.
                 source.Append($"#line 1 \"{Escape(Path.GetFileName(function.SourcePath))}\"{Environment.NewLine}");
@@ -664,6 +715,51 @@ public static partial class TranslatedBuildShardEmitter
         }
         return shards;
     }
+
+    private static string RewriteLinkSymbols(
+        string source,
+        IReadOnlyDictionary<string, string>? aliases)
+    {
+        if (aliases is null || aliases.Count == 0) return source;
+        return CxxIdentifierRegex().Replace(source, match =>
+            aliases.TryGetValue(match.Value, out var replacement) ? replacement : match.Value);
+    }
+
+    private static void ExpandCallerClosure(
+        IReadOnlyList<FunctionRecord> functions,
+        HashSet<uint> sensitive)
+    {
+        bool changed;
+        do
+        {
+            changed = false;
+            foreach (var function in functions)
+            {
+                if (sensitive.Contains(function.Address) ||
+                    !function.DirectCalls.Any(sensitive.Contains)) continue;
+                sensitive.Add(function.Address);
+                changed = true;
+            }
+        } while (changed);
+    }
+
+    private static FunctionRecord CloneWithSymbol(FunctionRecord record, string symbol) => new()
+    {
+        Address = record.Address,
+        Symbol = symbol,
+        Name = record.Name,
+        SourcePath = record.SourcePath,
+        SourceFingerprint = record.SourceFingerprint,
+        RegistrationKind = record.RegistrationKind,
+        Priority = record.Priority,
+        ModuleId = record.ModuleId,
+        PreservesNonvolatileFprs = record.PreservesNonvolatileFprs,
+        NonvolatileFprWriteMask = record.NonvolatileFprWriteMask,
+        DirectCalls = record.DirectCalls,
+        CompileCostWeight = record.CompileCostWeight,
+        SourceText = record.SourceText,
+        ExcludedByNativeOverride = record.ExcludedByNativeOverride,
+    };
 
     private static string LowerStableDirectCalls(
         string source,
@@ -904,7 +1000,9 @@ public static partial class TranslatedBuildShardEmitter
         {
             var group = groups[index];
             if (group.Count == 0) continue;
-            var identity = string.Join("\n", group.Select(record => $"{record.Address:X8}:{record.Symbol}:{record.SourceFingerprint}"));
+            var identity = string.Join("\n", group.Select(record =>
+                $"{record.Address:X8}:{record.Symbol}:{record.SourceFingerprint}:" +
+                $"{(traits.TryGetValue(record.Address, out var trait) && trait.MustRemainDynamicallyDispatchable)}"));
             var hash = ChecksumUtilities.Sha256Hex(Encoding.UTF8.GetBytes($"{profile}\n{identity}"));
             var path = Path.Combine(directory, $"registration_{index:D2}_{hash[..16]}.cpp");
             var source = new StringBuilder();
@@ -925,7 +1023,7 @@ public static partial class TranslatedBuildShardEmitter
                     $"    {{0x{record.Address:X8}u, \"{Escape(record.Name)}\", &{record.Symbol}, {kind}, {Bool(record.PreservesNonvolatileFprs)}, 0x{record.NonvolatileFprWriteMask:X8}u, {record.Priority}u, {record.ModuleId}ull, {Bool(dynamic)}}},");
             }
             source.AppendLine("};");
-            source.AppendLine("const BulkTranslatedFunctionRegistrar kRegistrar(kRecords, std::size(kRecords));");
+            source.AppendLine($"const BulkTranslatedFunctionRegistrar kRegistrar(\"{Escape(profile)}\", kRecords, std::size(kRecords));");
             source.AppendLine("} // namespace");
             WriteIfChanged(path, source.ToString());
             paths.Add(path);
@@ -1132,5 +1230,8 @@ public static partial class TranslatedBuildShardEmitter
 
     [GeneratedRegex(@"InvokeDirectCpu<0x(?<address>[0-9A-Fa-f]{8})u>\s*\(\s*ctx\s*\)")]
     private static partial Regex DirectCallRegex();
+
+    [GeneratedRegex(@"[A-Za-z_][A-Za-z0-9_]*")]
+    private static partial Regex CxxIdentifierRegex();
 
 }

@@ -111,13 +111,13 @@ public sealed class TranslatedBuildShardEmitterTests
             var shardText = File.ReadAllText(shard);
             Assert.Contains("#include \"abi_bridge.h\"", shardText);
             Assert.DoesNotContain("#include \"" + Path.GetFullPath(Path.Combine(functions, "func_80001000.cpp")).Replace('\\', '/'), shardText);
-            Assert.Contains("MKW_STATIC_TRANSLATED_CALL(0x80002000u, func_80002000, ctx);", shardText);
+            Assert.Contains("InvokeDirectCpu<0x80002000u>(ctx);", shardText);
             Assert.Contains("ApplyRuntimeCallOptions(Target, Context)", shardText);
 
             var portableBaseTraits = Directory.GetFiles(Path.Combine(output, "base_portable_sensitive"), "*_traits.h").Single();
             var portableRetroTraits = Directory.GetFiles(Path.Combine(output, "retro_portable_sensitive"), "*_traits.h").Single();
-            Assert.Contains("MKW_TRANSLATED_TRAIT(80002000, func_80002000,", File.ReadAllText(portableBaseTraits));
-            Assert.Contains("MKW_TRANSLATED_TRAIT(80002000, rr_80002000,", File.ReadAllText(portableRetroTraits));
+            Assert.DoesNotContain("MKW_TRANSLATED_TRAIT(80002000,", File.ReadAllText(portableBaseTraits));
+            Assert.DoesNotContain("MKW_TRANSLATED_TRAIT(80002000,", File.ReadAllText(portableRetroTraits));
             var baseDispatch = Directory.GetFiles(Path.Combine(output, "base_dispatch"), "*.cpp").Single();
             var baseDispatchText = File.ReadAllText(baseDispatch);
             Assert.Contains("const StaticIndirectDispatchSegment kSegments[256]", baseDispatchText);
@@ -151,7 +151,7 @@ public sealed class TranslatedBuildShardEmitterTests
     }
 
     [Fact]
-    public void BindsDirectCallsToTheSelectedProfileWinner()
+    public void KeepsOverriddenTargetsDynamicallyDispatchable()
     {
         var root = Path.Combine(Path.GetTempPath(), $"translator-same-tu-calls-{Guid.NewGuid():N}");
         var functions = Path.Combine(root, "functions");
@@ -247,8 +247,17 @@ public sealed class TranslatedBuildShardEmitterTests
             var baseSpecific = Directory.GetFiles(Path.Combine(output, "base_portable_sensitive"), "*.cpp")
                 .Select(File.ReadAllText)
                 .Aggregate(string.Concat);
-            Assert.Contains("MKW_STATIC_TRANSLATED_CALL(0x80005000u, func_80005000, ctx);", baseSpecific);
+            Assert.Contains("InvokeDirectCpu<0x80005000u>(ctx);", baseSpecific);
             Assert.Contains("MKW_STATIC_TRANSLATED_CALL(0x80002000u, func_80002000, ctx);", baseSpecific);
+
+            var baseTraits = Directory.GetFiles(Path.Combine(output, "base_portable_sensitive"), "*_traits.h")
+                .Select(File.ReadAllText)
+                .Aggregate(string.Concat);
+            var retroTraits = Directory.GetFiles(Path.Combine(output, "retro_portable_sensitive"), "*_traits.h")
+                .Select(File.ReadAllText)
+                .Aggregate(string.Concat);
+            Assert.DoesNotContain("MKW_TRANSLATED_TRAIT(80005000,", baseTraits);
+            Assert.DoesNotContain("MKW_TRANSLATED_TRAIT(80005000,", retroTraits);
 
             // The lowering choice participates in shard identity, so a rebuild is
             // byte-identical and file identities are stable.

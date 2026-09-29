@@ -81,7 +81,7 @@ public class ScalarPairedBoundaryCodeGenTests
     {
         var code = Emit(new IrCall("f2", "PPC_Frsqrte", new[] { IrValue.Register("f1") }));
 
-        Assert.Contains("PPC_Frsqrte(f1.d)", code, StringComparison.Ordinal);
+        Assert.Contains("PpcFrsqrteStateInline(f2.d, f1.d)", code, StringComparison.Ordinal);
         Assert.DoesNotContain("PPC_PsFromScalarInline(f1.d)", code, StringComparison.Ordinal);
     }
 
@@ -233,11 +233,11 @@ public class ScalarPairedBoundaryCodeGenTests
                 IrValue.Imm(0),
                 "frsp"));
 
-        Assert.Contains("PpcFmulsInline(", code, StringComparison.Ordinal);
-        Assert.Contains("PpcFmaddInline(", code, StringComparison.Ordinal);
-        Assert.Contains("PpcFmsubInline(", code, StringComparison.Ordinal);
-        Assert.Contains("PpcFnmaddInline(", code, StringComparison.Ordinal);
-        Assert.Contains("PpcFnmsubInline(", code, StringComparison.Ordinal);
+        Assert.Contains("PpcFmulsStateInline(f2.d,", code, StringComparison.Ordinal);
+        Assert.Contains("PpcFmaddStateInline(f5.d,", code, StringComparison.Ordinal);
+        Assert.Contains("PpcFmsubStateInline(f9.d,", code, StringComparison.Ordinal);
+        Assert.Contains("PpcFnmaddStateInline(f13.d,", code, StringComparison.Ordinal);
+        Assert.Contains("PpcFnmsubStateInline(f17.d,", code, StringComparison.Ordinal);
         Assert.Contains("PpcForceSingleValueInline(", code, StringComparison.Ordinal);
     }
 

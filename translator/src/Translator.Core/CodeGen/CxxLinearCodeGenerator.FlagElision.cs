@@ -159,7 +159,10 @@ public sealed partial class CxxLinearCodeGenerator
 
                         switch (instruction)
                         {
-                            case IrSetCrField setCr when !live.HasCrField(setCr.FieldIndex & 7):
+                            case IrSetCrField setCr when
+                                !IsFloatValue(setCr.Left, types) &&
+                                !IsFloatValue(setCr.Right, types) &&
+                                !live.HasCrField(setCr.FieldIndex & 7):
                                 suppressed.Add((block.Label, index));
                                 continue;
 
@@ -482,6 +485,10 @@ public sealed partial class CxxLinearCodeGenerator
         }
 
         var isFloat = IsFloatValue(setCr.Left, types) || IsFloatValue(setCr.Right, types);
+        if (isFloat)
+        {
+            return null;
+        }
         return new FusedCompare(setCr.Left, setCr.Right, setCr.IsUnsigned, isFloat, comparison.Value);
     }
 

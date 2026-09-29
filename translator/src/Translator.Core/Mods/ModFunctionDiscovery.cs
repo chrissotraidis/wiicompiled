@@ -13,6 +13,60 @@ public sealed record ModFunctionStart(uint Address, string Reason);
 /// </summary>
 public static class ModFunctionDiscovery
 {
+    public static IEnumerable<uint> DiscoverCallbackCompareEntries(
+        uint moduleGuestBase,
+        uint moduleImageEnd,
+        byte[] relocatedModuleImage)
+    {
+        var codeLength = Math.Min(
+            relocatedModuleImage.Length,
+            checked((int)(moduleImageEnd - moduleGuestBase)));
+        var dispatchReloads = new List<int>();
+        for (var offset = 0; offset + 4 <= codeLength; offset += 4)
+        {
+            var word = PpcWordFields.ReadBigEndianWord(relocatedModuleImage, offset);
+            if (word == 0x813E81D4u) // lwz r9,-0x7e2c(r30)
+            {
+                dispatchReloads.Add(offset);
+            }
+        }
+
+        for (var offset = 0; offset + 4 <= codeLength; offset += 4)
+        {
+            var current = PpcWordFields.ReadBigEndianWord(relocatedModuleImage, offset);
+            var opcode = current & 0xFC000000u;
+            var isImmediateCompare = opcode == 0x28000000u || opcode == 0x2C000000u;
+            if (isImmediateCompare && dispatchReloads.Any(reload => Math.Abs(reload - offset) <= 0x80))
+            {
+                yield return checked(moduleGuestBase + (uint)offset);
+            }
+        }
+    }
+
+    public static IEnumerable<uint> DiscoverIndirectEntryPoints(
+        IReadOnlyList<PpcInstruction> instructions,
+        uint moduleStart,
+        uint moduleEnd)
+    {
+        foreach (var instruction in instructions)
+        {
+            if (!string.Equals(instruction.Mnemonic, "bctr", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            foreach (var target in instruction.BranchTargets)
+            {
+                if (target >= moduleStart &&
+                    target < moduleEnd &&
+                    (target & 0x3u) == 0)
+                {
+                    yield return target;
+                }
+            }
+        }
+    }
+
     public static IReadOnlyList<ModFunctionStart> DiscoverKamekFunctions(
         KamekChunk chunk,
         uint moduleGuestBase,
@@ -100,6 +154,15 @@ public static class ModFunctionDiscovery
         foreach (var address in DiscoverTailEntryFunctions(moduleGuestBase, moduleImageEnd, relocatedModuleImage, starts.Keys))
         {
             AddImageAddress(address, "module tail-entry scan");
+        }
+
+        foreach (var address in DiscoverCallbackCompareEntries(
+                     moduleGuestBase, moduleImageEnd, relocatedModuleImage))
+        {
+            // Some payload callback tables resume at comparison blocks inside a
+            // larger translated function. The ordinary CFG cannot reach those
+            // blocks, so publish compares clustered around a dispatch-table reload.
+            AddImageAddress(address, "module callback compare entry");
         }
 
         return starts

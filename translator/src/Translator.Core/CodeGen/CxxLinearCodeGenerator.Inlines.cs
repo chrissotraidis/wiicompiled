@@ -173,10 +173,13 @@ public sealed partial class CxxLinearCodeGenerator
                         $"static_cast<double>({(scalarSpec.NoNiVariant
                             ? $"static_cast<float>({arguments[0]} {scalarSpec.Operator} {arguments[1]})"
                             : $"PpcForceSingleValueInline({arguments[0]} {scalarSpec.Operator} {arguments[1]})")})",
+                    ScalarInlineKind.StatefulCall => string.Empty,
                     _ => throw new InvalidOperationException(
                         $"Unknown scalar inline kind '{scalarSpec.Kind}'.")
                 };
-                sb.AppendLine($"{pad}{dest} = {expression};");
+                sb.AppendLine(scalarSpec.Kind == ScalarInlineKind.StatefulCall
+                    ? $"{pad}{scalarSpec.Helper}({dest}, {string.Join(", ", arguments)});"
+                    : $"{pad}{dest} = {expression};");
             }
 
             // Match the old scalar helper cases: a missing destination is a
@@ -274,6 +277,11 @@ public sealed partial class CxxLinearCodeGenerator
                 }
                 return true;
 
+            case "PPC_FRES":
+                if (hasDest)
+                    EmitPairedResult($"PpcFresValueStateInline({dest}, {WrapForScalar(0)})");
+                return true;
+
             case "PPC_PSTOSCALAR":
                 // PPC_PsToScalar(value): Extract ps0 as double
                 if (hasDest)
@@ -308,6 +316,8 @@ public sealed partial class CxxLinearCodeGenerator
                         : _activeResidency?.Cr(written: true);
                     if (crDestination is null)
                         return false;
+                    var ordered = target.Contains("CMPO", StringComparison.OrdinalIgnoreCase) ? "true" : "false";
+                    sb.AppendLine($"{pad}(void)PpcCompareStateInline({ordered}, {laneHelper}({left}), {laneHelper}({right}));");
                     sb.AppendLine($"{pad}SetCRFloatResident({crDestination}, static_cast<uint32_t>({GetArg(0)}) & 7u, " +
                                   $"{laneHelper}({left}), {laneHelper}({right}));");
                     return true;
@@ -355,6 +365,7 @@ public sealed partial class CxxLinearCodeGenerator
     {
         HelperCall,
         RoundedBinary,
+        StatefulCall,
     }
 
     private readonly record struct PairedInlineSpec(
@@ -454,75 +465,52 @@ public sealed partial class CxxLinearCodeGenerator
     {
         var specs = new Dictionary<string, ScalarInlineSpec>(StringComparer.OrdinalIgnoreCase);
 
-        static void AddHelper(
+        static void AddStateful(
             Dictionary<string, ScalarInlineSpec> destination,
             string target,
             string helper,
-            params int[] argumentOrder) =>
-            destination.Add(
-                target,
-                new ScalarInlineSpec(
-                    ScalarInlineKind.HelperCall,
-                    helper,
-                    Operator: null,
-                    NoNiVariant: false,
-                    ArgumentOrder: argumentOrder));
-
-        static void AddHelperNoNi(
-            Dictionary<string, ScalarInlineSpec> destination,
-            string target,
-            string noNiTarget,
-            string helper,
-            string noNiHelper,
             params int[] argumentOrder)
         {
-            AddHelper(destination, target, helper, argumentOrder);
-            destination.Add(
-                noNiTarget,
-                new ScalarInlineSpec(
-                    ScalarInlineKind.HelperCall,
-                    noNiHelper,
-                    Operator: null,
-                    NoNiVariant: true,
-                    ArgumentOrder: argumentOrder));
+            destination.Add(target, new ScalarInlineSpec(
+                ScalarInlineKind.StatefulCall, helper, Operator: null,
+                NoNiVariant: false, ArgumentOrder: argumentOrder));
         }
 
-        static void AddRoundedBinary(
+        static void AddStatefulNoNi(
             Dictionary<string, ScalarInlineSpec> destination,
             string target,
             string noNiTarget,
-            string @operator)
+            string helper,
+            params int[] argumentOrder)
         {
-            destination.Add(
-                target,
-                new ScalarInlineSpec(
-                    ScalarInlineKind.RoundedBinary,
-                    Helper: null,
-                    Operator: @operator,
-                    NoNiVariant: false,
-                    ArgumentOrder: new[] { 0, 1 }));
-            destination.Add(
-                noNiTarget,
-                new ScalarInlineSpec(
-                    ScalarInlineKind.RoundedBinary,
-                    Helper: null,
-                    Operator: @operator,
-                    NoNiVariant: true,
-                    ArgumentOrder: new[] { 0, 1 }));
+            AddStateful(destination, target, helper, argumentOrder);
+            destination.Add(noNiTarget, new ScalarInlineSpec(
+                ScalarInlineKind.StatefulCall, helper, Operator: null,
+                NoNiVariant: true, ArgumentOrder: argumentOrder));
         }
 
-        AddRoundedBinary(specs, "PPC_FADDS", "PPC_FADDSNONI", "+");
-        AddRoundedBinary(specs, "PPC_FSUBS", "PPC_FSUBSNONI", "-");
-        AddHelperNoNi(
-            specs, "PPC_FMULS", "PPC_FMULSNONI",
-            "PpcFmulsInline", "PpcFmulsNoNiInline", 0, 1);
-        AddRoundedBinary(specs, "PPC_FDIVS", "PPC_FDIVSNONI", "/");
+        AddStatefulNoNi(specs, "PPC_FADDS", "PPC_FADDSNONI", "PpcFaddsStateInline", 0, 1);
+        AddStatefulNoNi(specs, "PPC_FSUBS", "PPC_FSUBSNONI", "PpcFsubsStateInline", 0, 1);
+        AddStatefulNoNi(specs, "PPC_FMULS", "PPC_FMULSNONI", "PpcFmulsStateInline", 0, 1);
+        AddStatefulNoNi(specs, "PPC_FDIVS", "PPC_FDIVSNONI", "PpcFdivsStateInline", 0, 1);
+        AddStateful(specs, "PPC_FADD", "PpcFaddStateInline", 0, 1);
+        AddStateful(specs, "PPC_FSUB", "PpcFsubStateInline", 0, 1);
+        AddStateful(specs, "PPC_FMUL", "PpcFmulStateInline", 0, 1);
+        AddStateful(specs, "PPC_FDIV", "PpcFdivStateInline", 0, 1);
 
-        AddHelper(specs, "PPC_FSQRT", "std::sqrt", 0);
-        AddHelper(specs, "PPC_FMADD", "PpcFmaddInline", 0, 1, 2);
-        AddHelper(specs, "PPC_FMSUB", "PpcFmsubInline", 0, 1, 2);
-        AddHelper(specs, "PPC_FNMADD", "PpcFnmaddInline", 0, 1, 2);
-        AddHelper(specs, "PPC_FNMSUB", "PpcFnmsubInline", 0, 1, 2);
+        AddStateful(specs, "PPC_FSQRT", "PpcFsqrtStateInline", 0);
+        AddStateful(specs, "PPC_FSQRTS", "PpcFsqrtsStateInline", 0);
+        AddStateful(specs, "PPC_FCTIW", "PpcFctiwStateInline", 0);
+        AddStateful(specs, "PPC_FCTIWZ", "PpcFctiwzStateInline", 0);
+        AddStateful(specs, "PPC_FRSQRTE", "PpcFrsqrteStateInline", 0);
+        AddStateful(specs, "PPC_FMADD", "PpcFmaddStateInline", 0, 1, 2);
+        AddStateful(specs, "PPC_FMSUB", "PpcFmsubStateInline", 0, 1, 2);
+        AddStateful(specs, "PPC_FNMADD", "PpcFnmaddStateInline", 0, 1, 2);
+        AddStateful(specs, "PPC_FNMSUB", "PpcFnmsubStateInline", 0, 1, 2);
+        AddStateful(specs, "PPC_FMADDS", "PpcFmaddsStateInline", 0, 1, 2);
+        AddStateful(specs, "PPC_FMSUBS", "PpcFmsubsStateInline", 0, 1, 2);
+        AddStateful(specs, "PPC_FNMADDS", "PpcFnmaddsStateInline", 0, 1, 2);
+        AddStateful(specs, "PPC_FNMSUBS", "PpcFnmsubsStateInline", 0, 1, 2);
 
         return specs;
     }
@@ -535,7 +523,7 @@ public sealed partial class CxxLinearCodeGenerator
     {
         "PPC_FCMP", "PPC_CRSETBIT", "PPC_CRLOGICAL", "PPC_MCRF", "PPC_CNTLZW", "PPC_GETCARRY",
         "PPC_UPDATECARRYSUB", "PPC_UPDATECARRYADD", "PPC_UPDATECARRYSHIFTRIGHT", "PPC_PSFROMSCALAR",
-        "PPC_PSTOSCALAR", "PPC_PSMR", "PPC_PSCMPO0", "PPC_PSCMPU0", "PPC_PSCMPO1", "PPC_PSCMPU1",
+        "PPC_PSTOSCALAR", "PPC_FRES", "PPC_PSMR", "PPC_PSCMPO0", "PPC_PSCMPU0", "PPC_PSCMPO1", "PPC_PSCMPU1",
         "PPC_PSQL", "PPC_PSQST"
     };
 
