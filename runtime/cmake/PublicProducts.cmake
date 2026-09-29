@@ -211,6 +211,7 @@ function(mkw_configure_product target)
     target_link_libraries(${target} PRIVATE mkw::pugixml mkw::toml11 mkw::cryptopp)
     if(MKW_GAME_PACK STREQUAL "APP")
         target_compile_options(${target} PRIVATE -fvisibility=default)
+        target_compile_definitions(${target} PRIVATE MKW_GAME_PACK_APP=1)
         if(APPLE)
             # Let the pack bind to the runtime's symbols in the executable.
             target_link_options(${target} PRIVATE "-Wl,-export_dynamic" "-Wl,-unexported_symbol,_func_*")
