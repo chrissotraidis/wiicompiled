@@ -27,7 +27,7 @@ struct MemoryReservation {
 // un-inlinable calls plus a register spill each for three instructions of work.
 // Game pack (include/game_pack.h): one copy, in the app.
 #if defined(MKW_GAME_PACK_MODULE)
-extern thread_local uint32_t g_currentTranslatedExecutionAddress;
+extern __thread uint32_t g_currentTranslatedExecutionAddress;
 #else
 inline thread_local uint32_t g_currentTranslatedExecutionAddress = 0;
 #endif

@@ -55,7 +55,7 @@ struct CpuContext {
 
 // Game pack (include/game_pack.h): one copy, in the app.
 #if defined(MKW_GAME_PACK_MODULE)
-extern thread_local CpuContext* g_currentCpuContext;
+extern __thread CpuContext* g_currentCpuContext;
 #else
 inline thread_local CpuContext* g_currentCpuContext = nullptr;
 #endif

@@ -12,6 +12,11 @@
 // Bump when the runtime/pack interface changes; the app refuses other values.
 #define KARTPAD_GAME_PACK_ABI 2u
 
+// Runtime state that lives in headers exists once, in the app: with
+// MKW_GAME_PACK_MODULE the headers declare it extern for the pack. Thread-local
+// ones use __thread, which reaches the app's variable directly; a C++
+// thread_local declaration would call an accessor the app does not export.
+
 struct CpuContext;
 
 // Translated functions that the app's native code calls by name: it wraps or
