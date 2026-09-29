@@ -1375,13 +1375,12 @@ int RuntimeMain(int argc, char** argv) {
     std::string currentEntryLabel;
 
     try {
-        // Published app: the translated game code arrives as the player's own
-        // game pack. Load it before any profile, registry or guest code runs.
-        GamePack::EnsureLoaded();
         if (argc != 1) {
             throw std::invalid_argument("The game runtime does not accept command-line options; use Config.toml through the installed host.");
         }
 #if defined(__APPLE__) && TARGET_OS_IOS
+        // The first-launch screens run here; without a game pack they show
+        // "Add Your Game with PadForge" and do not continue.
         if (!KartPadMobileEnsureGameDataAvailable()) {
             SetRuntimeExitCodeImpl(0);
             ShutdownProcessTranscript();
@@ -1389,6 +1388,9 @@ int RuntimeMain(int argc, char** argv) {
         }
         RuntimeConfigFile::Reload();
 #endif
+        // Published app: the translated game code arrives as the player's own
+        // game pack. Load it before any profile, registry or guest code runs.
+        GamePack::EnsureLoaded();
         RuntimeConfigFile::LogLoadedConfig();
 #if defined(__APPLE__) && TARGET_OS_IOS
         if (const char* requestedProfile = KartPadMobileSelectedRuntimeProfile()) {
