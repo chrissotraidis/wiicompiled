@@ -27,6 +27,12 @@ uint32_t SDA2_BASE = 0;
 
 namespace {
 void (*g_initializeDataSections)() = nullptr;
+void (*const* g_originals)(CpuContext*) = nullptr;
+enum OriginalIndex {
+#define KARTPAD_ORIGINAL_INDEX(hex) kOriginal_##hex,
+    KARTPAD_GAME_PACK_ORIGINALS(KARTPAD_ORIGINAL_INDEX)
+#undef KARTPAD_ORIGINAL_INDEX
+};
 }
 
 // The pack declares these header variables extern (MKW_GAME_PACK_MODULE) and
@@ -51,37 +57,15 @@ extern "C" void InitializeDataSections() {
     g_initializeDataSections();
 }
 
-// A few HLE routines call the original translated function they stand in for.
-// Other builds link those calls directly; here they resolve through the
-// registry the pack fills when it loads. Hidden, so they never interpose on the
-// pack's own definitions.
-namespace {
-template <uint32_t Address>
-void CallPackFunction(CpuContext* ctx) {
-    static void (*target)(CpuContext*) = nullptr;
-    if (!target) {
-        const auto* info = TranslatedFunctionRegistry::FindByAddressPtr(Address);
-        if (!info || !info->entryPoint) {
-            RuntimeCrash::FatalMissingGuestTarget(Address, ctx);
-        }
-        target = reinterpret_cast<void (*)(CpuContext*)>(info->entryPoint);
-    }
-    target(ctx);
-}
-}  // namespace
-
+// The app's native code calls a few translated functions by name (see
+// KARTPAD_GAME_PACK_ORIGINALS). Other builds link those calls directly; here
+// they go to the pack's own functions. Hidden, so they never interpose on the
+// pack's definitions.
 #define KARTPAD_PACK_FUNCTION(hex) \
     extern "C" __attribute__((visibility("hidden"))) void func_##hex(CpuContext* ctx) { \
-        CallPackFunction<0x##hex##u>(ctx); \
+        g_originals[kOriginal_##hex](ctx); \
     }
-KARTPAD_PACK_FUNCTION(8012B830)
-KARTPAD_PACK_FUNCTION(801A0620)
-KARTPAD_PACK_FUNCTION(801A1ED8)
-KARTPAD_PACK_FUNCTION(801A961C)
-KARTPAD_PACK_FUNCTION(801AADE0)
-KARTPAD_PACK_FUNCTION(801D8D30)
-KARTPAD_PACK_FUNCTION(801D9E94)
-KARTPAD_PACK_FUNCTION(8055531C)
+KARTPAD_GAME_PACK_ORIGINALS(KARTPAD_PACK_FUNCTION)
 #undef KARTPAD_PACK_FUNCTION
 
 void GamePack::EnsureLoaded() {
@@ -101,7 +85,8 @@ void GamePack::EnsureLoaded() {
                                  (reason ? reason : "unknown error"));
     }
     const auto* info = static_cast<const KartPadGamePackInfo*>(dlsym(handle, "kartpad_game_pack_info"));
-    if (!info || info->abi != KARTPAD_GAME_PACK_ABI || !info->initializeDataSections) {
+    if (!info || info->abi != KARTPAD_GAME_PACK_ABI || !info->initializeDataSections ||
+        !info->originals) {
         throw std::runtime_error("This file is not a KartPad game pack for this app. Rebuild it with PadForge.");
     }
     if (!info->appVersion || std::strcmp(info->appVersion, KARTPAD_APP_VERSION) != 0) {
@@ -112,6 +97,7 @@ void GamePack::EnsureLoaded() {
     }
     RuntimeConfig::SDA1_BASE = info->sda1Base;
     RuntimeConfig::SDA2_BASE = info->sda2Base;
+    g_originals = info->originals;
     g_initializeDataSections = info->initializeDataSections;
 }
 
