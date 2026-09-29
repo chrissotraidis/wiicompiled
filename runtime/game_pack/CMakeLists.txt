@@ -97,7 +97,8 @@ target_include_directories(kartpad_game PRIVATE
     "${MKW_RUNTIME_SOURCE_DIR}/../aurora-main/include")
 target_include_directories(kartpad_game SYSTEM PRIVATE "${MKW_KARTPAD_RUNTIME_INCLUDE}")
 target_compile_definitions(kartpad_game PRIVATE
-    NOMINMAX TARGET_PC "KARTPAD_APP_VERSION=\"${KARTPAD_APP_VERSION}\"" ${MKW_GAME_PACK_DEFINITIONS})
+    NOMINMAX TARGET_PC MKW_GAME_PACK_MODULE=1
+    "KARTPAD_APP_VERSION=\"${KARTPAD_APP_VERSION}\"" ${MKW_GAME_PACK_DEFINITIONS})
 # Same options as the runtime's translated targets (cmake/PublicProducts.cmake).
 target_compile_options(kartpad_game PRIVATE
     -O2 -fno-fast-math -ffp-contract=off -fno-slp-vectorize -w -pipe

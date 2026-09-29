@@ -25,7 +25,12 @@ struct MemoryReservation {
 // Defined here as `inline thread_local` with a constant initializer, not `extern thread_local`
 // in the .cpp: every indirect dispatch scopes this, so an out-of-line ctor/dtor would cost two
 // un-inlinable calls plus a register spill each for three instructions of work.
+// Game pack (include/game_pack.h): one copy, in the app.
+#if defined(MKW_GAME_PACK_MODULE)
+extern thread_local uint32_t g_currentTranslatedExecutionAddress;
+#else
 inline thread_local uint32_t g_currentTranslatedExecutionAddress = 0;
+#endif
 
 class ScopedTranslatedExecutionAddress {
 public:
