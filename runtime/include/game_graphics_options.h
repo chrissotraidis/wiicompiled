@@ -5,9 +5,15 @@
 
 namespace RuntimeGameGraphicsOptions {
 
+// Game pack (include/game_pack.h): one copy, in the app.
+#if defined(MKW_GAME_PACK_MODULE)
+extern std::atomic<uint32_t> g_disabledPostProcessingPaths;
+#else
+inline std::atomic<uint32_t> g_disabledPostProcessingPaths{0};
+#endif
+
 inline std::atomic<uint32_t>& DisabledPostProcessingPathsState() noexcept {
-    static std::atomic<uint32_t> disabledMask{0};
-    return disabledMask;
+    return g_disabledPostProcessingPaths;
 }
 
 inline uint32_t DisabledPostProcessingPaths() noexcept {

@@ -135,7 +135,12 @@ inline const RawDispatchRecord* FindStaticIndirectDispatchEntry(
 }
 
 void RegisterStaticIndirectDispatchTable(const StaticIndirectDispatchTable* table);
+// Game pack (include/game_pack.h): one copy, in the app.
+#if defined(MKW_GAME_PACK_MODULE)
+extern std::atomic<const StaticIndirectDispatchTable*> g_publishedStaticIndirectDispatchTable;
+#else
 inline std::atomic<const StaticIndirectDispatchTable*> g_publishedStaticIndirectDispatchTable{nullptr};
+#endif
 
 class StaticIndirectDispatchTableRegistrar {
 public:
@@ -313,16 +318,27 @@ struct IndirectResolvedDispatchMemoEntry {
     uint32_t address;
     const TranslatedFunctionInfo* info;
 };
+// Game pack (include/game_pack.h): one copy, in the app.
+#if defined(MKW_GAME_PACK_MODULE)
+extern thread_local IndirectResolvedDispatchMemoEntry
+    g_indirectResolvedDispatchMemo[kIndirectDispatchCacheEntries];
+#else
 inline thread_local IndirectResolvedDispatchMemoEntry
     g_indirectResolvedDispatchMemo[kIndirectDispatchCacheEntries]{};
+#endif
 
 struct IndirectRawDispatchMemoEntry {
     bool valid;
     uint32_t address;
     const RawDispatchRecord* record;
 };
+#if defined(MKW_GAME_PACK_MODULE)
+extern thread_local IndirectRawDispatchMemoEntry
+    g_indirectRawDispatchMemo[kIndirectDispatchCacheEntries];
+#else
 inline thread_local IndirectRawDispatchMemoEntry
     g_indirectRawDispatchMemo[kIndirectDispatchCacheEntries]{};
+#endif
 
 class TranslatedFunctionRegistry {
 public:
@@ -393,7 +409,11 @@ private:
     // Finalize publishes immutable registry, generated-table, and dynamic raw
     // dispatch storage. Header-inlined cache hits are enabled only after that
     // release publication, so a pre-finalization miss can never poison them.
+#if defined(MKW_GAME_PACK_MODULE)
+    static std::atomic_bool lookupPublished_;  // Game pack: one copy, in the app.
+#else
     inline static std::atomic_bool lookupPublished_{false};
+#endif
 };
 
 // Cold, profile-owned registration data is emitted in compact table shards.

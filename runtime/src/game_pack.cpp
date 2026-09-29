@@ -10,6 +10,9 @@
 #include <string>
 
 #include "abi_bridge.h"
+#include "game_graphics_options.h"
+#include "isa/ppc_isa_fpenv.h"
+#include "recomp_mod_loader.h"
 #include "system_bridge.h"
 
 #ifndef KARTPAD_APP_VERSION
@@ -24,6 +27,21 @@ uint32_t SDA2_BASE = 0;
 
 namespace {
 void (*g_initializeDataSections)() = nullptr;
+}
+
+// The pack declares these header variables extern (MKW_GAME_PACK_MODULE) and
+// binds to the app's copy. Referencing them here guarantees the app defines
+// and exports each one, whatever else the runtime happens to use.
+extern "C" __attribute__((used, visibility("default"))) void kartpad_game_pack_shared_state() {
+    (void)&g_currentCpuContext;
+    (void)&g_mkwHostNiActive;
+    (void)&g_mkwNiFlushThreshold;
+    (void)&RecompMod::g_currentTranslatedExecutionAddress;
+    (void)&g_publishedStaticIndirectDispatchTable;
+    (void)&g_indirectResolvedDispatchMemo;
+    (void)&g_indirectRawDispatchMemo;
+    (void)TranslatedFunctionRegistry::IsLookupPublished();
+    (void)&RuntimeGameGraphicsOptions::g_disabledPostProcessingPaths;
 }
 
 extern "C" void InitializeDataSections() {
