@@ -1,6 +1,6 @@
 // Host check for the VI retrace backlog policy (#330).
-// clang++ -std=c++20 -I runtime/src/hle runtime/tests/vi_pacing_tests.cpp && ./a.out
-#include "vi_pacing.h"
+// clang++ -std=c++20 runtime/tests/vi_pacing_tests.cpp && ./a.out
+#include "../app_only/vi_pacing.h"
 
 #include <cstdio>
 
