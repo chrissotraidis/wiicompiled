@@ -9,7 +9,8 @@
 #include "fiber_manager.h"
 #include "platform/host_platform.h"
 #include "runtime_log.h"
-#include "vi_pacing.h"
+// App-only headers live outside the pack include paths, so they are not part of the pack interface.
+#include "../../app_only/vi_pacing.h"
 
 #include <dolphin/vi.h>
 
