@@ -16,6 +16,7 @@ set(MKW_TRANSLATED_SHARD_MANIFEST "" CACHE FILEPATH "Translator-owned aggregate 
 set(MKW_GAME_PACK_RUNTIME "" CACHE FILEPATH "The published app's runtime library to link against")
 set(MKW_KARTPAD_RUNTIME_INCLUDE "" CACHE PATH "KartPad's header-only PowerPC semantics")
 set(KARTPAD_APP_VERSION "" CACHE STRING "App version this pack is built for")
+set(KARTPAD_PACK_FINGERPRINT "" CACHE STRING "Pack interface fingerprint (kartpad_builder.pack_fingerprint)")
 # Must equal the app build's platform definitions: they shape code inlined from
 # the runtime headers into every translated function.
 set(MKW_GAME_PACK_DEFINITIONS "" CACHE STRING "Platform compile definitions of the app build")
@@ -27,6 +28,9 @@ foreach(required MKW_TRANSLATED_SHARD_MANIFEST MKW_GAME_PACK_RUNTIME MKW_KARTPAD
 endforeach()
 if(NOT KARTPAD_APP_VERSION)
     message(FATAL_ERROR "KARTPAD_APP_VERSION is required")
+endif()
+if(NOT KARTPAD_PACK_FINGERPRINT MATCHES "^[0-9a-f]+$")
+    message(FATAL_ERROR "KARTPAD_PACK_FINGERPRINT is required (lowercase hex)")
 endif()
 if(NOT CMAKE_SIZEOF_VOID_P EQUAL 8 OR NOT CMAKE_SYSTEM_PROCESSOR MATCHES "^(arm64|aarch64|ARM64)$")
     message(FATAL_ERROR "Game packs are built for 64-bit arm64 only")
@@ -105,7 +109,8 @@ target_include_directories(kartpad_game PRIVATE
 target_include_directories(kartpad_game SYSTEM PRIVATE "${MKW_KARTPAD_RUNTIME_INCLUDE}")
 target_compile_definitions(kartpad_game PRIVATE
     NOMINMAX TARGET_PC MKW_GAME_PACK_MODULE=1
-    "KARTPAD_APP_VERSION=\"${KARTPAD_APP_VERSION}\"" ${MKW_GAME_PACK_DEFINITIONS})
+    "KARTPAD_APP_VERSION=\"${KARTPAD_APP_VERSION}\""
+    "KARTPAD_PACK_FINGERPRINT=\"${KARTPAD_PACK_FINGERPRINT}\"" ${MKW_GAME_PACK_DEFINITIONS})
 # Same options as the runtime's translated targets (cmake/PublicProducts.cmake).
 target_compile_options(kartpad_game PRIVATE
     -O2 -fno-fast-math -ffp-contract=off -fno-slp-vectorize -w -pipe

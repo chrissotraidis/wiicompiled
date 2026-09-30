@@ -10,7 +10,17 @@
 #include <cstdint>
 
 // Bump when the runtime/pack interface changes; the app refuses other values.
-#define KARTPAD_GAME_PACK_ABI 2u
+// ABI 3: a pack is accepted by its interface fingerprint, not the app version.
+#define KARTPAD_GAME_PACK_ABI 3u
+
+// The pack interface fingerprint (KARTPAD_PACK_FINGERPRINT) is computed by
+// KartPad's builder (kartpad_builder.pack_fingerprint) from the staged runtime
+// both the app and the pack are built from: the headers a pack compiles
+// against, the definitions that reach them and the translation identity. An app
+// update that changes none of them keeps working with the player's pack. The
+// pack also exports this prefix followed by the fingerprint, so an app can read
+// it from the file before loading it.
+#define KARTPAD_GAME_PACK_FINGERPRINT_PREFIX "kartpad-pack-fingerprint:"
 
 // Runtime state that lives in headers exists once, in the app: with
 // MKW_GAME_PACK_MODULE the headers declare it extern for the pack. Thread-local
@@ -30,11 +40,12 @@ struct CpuContext;
 extern "C" {
 struct KartPadGamePackInfo {
     uint32_t abi;
-    const char* appVersion;  // The app version the pack was built for.
+    const char* appVersion;  // The app version the pack was built for (messages only).
     uint32_t sda1Base;       // _SDA_BASE_ (r13)
     uint32_t sda2Base;       // _SDA2_BASE_ (r2)
     void (*initializeDataSections)();
     void (*const* originals)(CpuContext*);  // KARTPAD_GAME_PACK_ORIGINALS order
+    const char* fingerprint;                // ABI 3: must equal the app's KARTPAD_PACK_FINGERPRINT
 };
 }
 
