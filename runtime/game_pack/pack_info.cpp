@@ -5,6 +5,9 @@
 #ifndef KARTPAD_APP_VERSION
 #error "A game pack records the app version it was built for"
 #endif
+#ifndef KARTPAD_PACK_FINGERPRINT
+#error "A game pack records the interface fingerprint it was built for"
+#endif
 
 extern "C" void InitializeDataSections();
 
@@ -18,6 +21,10 @@ static void (*const kOriginals[])(CpuContext*) = {
 #undef KARTPAD_ORIGINAL_ENTRY
 };
 
+// Readable in the file without loading it (see KARTPAD_GAME_PACK_FINGERPRINT_PREFIX).
+extern "C" __attribute__((used, visibility("default"))) const char kartpad_game_pack_fingerprint[] =
+    KARTPAD_GAME_PACK_FINGERPRINT_PREFIX KARTPAD_PACK_FINGERPRINT;
+
 extern "C" __attribute__((visibility("default"))) const KartPadGamePackInfo kartpad_game_pack_info = {
     KARTPAD_GAME_PACK_ABI,
     KARTPAD_APP_VERSION,
@@ -25,4 +32,5 @@ extern "C" __attribute__((visibility("default"))) const KartPadGamePackInfo kart
     RuntimeConfig::SDA2_BASE,
     &InitializeDataSections,
     kOriginals,
+    kartpad_game_pack_fingerprint + sizeof(KARTPAD_GAME_PACK_FINGERPRINT_PREFIX) - 1,
 };

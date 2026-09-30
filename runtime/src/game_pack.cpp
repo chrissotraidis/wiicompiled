@@ -18,6 +18,9 @@
 #ifndef KARTPAD_APP_VERSION
 #error "The published app records its version for the game pack check"
 #endif
+#ifndef KARTPAD_PACK_FINGERPRINT
+#error "The published app records its pack interface fingerprint for the game pack check"
+#endif
 
 // Supplied by the pack instead of the generated RuntimeConfig.h.
 namespace RuntimeConfig {
@@ -89,11 +92,12 @@ void GamePack::EnsureLoaded() {
         !info->originals) {
         throw std::runtime_error("This file is not a KartPad game pack for this app. Rebuild it with PadForge.");
     }
-    if (!info->appVersion || std::strcmp(info->appVersion, KARTPAD_APP_VERSION) != 0) {
+    // Any app version whose pack interface is unchanged accepts the pack.
+    if (!info->fingerprint || std::strcmp(info->fingerprint, KARTPAD_PACK_FINGERPRINT) != 0) {
         throw std::runtime_error(std::string("This game pack was built for KartPad ") +
                                  (info->appVersion ? info->appVersion : "?") +
-                                 " but this app is " KARTPAD_APP_VERSION
-                                 ". Rebuild it with PadForge for this version.");
+                                 ", which is not compatible with KartPad " KARTPAD_APP_VERSION
+                                 ". Build a new one with PadForge.");
     }
     RuntimeConfig::SDA1_BASE = info->sda1Base;
     RuntimeConfig::SDA2_BASE = info->sda2Base;

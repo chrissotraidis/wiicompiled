@@ -86,7 +86,8 @@ if(MKW_GAME_PACK STREQUAL "APP")
     # API stays visible so the pack's translated code can bind to it.
     target_include_directories(mkw_runtime_common BEFORE PRIVATE "${MKW_RUNTIME_SOURCE_DIR}/game_pack/shim")
     target_compile_definitions(mkw_runtime_common PRIVATE
-        MKW_GAME_PACK_APP=1 "KARTPAD_APP_VERSION=\"${KARTPAD_APP_VERSION}\"")
+        MKW_GAME_PACK_APP=1 "KARTPAD_APP_VERSION=\"${KARTPAD_APP_VERSION}\""
+        "KARTPAD_PACK_FINGERPRINT=\"${KARTPAD_PACK_FINGERPRINT}\"")
     target_compile_options(mkw_runtime_common PRIVATE -fvisibility=default)
 endif()
 
