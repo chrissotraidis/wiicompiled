@@ -78,7 +78,7 @@ void GamePack::EnsureLoaded() {
     const char* path = std::getenv("KARTPAD_GAME_PACK");
     if (!path || !*path) {
         throw std::runtime_error(
-            "No game pack is installed. Build yours with PadForge from your own disc, "
+            "No game pack is installed. Build yours with PadMint from your own disc, "
             "then add it in KartPad.");
     }
     void* handle = dlopen(path, RTLD_NOW | RTLD_GLOBAL);
@@ -90,14 +90,14 @@ void GamePack::EnsureLoaded() {
     const auto* info = static_cast<const KartPadGamePackInfo*>(dlsym(handle, "kartpad_game_pack_info"));
     if (!info || info->abi != KARTPAD_GAME_PACK_ABI || !info->initializeDataSections ||
         !info->originals) {
-        throw std::runtime_error("This file is not a KartPad game pack for this app. Rebuild it with PadForge.");
+        throw std::runtime_error("This file is not a KartPad game pack for this app. Rebuild it with PadMint.");
     }
     // Any app version whose pack interface is unchanged accepts the pack.
     if (!info->fingerprint || std::strcmp(info->fingerprint, KARTPAD_PACK_FINGERPRINT) != 0) {
         throw std::runtime_error(std::string("This game pack was built for KartPad ") +
                                  (info->appVersion ? info->appVersion : "?") +
                                  ", which is not compatible with KartPad " KARTPAD_APP_VERSION
-                                 ". Build a new one with PadForge.");
+                                 ". Build a new one with PadMint.");
     }
     RuntimeConfig::SDA1_BASE = info->sda1Base;
     RuntimeConfig::SDA2_BASE = info->sda2Base;
