@@ -1,4 +1,4 @@
-﻿cmake_minimum_required(VERSION 3.16)
+﻿cmake_minimum_required(VERSION 3.25)
 project(mkw_recompiled)
 
 if(NOT CMAKE_CXX_COMPILER_ID MATCHES "^(Clang|AppleClang)$" OR NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
@@ -22,6 +22,7 @@ if(NOT CMAKE_BUILD_TYPE STREQUAL "Release")
 endif()
 
 option(MKW_BUILD_PRODUCTS "Build translated WiiCompiled product targets" ON)
+option(MKW_BUILD_PSQ_TESTS "Build focused PSQ ISA tests" OFF)
 
 # Preprocessor definitions that belong to this project's own code (the runtime,
 # the translated shards and the product glue) and to nothing else. They are
@@ -107,6 +108,44 @@ if(NOT MKW_NATIVE_PREBUILT_DIR)
     set_target_properties(mkw_cryptopp PROPERTIES UNITY_BUILD OFF)
 endif()
 
+# TLS for non-Windows guest network HLE (runtime/src/hle/net/network_ssl.cpp) - the Windows path
+# uses Schannel (a Windows-only OS API), which has no equivalent on Linux/Android, so this project
+# needs its own TLS library there. mbed TLS was chosen over OpenSSL specifically because it cross-
+# compiles cleanly for Android with nothing beyond a plain C toolchain (no perl/asm build-script
+# dependency the way OpenSSL's build has), matching how this project already prefers toolchain-
+# simple libraries (see Crypto++ above, similarly stripped of ASM/SIMD for portability).
+# The from-source build fetches a pinned upstream tarball with a checked SHA-256.
+# The Linux native prebuilt package instead ships its compiled archives and headers.
+# Bump both values in cmake/MbedTLSPin.cmake when updating; the hash comes from
+# upstream's signed `mbedtls-<version>-sha256sum.txt` release asset.
+#
+# The alias exists on every platform so the link lines in cmake/PublicProducts.cmake stay
+# platform-independent, but it is only populated where network_ssl.cpp actually compiles the mbed
+# TLS path (`#ifndef _WIN32`). Windows keeps Schannel and must not fetch anything: its builds run
+# with FETCHCONTENT_FULLY_DISCONNECTED=ON against the offline dependency set prepared by
+# Launcher/Prepare-Dependencies.ps1, so an unconditional fetch would fail a clean configure there
+# and would also add a dependency Windows never links.
+add_library(mkw_mbedtls INTERFACE)
+add_library(mkw::mbedtls ALIAS mkw_mbedtls)
+if(NOT MKW_PLATFORM_WINDOWS)
+    include("${CMAKE_CURRENT_LIST_DIR}/cmake/MbedTLSPin.cmake")
+    if(NOT MKW_NATIVE_PREBUILT_DIR)
+        include(FetchContent)
+        FetchContent_Declare(mkw_mbedtls_upstream
+            URL "https://github.com/Mbed-TLS/mbedtls/releases/download/mbedtls-${MKW_MBEDTLS_VERSION}/mbedtls-${MKW_MBEDTLS_VERSION}.tar.bz2"
+            URL_HASH SHA256=${MKW_MBEDTLS_SHA256}
+            DOWNLOAD_EXTRACT_TIMESTAMP FALSE
+        )
+        # Subproject mode already disables testing and codegen; it still enables programs.
+        set(ENABLE_PROGRAMS OFF CACHE BOOL "" FORCE)
+        set(ENABLE_TESTING OFF CACHE BOOL "" FORCE)
+        set(MBEDTLS_FATAL_WARNINGS OFF CACHE BOOL "" FORCE)
+        set(DISABLE_PACKAGE_CONFIG_AND_INSTALL ON CACHE BOOL "" FORCE)
+        FetchContent_MakeAvailable(mkw_mbedtls_upstream)
+        target_link_libraries(mkw_mbedtls INTERFACE MbedTLS::mbedtls MbedTLS::mbedx509 MbedTLS::mbedcrypto)
+    endif()
+endif()
+
 set(MKW_TRANSLATED_COMPILE_JOBS 0 CACHE STRING
     "Cap on concurrently compiling translated shard TUs via a Ninja job pool (0 = uncapped). \
 Scheduling only - never affects output bytes, so it is deliberately outside the canonical flag fingerprint.")
@@ -123,6 +162,18 @@ set(MKW_AURORA_DIR "${CMAKE_CURRENT_LIST_DIR}/../aurora-main")
 # The translator's explicit float casts are PPC single-precision rounding points.
 # Fast-math may erase them and change guest-visible integer conversions.
 set(MKW_TRANSLATED_PPC_FP_OPTIONS -fno-fast-math -ffp-contract=off)
+
+set(MKW_PPC_SEMANTIC_RUNTIME_SOURCES
+    "${CMAKE_CURRENT_LIST_DIR}/src/ppc_helpers.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/src/fpu_helpers.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/src/ppc_quantized.cpp")
+set_source_files_properties(${MKW_PPC_SEMANTIC_RUNTIME_SOURCES} PROPERTIES
+    SKIP_UNITY_BUILD_INCLUSION ON
+    SKIP_PRECOMPILE_HEADERS ON
+    COMPILE_OPTIONS "${MKW_TRANSLATED_PPC_FP_OPTIONS}")
+# Match the optimization policy of the translated callers as well as their FP policy.
+set_property(SOURCE "${CMAKE_CURRENT_LIST_DIR}/src/ppc_quantized.cpp" APPEND PROPERTY
+    COMPILE_OPTIONS -O2 -fno-slp-vectorize)
 
 # ----------------------------------------------------------------------
 # Third-party: aurora-main (provides SDL3 + GPU backends)
@@ -272,6 +323,27 @@ set_target_properties(mkw_platform PROPERTIES UNITY_BUILD OFF)
 # Keep these independent from Aurora's BUILD_TESTING option: they validate the
 # project's host-platform contracts, not Aurora's third-party test suite.
 enable_testing()
+if(MKW_BUILD_PSQ_TESTS)
+    add_executable(mkw_psq_helpers_tests
+        "${CMAKE_CURRENT_LIST_DIR}/tests/psq_helpers_tests.cpp"
+        "${CMAKE_CURRENT_LIST_DIR}/src/ppc_quantized.cpp")
+    target_include_directories(mkw_psq_helpers_tests PRIVATE
+        "${CMAKE_CURRENT_LIST_DIR}/tests/psq_memory"
+        "${CMAKE_CURRENT_LIST_DIR}/include/isa"
+        "${CMAKE_CURRENT_LIST_DIR}/include")
+    target_compile_features(mkw_psq_helpers_tests PRIVATE cxx_std_17)
+    target_compile_options(mkw_psq_helpers_tests PRIVATE
+        -O2 ${MKW_TRANSLATED_PPC_FP_OPTIONS} -fno-slp-vectorize)
+    if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(AMD64|amd64|x86_64|X86_64)$")
+        target_compile_options(mkw_psq_helpers_tests PRIVATE -march=x86-64-v3)
+    endif()
+    set_target_properties(mkw_psq_helpers_tests PROPERTIES UNITY_BUILD OFF)
+    add_test(NAME mkw_psq_helpers_tests COMMAND mkw_psq_helpers_tests)
+    add_test(NAME mkw_psq_reserved_tests COMMAND "${CMAKE_COMMAND}"
+        "-DPSQ_TEST_EXECUTABLE=$<TARGET_FILE:mkw_psq_helpers_tests>"
+        -P "${CMAKE_CURRENT_LIST_DIR}/tests/psq_reserved_tests.cmake")
+endif()
+
 add_executable(mkw_platform_paths_tests "${CMAKE_CURRENT_LIST_DIR}/tests/platform_paths_tests.cpp")
 target_link_libraries(mkw_platform_paths_tests PRIVATE mkw_platform)
 target_compile_features(mkw_platform_paths_tests PRIVATE cxx_std_17)
