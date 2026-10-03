@@ -80,6 +80,7 @@ static wgpu::SurfaceCapabilities g_surfaceCapabilities;
 bool g_bcTexturesSupported;
 bool g_adapterIsQualcomm;
 int g_adapterAdrenoModel;
+bool g_adapterIsPowerVR;
 // Written by Dawn's device-loss callback and consumed at ordered frame boundaries. Keep the
 // callback free of logging, allocation, teardown and renderer state mutation.
 static std::atomic_bool g_deviceLost{false};
@@ -673,6 +674,8 @@ bool initialize(AuroraBackend auroraBackend) {
         g_adapterAdrenoModel = adreno_model_from_name(std::string_view(text.data, text.length));
       }
     }
+    g_adapterIsPowerVR = g_adapterInfo.vendorID == 0x1010 || contains(g_adapterInfo.device, "PowerVR") ||
+                         contains(g_adapterInfo.vendor, "Imagination") || contains(g_adapterInfo.description, "PowerVR");
   }
   const auto backendName = magic_enum::enum_name(g_backendType);
   auto adapterName = g_adapterInfo.device;

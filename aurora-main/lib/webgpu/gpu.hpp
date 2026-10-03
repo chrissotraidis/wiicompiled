@@ -62,6 +62,8 @@ extern bool g_bcTexturesSupported;
 // Qualcomm/Adreno adapter; selects the KartPad vertex repack workaround by default.
 extern bool g_adapterIsQualcomm;
 extern int g_adapterAdrenoModel;
+// Imagination PowerVR adapter; also gets the vertex repack workaround by default (#304).
+extern bool g_adapterIsPowerVR;
 
 // "Adreno (TM) 840" -> 840; 0 when the name has no Adreno model number.
 inline int adreno_model_from_name(std::string_view name) noexcept {

@@ -132,11 +132,17 @@ int active_mode() noexcept {
     // track textures there, but in Retro Rewind other karts and item boxes went missing, so it
     // stays a manual choice. Everything else stays off by default.
     const int adreno = webgpu::g_adapterAdrenoModel;
+    // PowerVR (Moto G54 BXM-8-256, #304) shows the same failure on every 3D draw: exploded
+    // track geometry and missing models, while 2D layout draws are fine. It gets mode 2.
+    const bool powervr = webgpu::g_adapterIsPowerVR;
     const bool automatic = value < 0;
-    const int result = automatic ? ((qualcomm && adreno >= 800 && adreno < 1000) ? 1 : 0) : value;
-    Log.info("KartPadPNMTX repack mode={} source={} qualcomm={} adreno={} enabled={}",
+    const int result = !automatic ? value
+                       : powervr  ? 2
+                       : (qualcomm && adreno >= 800 && adreno < 1000) ? 1
+                                  : 0;
+    Log.info("KartPadPNMTX repack mode={} source={} qualcomm={} adreno={} powervr={} enabled={}",
              result == 2 ? "all_draws" : (result == 1 ? "on" : "off"), automatic ? "auto" : "override", qualcomm,
-             adreno, result >= 1);
+             adreno, powervr, result >= 1);
     return result;
   }();
   return mode;
