@@ -2257,6 +2257,7 @@ TEST_F(GXFifoTest, DrawTopologyTemplatesPreserveExactGxIndexOrder) {
   const auto decodeAndReadIndices = [&](GXPrimitive primitive, u16 count) {
     std::vector<u8> fifo;
     append_test_draw(fifo, primitive, count);
+    aurora::gfx::testing::reset_vertex_push_record();
     decode_fifo(fifo);
     return aurora::gfx::testing::last_pushed_indices();
   };
@@ -2271,7 +2272,7 @@ TEST_F(GXFifoTest, DrawTopologyTemplatesPreserveExactGxIndexOrder) {
             (std::vector<u16>{0, 1, 2, 0, 2, 3, 0, 3, 4}));
   g_gxState.stateDirty = true;
   EXPECT_EQ(decodeAndReadIndices(GX_TRIANGLEFAN, 2),
-            (std::vector<u16>{0, 1}));
+            (std::vector<u16>{}));
   g_gxState.stateDirty = true;
   EXPECT_EQ(decodeAndReadIndices(GX_TRIANGLESTRIP, 6),
             (std::vector<u16>{0, 1, 2, 2, 1, 3, 2, 3, 4, 4, 3, 5}));
@@ -4244,7 +4245,9 @@ TEST_F(GXFifoTest, CopyTexClearTruePassesScratchRectAndUpdateMasksToResolve) {
   EXPECT_NEAR(resolve.clearColorValue.y(), 128.f / 255.f, 1.f / 255.f);
   EXPECT_NEAR(resolve.clearColorValue.z(), 192.f / 255.f, 1.f / 255.f);
   EXPECT_NEAR(resolve.clearColorValue.w(), 32.f / 255.f, 1.f / 255.f);
-  EXPECT_NEAR(resolve.clearDepthValue, 0x123456 / 16777216.f, 1.f / 16777216.f);
+  const float gxDepth = 0x123456 / 16777216.f;
+  EXPECT_NEAR(resolve.clearDepthValue, aurora::gx::UseReversedZ ? 1.f - gxDepth : gxDepth,
+              1.f / 16777216.f);
   EXPECT_EQ(resolve.resolveFormat, GX_TF_RGBA8);
   EXPECT_FALSE(resolve.halfScale);
   EXPECT_FALSE(resolve.forceOpaqueAlpha);

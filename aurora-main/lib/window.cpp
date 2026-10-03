@@ -47,6 +47,7 @@ SDL_Renderer* g_renderer;
 float g_frameBufferScale = 0.f;
 bool g_frameBufferAspectFit = true;
 std::mutex g_presentAspectMutex;
+std::atomic_bool g_forceAspect169{false};
 bool g_presentSurfaceFill = false;
 int g_presentAspectWidth = 0;
 int g_presentAspectHeight = 0;
@@ -568,7 +569,20 @@ AuroraWindowSize get_window_size() {
   int fb_w = native_fb_w;
   int fb_h = native_fb_h;
   const auto [baseW, baseH] = vi::configured_fb_size();
-  if (g_frameBufferAspectFit && baseW > 0 && baseH > 0) {
+  if (g_forceAspect169.load(std::memory_order_acquire) && native_fb_w > 0 && native_fb_h > 0) {
+    if (g_frameBufferScale > 0.f && baseW > 0 && baseH > 0) {
+      const auto [scaledW, scaledH] =
+          scale_frame_buffer_to_aspect(static_cast<int>(baseW), static_cast<int>(baseH),
+                                       g_frameBufferScale, 16.f / 9.f);
+      fb_w = scaledW;
+      fb_h = scaledH;
+    } else {
+      fb_w = std::min(native_fb_w,
+                      std::max(1, static_cast<int>(std::lround(native_fb_h * (16.f / 9.f)))));
+      fb_h = std::min(native_fb_h,
+                      std::max(1, static_cast<int>(std::lround(native_fb_w * (9.f / 16.f)))));
+    }
+  } else if (g_frameBufferAspectFit && baseW > 0 && baseH > 0) {
     float renderScale = g_frameBufferScale > 0.f ? g_frameBufferScale : 1.f;
     if (g_frameBufferScale <= 0.f) {
       renderScale = std::min(static_cast<float>(native_fb_w) / static_cast<float>(baseW),
@@ -816,6 +830,14 @@ void set_frame_buffer_aspect_fit(bool fit) {
   request_frame_buffer_resize();
 }
 
+void set_force_aspect_16_9(bool force) {
+  if (g_forceAspect169.load(std::memory_order_relaxed) == force) {
+    return;
+  }
+  g_forceAspect169.store(force, std::memory_order_release);
+  request_frame_buffer_resize();
+}
+
 void set_present_surface_fill(bool fill) {
   std::lock_guard lock(g_presentAspectMutex);
   g_presentSurfaceFill = fill;
@@ -841,6 +863,10 @@ void unlock_present_aspect_ratio() {
 }
 
 bool get_present_aspect_ratio(float& aspect) noexcept {
+  if (g_forceAspect169.load(std::memory_order_acquire)) {
+    aspect = 16.f / 9.f;
+    return true;
+  }
   bool surfaceFill;
   int aspectWidth, aspectHeight;
   {

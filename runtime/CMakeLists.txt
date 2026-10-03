@@ -98,6 +98,11 @@ if(NOT MKW_NATIVE_PREBUILT_DIR)
     set_target_properties(mkw_cryptopp PROPERTIES UNITY_BUILD OFF)
 endif()
 
+# KartPad: guest TLS uses the platform backends in network_ssl.cpp (Apple
+# Secure Transport; Android's mbed TLS is built by android/app). Upstream's
+# FetchContent mbed TLS block is intentionally omitted so configuring never
+# downloads a second TLS library or defines a clashing mbedtls target.
+
 set(MKW_TRANSLATED_COMPILE_JOBS 0 CACHE STRING
     "Cap on concurrently compiling translated shard TUs via a Ninja job pool (0 = uncapped). \
 Scheduling only - never affects output bytes, so it is deliberately outside the canonical flag fingerprint.")
@@ -115,6 +120,18 @@ set(MKW_AURORA_DIR "${CMAKE_CURRENT_LIST_DIR}/../aurora-main"
 # The translator's explicit float casts are PPC single-precision rounding points.
 # Fast-math may erase them and change guest-visible integer conversions.
 set(MKW_TRANSLATED_PPC_FP_OPTIONS -fno-fast-math -ffp-contract=off)
+
+set(MKW_PPC_SEMANTIC_RUNTIME_SOURCES
+    "${CMAKE_CURRENT_LIST_DIR}/src/ppc_helpers.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/src/fpu_helpers.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/src/ppc_quantized.cpp")
+set_source_files_properties(${MKW_PPC_SEMANTIC_RUNTIME_SOURCES} PROPERTIES
+    SKIP_UNITY_BUILD_INCLUSION ON
+    SKIP_PRECOMPILE_HEADERS ON
+    COMPILE_OPTIONS "${MKW_TRANSLATED_PPC_FP_OPTIONS}")
+# Match the optimization policy of the translated callers as well as their FP policy.
+set_property(SOURCE "${CMAKE_CURRENT_LIST_DIR}/src/ppc_quantized.cpp" APPEND PROPERTY
+    COMPILE_OPTIONS -O2 -fno-slp-vectorize)
 
 # ----------------------------------------------------------------------
 # Third-party: aurora-main (provides SDL3 + GPU backends)
