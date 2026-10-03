@@ -1,4 +1,5 @@
 #include "hle_stubs.h"
+#include "input_bindings.h"
 #include "memory.h"
 
 #include <SDL3/SDL_keyboard.h>
@@ -983,6 +984,24 @@ void WriteUnifiedStatus(uint32_t addr, const WiiRemoteInput::KpadSample* sample)
         Memory::Write8(addr + kUDev, kDevCore);
         Memory::Write8(addr + kUFmt, kFmtCoreAccDpd);
     }
+}
+
+// Neutral sticks and no buttons while an overlay owns input; the remote stays connected.
+bool ReadSample(uint32_t chan, WiiRemoteInput::KpadSample& sample) {
+    if (!WiiRemoteInput::ReadKpadSample(chan, sample)) {
+        return false;
+    }
+    if (InputBindings::InputBlocked()) {
+        sample.hold = 0;
+        sample.clHold = 0;
+        sample.stick[0] = sample.stick[1] = 0.0f;
+        sample.clLStick[0] = sample.clLStick[1] = 0.0f;
+        sample.clRStick[0] = sample.clRStick[1] = 0.0f;
+        sample.clLStickRaw[0] = sample.clLStickRaw[1] = 0;
+        sample.clRStickRaw[0] = sample.clRStickRaw[1] = 0;
+        sample.clTriggerL = sample.clTriggerR = 0;
+    }
+    return true;
 }
 
 } // namespace

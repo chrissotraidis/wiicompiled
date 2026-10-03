@@ -39,6 +39,7 @@ extern "C" float KartPadMobileFpsOverlayScale();
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <limits>
 #include <iostream>
 #include <string>
@@ -123,6 +124,7 @@ int g_displayMode = [] {
 bool g_skipUnreadyPipelines = RuntimeConfigFile::SkipUnreadyPipelines(true);
 bool g_disableCopyFilter = RuntimeConfigFile::DisableCopyFilter(true);
 bool g_showFps = RuntimeConfigFile::ShowFps(true);
+bool g_forceAspect169 = RuntimeConfigFile::ForceAspect169Enabled();
 uint32_t g_disabledPostProcessingPaths = RuntimeConfigFile::DisabledPostProcessingPaths(0);
 std::array<int32_t, PAD_MAX_CONTROLLERS> g_configuredControllerIndices = [] {
     std::array<int32_t, PAD_MAX_CONTROLLERS> indices{};
@@ -193,6 +195,11 @@ uint64_t g_presentedFrame = 0;
 std::atomic_bool g_strapInputAccepted = false;
 std::atomic_uint64_t g_startupDismissFrame = UINT64_MAX;
 constexpr uint64_t kStrapTransitionCoverFrames = 60;
+std::atomic_bool g_bootShadersReady = false;
+bool g_bootShaderNotice = false;
+Clock::time_point g_bootShaderWaitStart{};
+constexpr uint32_t kBootShaderNoticeThreshold = 100;
+constexpr auto kBootShaderWaitLimit = std::chrono::minutes(3);
 
 constexpr std::array<ResolutionItem, 8> kResolutions = {{
     {"Auto (window size)", 0.0f}, {"Native (1x)", 1.0f}, {"1.5x", 1.5f}, {"2x", 2.0f},
@@ -1054,6 +1061,12 @@ void DrawAudioSettings() {
 
 void DrawGraphicsSettings() {
     g_displayMode = static_cast<int>(aurora_get_display_mode());
+    if (ImGui::Checkbox("Force 16:9", &g_forceAspect169)) {
+        SetMkwForceAspect169(g_forceAspect169);
+        RuntimeConfigFile::SetForceAspect169(g_forceAspect169);
+    }
+    ImGui::TextDisabled("Keep a 16:9 image with black bars when the window has another shape.");
+    ImGui::Separator();
     struct EffectFlag {
         const char* label;
         uint32_t flag;
@@ -1291,10 +1304,34 @@ void DrawStartupScreen() {
         const float startY = std::max(0.0f, (viewport->Size.y - titleSize.y) * 0.5f);
         ImGui::SetCursorPos(ImVec2(titleX, startY));
         ImGui::TextUnformatted(kTitle);
+        if (g_bootShaderNotice && !g_bootShadersReady.load(std::memory_order_relaxed)) {
+            ImGui::SetWindowFontScale(0.9f);
+            char line[96];
+            std::snprintf(line, sizeof(line), "Compiling shaders, please hold on: %u remaining",
+                          aurora_get_queued_pipeline_count());
+            const float lineX = std::max(0.0f, (viewport->Size.x - ImGui::CalcTextSize(line).x) * 0.5f);
+            ImGui::SetCursorPos(ImVec2(lineX, startY + titleSize.y * 1.8f));
+            ImGui::TextUnformatted(line);
+        }
     }
     ImGui::End();
     ImGui::PopStyleVar();
     ImGui::PopStyleColor();
+}
+
+void UpdateBootShaderState() {
+    if (g_bootShadersReady.load(std::memory_order_relaxed)) {
+        return;
+    }
+    const auto now = Clock::now();
+    if (g_bootShaderWaitStart == Clock::time_point{}) {
+        g_bootShaderWaitStart = now;
+    }
+    const uint32_t queued = aurora_get_queued_pipeline_count();
+    g_bootShaderNotice |= queued > kBootShaderNoticeThreshold;
+    if (queued == 0 || now - g_bootShaderWaitStart > kBootShaderWaitLimit) {
+        g_bootShadersReady.store(true, std::memory_order_release);
+    }
 }
 
 void DrawExitPrompt() {
@@ -1446,7 +1483,7 @@ void PersistDisplayModeIfChanged() {
 
 void ApplyInputBlockState() {
     const bool blocked = controller_mapping_wizard::IsActive() || g_rebind.active ||
-                         g_exitPromptOpen || g_topBarVisible;
+                         g_exitPromptOpen || g_topBarVisible || StartupScreenVisible();
     PADBlockInput(blocked);
     InputBindings::SetInputBlocked(blocked);
 }
@@ -1509,6 +1546,9 @@ void InitializeRuntimeSettings() noexcept {
     aurora_set_skip_unready_pipelines(g_skipUnreadyPipelines);
     g_strapInputAccepted.store(false, std::memory_order_relaxed);
     g_startupDismissFrame.store(UINT64_MAX, std::memory_order_relaxed);
+    g_bootShadersReady.store(false, std::memory_order_relaxed);
+    g_bootShaderNotice = false;
+    g_bootShaderWaitStart = {};
     PADBlockInput(false);
     InputBindings::SetInputBlocked(false);
 }
@@ -1590,6 +1630,7 @@ void Draw() noexcept {
     ApplyConfiguredMappings();
     PersistDisplayModeIfChanged();
     UpdateCursorAutoHide();
+    UpdateBootShaderState();
     if (!StartupScreenVisible()) {
         DrawShaderCompilationStatus();
     }
@@ -1603,6 +1644,7 @@ void Draw() noexcept {
 
 bool StartupScreenVisible() noexcept {
     return !g_strapInputAccepted.load(std::memory_order_acquire) ||
+           !g_bootShadersReady.load(std::memory_order_acquire) ||
            g_presentedFrame < g_startupDismissFrame.load(std::memory_order_relaxed);
 }
 

@@ -2,6 +2,7 @@
 #include "memory.h"
 
 #include <algorithm>
+#include <atomic>
 #include "aurora_events.h"
 #include "hle/gx/gx_dynamic_aspect.h"
 
@@ -15,6 +16,8 @@ namespace {
 
 bool g_widescreenConfigured = false;
 int g_aspectMode = 0;
+// Upstream's "Force 16:9" overlay toggle maps onto KartPad's 16:9 mode.
+std::atomic_bool g_requestedForceAspect169{false};
 uint32_t g_lastEggWidth43 = 0;
 uint32_t g_lastEggWidth169 = 0;
 
@@ -171,11 +174,13 @@ void UpdateMkwDynamicAspectSurface(uint32_t surfaceWidth, uint32_t surfaceHeight
     if (surfaceWidth == 0 || surfaceHeight == 0) {
         return;
     }
-    if (g_aspectMode == 2) {
+    const int aspectMode =
+        g_requestedForceAspect169.load(std::memory_order_acquire) ? 1 : g_aspectMode;
+    if (aspectMode == 2) {
         AuroraSetViewportPolicy(AURORA_VIEWPORT_STRETCH);
         VIUnlockAspectRatio();
         ApplyEggScreenRecords(surfaceWidth, surfaceHeight);
-    } else if (g_aspectMode == 1) {
+    } else if (aspectMode == 1) {
         AuroraSetViewportPolicy(AURORA_VIEWPORT_FIT);
         VILockAspectRatio(16, 9);
         ApplyEggScreenRecords(16, 9);
@@ -188,6 +193,14 @@ void UpdateMkwDynamicAspectSurface(uint32_t surfaceWidth, uint32_t surfaceHeight
 
 void ConfigureMkwDynamicAspect(bool widescreen, uint32_t surfaceWidth, uint32_t surfaceHeight) {
     ConfigureMkwMobileAspectMode(widescreen ? 2 : 0, surfaceWidth, surfaceHeight);
+}
+
+void SetMkwForceAspect169(bool enabled) {
+    g_requestedForceAspect169.store(enabled, std::memory_order_release);
+}
+
+bool MkwForceAspect169Requested() {
+    return g_requestedForceAspect169.load(std::memory_order_acquire);
 }
 
 void ConfigureMkwMobileAspectMode(int aspectMode, uint32_t surfaceWidth,

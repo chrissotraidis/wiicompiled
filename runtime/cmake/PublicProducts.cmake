@@ -121,16 +121,7 @@ foreach(source IN LISTS SOURCES)
     endif()
     set_source_files_properties("${source}" PROPERTIES UNITY_GROUP "${runtime_group}")
 endforeach()
-# These translation units implement guest-visible floating-point bit
-# semantics.  Keep them out of the fast-math runtime unity groups and apply
-# the same contraction/rounding policy as translated PPC shards.
-set(MKW_PPC_SEMANTIC_RUNTIME_SOURCES
-    "${MKW_RUNTIME_SOURCE_DIR}/src/ppc_helpers.cpp"
-    "${MKW_RUNTIME_SOURCE_DIR}/src/fpu_helpers.cpp")
-set_source_files_properties(${MKW_PPC_SEMANTIC_RUNTIME_SOURCES} PROPERTIES
-    SKIP_UNITY_BUILD_INCLUSION ON
-    SKIP_PRECOMPILE_HEADERS ON
-    COMPILE_OPTIONS "${MKW_TRANSLATED_PPC_FP_OPTIONS}")
+# PPC semantic sources are excluded from unity/PCH and configured in CMakeLists.txt.
 set_target_properties(mkw_runtime_common PROPERTIES UNITY_BUILD ON UNITY_BUILD_MODE GROUP)
 target_precompile_headers(mkw_runtime_common PRIVATE "${MKW_RUNTIME_SOURCE_DIR}/include/mkw_pch.h")
 mkw_apply_common_compile_options(mkw_runtime_common)
@@ -296,6 +287,8 @@ function(mkw_configure_product target)
     add_custom_command(TARGET ${target} POST_BUILD COMMAND ${CMAKE_COMMAND} -E copy_if_different
         "${MKW_INITIAL_PIPELINE_CACHE}"
         "$<TARGET_FILE_DIR:${target}>/initial_pipeline_cache.db")
+    # KartPad's Apple builds use Secure Transport and the system trust store, so
+    # upstream's mbed TLS CA bundle is not copied beside the app.
 endfunction()
 
 add_executable(WiiCompiled "${MKW_BASE_PRODUCT_SOURCE}" ${MKW_BASE_REGISTRATION_SOURCES})

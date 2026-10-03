@@ -15,6 +15,7 @@
 #include <cstring>
 #include "memory.h"
 #include "runtime_config.h"
+#include "aurora_events.h"
 #include "runtime_log.h"
 
 namespace {
