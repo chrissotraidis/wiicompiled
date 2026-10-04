@@ -786,6 +786,18 @@ void ShowRuntimeFatalPopup(std::string_view category, std::string_view details) 
                 message.append("\n\n[Additional details were written to the crash log.]");
             }
         }
+#if !defined(_WIN32)
+        // Phones and tablets have no native dialog here, so the player saw only a
+        // closed app or a black screen. KartPad's chooser shows this file once on
+        // the next launch and removes it.
+        {
+            std::error_code ec;
+            const std::filesystem::path logRoot = GetDefaultRuntimeLogDirectory();
+            std::filesystem::create_directories(logRoot, ec);
+            std::ofstream lastFatal(logRoot / "last_fatal.txt", std::ios::out | std::ios::trunc | std::ios::binary);
+            lastFatal << message;
+        }
+#endif
         message.append("\n\nSee the WiiCompiled Logs folder for the full diagnostic.");
 #if defined(_WIN32)
         ::MessageBoxA(nullptr, message.c_str(), "WiiCompiled - Fatal Error",
@@ -1649,7 +1661,18 @@ int RuntimeMain(int argc, char** argv) {
     }
 }
 
+#if defined(__APPLE__) && TARGET_OS_IOS
+// Provided by the KartPad app; weak so other hosts link without it.
+extern "C" __attribute__((weak)) void KartPadMobileRuntimeStopped();
+#endif
+
 int main(int argc, char** argv) {
-    return RuntimeMain(argc, argv);
+    const int code = RuntimeMain(argc, argv);
+#if defined(__APPLE__) && TARGET_OS_IOS
+    // SDL keeps an iOS app running after main returns, so a fatal error left
+    // only a black screen (#370). Let the app show what happened.
+    if (code != 0 && KartPadMobileRuntimeStopped != nullptr) KartPadMobileRuntimeStopped();
+#endif
+    return code;
 }
 extern "C" bool g_dynamicAspectRatioEnabled = false;
