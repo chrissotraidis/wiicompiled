@@ -198,6 +198,7 @@ public:
     }
     size_t Frame() const { return m_frame; }
     size_t PostStreamFrames() const { return m_postStreamFrames; }
+    bool FinishDispatched() const { return m_finishDispatched; }
     bool AutoArmAtCountdown(uint32_t stage)
     {
         const char* autoStart = std::getenv("KARTPAD_RKG_AUTOSTART_V2");
@@ -1360,7 +1361,24 @@ extern "C" bool KPad_RkgFixture_CalcInner(CpuContext* ctx)
     } catch (const Memory::AccessViolation&) {
         return false;
     }
-    if (!Fixture().Active() && !Fixture().AutoArmAtCountdown(stage)) return false;
+    // Cup harness (#131), test environment only: after a forced finish, give the
+    // controller back to the menus once the race is over. The next race's
+    // countdown arms the fixture again, up to the four races of a cup (the
+    // ending scenes also have a countdown and must keep normal input).
+    static const bool finishEachRace = [] {
+        const char* value = std::getenv("KARTPAD_RKG_FORCE_FINISH_EACH_RACE_V2");
+        return value != nullptr && std::strcmp(value, "1") == 0;
+    }();
+    static int armedRaces = 0;
+    if (!Fixture().Active()) {
+        if (finishEachRace && armedRaces >= 4) return false;
+        if (!Fixture().AutoArmAtCountdown(stage)) return false;
+        ++armedRaces;
+    }
+    if (finishEachRace && Fixture().FinishDispatched() && stage != 1 && stage != 2) {
+        Fixture().Disarm();
+        return false;
+    }
 
     const uint32_t controller = ctx->gpr[3];
     try {
@@ -1488,14 +1506,28 @@ extern "C" bool KPad_RkgFixture_CalcInner(CpuContext* ctx)
                 (Memory::Read32(localPlayer + 0x38) & 0x02u) == 0 &&
                 Fixture().ConsumeFinishRequest()) {
                 const CpuContext saved = *ctx;
+                // Cup harness (#131), test environment only: record the forced
+                // finish as 1st so a Grand Prix reaches the trophy ceremony.
+                const char* finishFirst = std::getenv("KARTPAD_RKG_FORCE_FINISH_FIRST_V2");
+                const uint8_t positionBefore = Memory::Read8(localPlayer + 0x20);
+                if (finishFirst != nullptr && std::strcmp(finishFirst, "1") == 0) {
+                    // Rankings follow race progress, so also mark the race as
+                    // fully completed (three laps: completion 4.0, lap 4).
+                    const float done = 4.0f;
+                    Memory::WriteFloat32(localPlayer + 0x0C, done);
+                    Memory::WriteFloat32(localPlayer + 0x10, done);
+                    Memory::Write16(localPlayer + 0x24, static_cast<uint16_t>(done));
+                    Memory::Write8(localPlayer + 0x20, 1);
+                }
                 ctx->gpr[3] = localPlayer;
                 ctx->gpr[4] = 2;  // normal online race completion status
                 ctx->gpr[5] = 1;  // use the normal no-cameras online path
                 InvokeDirectCpu<0x805342E8u>(ctx);
                 *ctx = saved;
                 std::fprintf(stderr,
-                             "[input-fixture] forced native finish player=%u frame=%zu post-stream=%zu\n",
-                             localPlayerId, Fixture().Frame(),
+                             "[input-fixture] forced native finish player=%u position=%u->%u frame=%zu post-stream=%zu\n",
+                             localPlayerId, positionBefore, Memory::Read8(localPlayer + 0x20),
+                             Fixture().Frame(),
                              Fixture().PostStreamFrames());
             }
         }
