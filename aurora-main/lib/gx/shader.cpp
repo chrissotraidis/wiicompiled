@@ -9,6 +9,7 @@
 #include <dolphin/gx/GXEnum.h>
 
 #include <array>
+#include <atomic>
 #include <mutex>
 #include <string_view>
 #include <utility>
@@ -2134,6 +2135,14 @@ fn fs_main(in: VertexOutput) -> {9} {{{6}{5}
   if (constantPnMtx) {
     Log.info("KartPadPNMTX shader_variant=constant config={:016x} postex={} nrm={}", hash,
              info.matrixLayout.postexCount, info.matrixLayout.nrmCount);
+  }
+  // #304: if a shader passes more values between stages than the GPU reports, the driver may
+  // drop or mangle them. Log the first few so a PowerVR report shows whether this happens.
+  static std::atomic_int interStageWarnings{0};
+  const auto interStageLimit = webgpu::g_adapterMaxInterStageVariables;
+  if (interStageLimit != 0 && vtxOutIdx > interStageLimit && interStageWarnings.fetch_add(1) < 5) {
+    Log.warn("KartPad inter-stage over limit: shader {:x} uses {} of {} varyings", hash, vtxOutIdx,
+             interStageLimit);
   }
   return webgpu::g_device.CreateShaderModule(&shaderDescriptor);
 }
