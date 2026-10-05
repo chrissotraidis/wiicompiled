@@ -75,6 +75,9 @@
 #include <aurora/gfx.h>
 #include <dolphin/gx/GXAurora.h>
 #include <dolphin/vi.h>
+#if !defined(_WIN32)
+#include <SDL3/SDL_messagebox.h>
+#endif
 
 // Defined in `runtime/src/hle/vi.cpp` (used by GX/VI HLE).
 extern std::atomic_bool g_auroraFrameActive;
@@ -783,9 +786,12 @@ void ShowRuntimeFatalPopup(std::string_view category, std::string_view details) 
         ::MessageBoxA(nullptr, message.c_str(), "WiiCompiled - Fatal Error",
                       MB_OK | MB_ICONERROR | MB_SETFOREGROUND | MB_TASKMODAL);
 #else
-        // The shipped product is Windows-first. Keep non-Windows builds safe
-        // and retain the console diagnostic when no native dialog is available.
         RT_LOGF(RT_TAG_RUNTIME, "fatal dialog: %s\n", message.c_str());
+        // macOS and Linux show the same message as Windows, so a fatal error
+        // doesn't close the game without a word. SDL's message box needs no
+        // parent window; if no dialog can be shown, the log line above remains.
+        SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "WiiCompiled - Fatal Error",
+                                 message.c_str(), nullptr);
 #endif
     } catch (...) {
         // Reporting a crash must never throw or mask the original failure.
