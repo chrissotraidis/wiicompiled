@@ -264,9 +264,10 @@ void encode(const wgpu::CommandEncoder& cmd, const wgpu::BindGroup& staticBindGr
     gx::DrawEncodeState state{};
     state.boundTextureBindGroup = gx::g_emptyTextureBindGroup.Get();
     // A pipeline that is not ready would leave one image empty and read as a mismatch, so the
-    // binding is checked here and the attempt retried instead.
-    if (bind_pipeline(s.draws[k].pipeline, pass, state.currentPipeline, true)) {
-      gx::render(s.draws[k], pass, state, true);
+    // binding is checked here and the attempt retried instead. Not waiting for it keeps the
+    // check from stalling a frame while the other layout's shader compiles.
+    if (bind_pipeline(s.draws[k].pipeline, pass, state.currentPipeline, false)) {
+      gx::render(s.draws[k], pass, state, false);
     } else {
       pipelinesReady = false;
     }
