@@ -2342,6 +2342,13 @@ bool submit_raw_draw(GXPrimitive prim, GXVtxFmt fmt, const uint8_t* vertices, ui
   return true;
 }
 
+// Draw self-check: one large skinned draw per session stays out of merging so the whole model is
+// compared (see kartpad_selfcheck.hpp). One atomic load per draw once the check has finished.
+static inline bool selfcheck_keeps_whole(u16 vtxCount) noexcept {
+  return vtxCount >= gfx::kartpad_selfcheck::MinVertices && g_gxState.vtxDesc[GX_VA_PNMTXIDX] == GX_DIRECT &&
+         gfx::kartpad_selfcheck::wanted();
+}
+
 static bool handle_draw(u8 cmd, const u8* data, u32& pos, u32 size, bool bigEndian) {
   ZoneScoped;
   GXVtxFmt fmt = static_cast<GXVtxFmt>(cmd & CP_VAT_MASK);
@@ -2376,7 +2383,7 @@ static bool handle_draw(u8 cmd, const u8* data, u32& pos, u32 size, bool bigEndi
   // Decide admission before allocating anything. The merged path needs only
   // vertices and indices; it must not resolve pipelines or upload arrays.
   // Try to merge with previous draw call
-  if (!g_gxState.stateDirty && kartpad_pnmtx_mode() < 0) LIKELY {
+  if (!g_gxState.stateDirty && kartpad_pnmtx_mode() < 0 && !selfcheck_keeps_whole(vtxCount)) LIKELY {
     auto* lastDraw = gfx::get_last_draw_command<DrawData>();
     // Expanded lines/points have different vertex interpretation even with one instance.
     // Triangle-list output has no restart index; index 65535 is usable.
@@ -2384,10 +2391,7 @@ static bool handle_draw(u8 cmd, const u8* data, u32& pos, u32 size, bool bigEndi
     if (lastDraw != nullptr && prim != GX_LINES && prim != GX_LINESTRIP && prim != GX_POINTS &&
         !lastDraw->expandedPrimitive && lastDraw->instanceCount == 1 &&
         uint64_t(lastDraw->vtxCount) +
-            vtxCount <= 65536u &&
-        // Draw self-check: one large skinned draw per session stays whole so it can be compared.
-        !(vtxCount >= gfx::kartpad_selfcheck::MinVertices && g_gxState.vtxDesc[GX_VA_PNMTXIDX] == GX_DIRECT &&
-          gfx::kartpad_selfcheck::wanted())) LIKELY {
+            vtxCount <= 65536u) LIKELY {
       mergeTarget = lastDraw;
     }
   }
