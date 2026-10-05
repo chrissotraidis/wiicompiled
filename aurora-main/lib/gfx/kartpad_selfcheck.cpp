@@ -11,6 +11,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
+#include <string>
 
 #if defined(__ANDROID__)
 #include <sys/system_properties.h>
@@ -37,7 +38,10 @@ struct Shared {
   Clock::time_point readyAt{};
   Clock::time_point stateSince{};
   unsigned attempts = 0;
-  gx::DrawData draws[2]{}; // [0] as the game drew it, [1] the other vertex layout
+  // [0] as the game drew it, [1] the other vertex layout, [2] (when count is 3) the game's layout
+  // with the constant (switch) matrix lookup instead of the indexed one.
+  gx::DrawData draws[3]{};
+  int count = 2;
   bool mainRepacked = false;
   uint32_t vertices = 0;
   Viewport viewport{};
@@ -47,7 +51,7 @@ struct Shared {
   wgpu::Extent3D size{};
   uint32_t samples = 1;
   uint32_t bytesPerRow = 0;
-  wgpu::Buffer readback[2];
+  wgpu::Buffer readback[3];
   int mapped = 0;
   bool mapFailed = false;
 };
@@ -83,40 +87,53 @@ void retry(Shared& s, const char* reason) {
 void compare(Shared& s) {
   const uint32_t w = s.size.width;
   const uint32_t h = s.size.height;
-  const auto* a = static_cast<const uint8_t*>(s.readback[0].GetConstMappedRange(0, uint64_t(s.bytesPerRow) * h));
-  const auto* b = static_cast<const uint8_t*>(s.readback[1].GetConstMappedRange(0, uint64_t(s.bytesPerRow) * h));
-  uint64_t drawnA = 0, drawnB = 0, differing = 0, strong = 0;
-  if (a != nullptr && b != nullptr) {
+  const uint64_t bytes = uint64_t(s.bytesPerRow) * h;
+  const uint8_t* image[3]{};
+  for (int k = 0; k < s.count; ++k) {
+    image[k] = static_cast<const uint8_t*>(s.readback[k].GetConstMappedRange(0, bytes));
+  }
+  // Covered pixels per image, and how many pixels of image k differ from the game's image [0].
+  uint64_t drawn[3]{}, differing[3]{}, strong[3]{};
+  bool readable = true;
+  for (int k = 0; k < s.count; ++k) readable = readable && image[k] != nullptr;
+  if (readable) {
     for (uint32_t y = 0; y < h; ++y) {
-      const uint8_t* ra = a + uint64_t(y) * s.bytesPerRow;
-      const uint8_t* rb = b + uint64_t(y) * s.bytesPerRow;
       for (uint32_t x = 0; x < w; ++x) {
-        const uint8_t* pa = ra + x * 4;
-        const uint8_t* pb = rb + x * 4;
-        const bool hasA = (pa[0] | pa[1] | pa[2] | pa[3]) != 0;
-        const bool hasB = (pb[0] | pb[1] | pb[2] | pb[3]) != 0;
-        drawnA += hasA;
-        drawnB += hasB;
-        int maxDiff = 0;
-        for (int c = 0; c < 4; ++c) maxDiff = std::max(maxDiff, std::abs(int(pa[c]) - int(pb[c])));
-        differing += maxDiff != 0;
-        strong += maxDiff > 16;
+        const uint64_t at = uint64_t(y) * s.bytesPerRow + x * 4;
+        const uint8_t* game = image[0] + at;
+        for (int k = 0; k < s.count; ++k) {
+          const uint8_t* p = image[k] + at;
+          drawn[k] += (p[0] | p[1] | p[2] | p[3]) != 0;
+          if (k == 0) continue;
+          int maxDiff = 0;
+          for (int c = 0; c < 4; ++c) maxDiff = std::max(maxDiff, std::abs(int(game[c]) - int(p[c])));
+          differing[k] += maxDiff != 0;
+          strong[k] += maxDiff > 16;
+        }
       }
     }
   }
-  s.readback[0].Unmap();
-  s.readback[1].Unmap();
-  const uint64_t drawn = std::max(drawnA, drawnB);
-  const bool tooSmall = drawn < MinDrawnPixels;
-  const char* result = tooSmall ? "inconclusive" : (strong > std::max<uint64_t>(16, drawn / 100) ? "mismatch" : "match");
+  for (int k = 0; k < s.count; ++k) s.readback[k].Unmap();
+  const auto differs = [&](int k) {
+    return strong[k] > std::max<uint64_t>(16, std::max(drawn[0], drawn[k]) / 100);
+  };
+  const uint64_t most = std::max({drawn[0], drawn[1], drawn[2]});
+  const bool tooSmall = most < MinDrawnPixels;
+  // mismatch: the vertex layout changes the picture. indexing: the layouts agree, but the constant
+  // matrix lookup draws something different (e.g. a body that the indexed lookup leaves out).
+  const char* result = tooSmall          ? "inconclusive"
+                       : differs(1)      ? "mismatch"
+                       : s.count == 3 && differs(2) ? "indexing"
+                                         : "match";
+  const std::string constant =
+      s.count == 3 ? fmt::format("drawn_constant={} constant_differing={}", drawn[2], strong[2]) : "drawn_constant=n/a";
   Log.info("KartPad draw self-check: adapter_qualcomm={} adreno={} game_layout={} vertices={} target={}x{}x{} "
-           "drawn_game={} drawn_other={} differing={} strongly_differing={} attempt={} result={}",
+           "drawn_game={} drawn_other={} differing={} strongly_differing={} {} attempt={} result={}",
            webgpu::g_adapterIsQualcomm, webgpu::g_adapterAdrenoModel, s.mainRepacked ? "cpu_repack" : "shader_fetch",
-           s.vertices, w, h, s.samples, drawnA, drawnB, differing, strong, s.attempts, result);
-  s.readback[0] = {};
-  s.readback[1] = {};
+           s.vertices, w, h, s.samples, drawn[0], drawn[1], differing[1], strong[1], constant, s.attempts, result);
+  for (auto& buffer : s.readback) buffer = {};
   if (tooSmall) {
-    retry(s, drawn == 0 ? "nothing_drawn" : "too_small"); // off screen, culled or tiny; try another draw
+    retry(s, most == 0 ? "nothing_drawn" : "too_small"); // off screen, culled or tiny; try another draw
   } else {
     set_state(s, State::Done);
   }
@@ -160,13 +177,16 @@ bool break_twin() noexcept {
   return value;
 }
 
-void record(const gx::DrawData& main, const gx::DrawData& twin, bool mainRepacked, uint32_t vertices) {
+void record(const gx::DrawData& main, const gx::DrawData& twin, const gx::DrawData* constant, bool mainRepacked,
+            uint32_t vertices) {
   auto& s = shared();
   {
     std::lock_guard lock(s.mutex);
     if (s.state != State::Waiting) return;
     s.draws[0] = main;
     s.draws[1] = twin;
+    s.count = constant != nullptr ? 3 : 2;
+    if (constant != nullptr) s.draws[2] = *constant;
     s.mainRepacked = mainRepacked;
     s.vertices = vertices;
     ++s.attempts;
@@ -213,7 +233,7 @@ void encode(const wgpu::CommandEncoder& cmd, const wgpu::BindGroup& staticBindGr
     };
     return webgpu::g_device.CreateTexture(&desc);
   };
-  for (int k = 0; k < 2; ++k) {
+  for (int k = 0; k < s.count; ++k) {
     const bool msaa = s.samples > 1;
     const auto color = make(s.samples, colorFormat,
                             wgpu::TextureUsage::RenderAttachment | (msaa ? wgpu::TextureUsage::None : wgpu::TextureUsage::CopySrc));
@@ -290,15 +310,15 @@ void encode(const wgpu::CommandEncoder& cmd, const wgpu::BindGroup& staticBindGr
   if (pipelinesReady) {
     set_state(s, State::Encoded);
   } else {
-    s.readback[0] = {};
-    s.readback[1] = {};
+    for (auto& buffer : s.readback) buffer = {};
     retry(s, "pipeline_not_ready");
   }
 }
 
 void after_submit() noexcept {
   auto& s = shared();
-  wgpu::Buffer buffers[2];
+  wgpu::Buffer buffers[3];
+  int count = 0;
   uint64_t size = 0;
   {
     std::lock_guard lock(s.mutex);
@@ -307,22 +327,21 @@ void after_submit() noexcept {
     s.mapped = 0;
     s.mapFailed = false;
     size = uint64_t(s.bytesPerRow) * s.size.height;
-    buffers[0] = s.readback[0];
-    buffers[1] = s.readback[1];
+    count = s.count;
+    for (int k = 0; k < count; ++k) buffers[k] = s.readback[k];
   }
   // Outside the lock: a spontaneous callback may run inside MapAsync and takes the lock itself.
-  for (int k = 0; k < 2; ++k) {
+  for (int k = 0; k < count; ++k) {
     buffers[k].MapAsync(wgpu::MapMode::Read, 0, size, wgpu::CallbackMode::AllowSpontaneous,
                            [](wgpu::MapAsyncStatus status, wgpu::StringView) {
                              auto& sh = shared();
                              std::lock_guard inner(sh.mutex);
                              if (sh.state != State::Mapping) return;
                              if (status != wgpu::MapAsyncStatus::Success) sh.mapFailed = true;
-                             if (++sh.mapped < 2) return;
+                             if (++sh.mapped < sh.count) return;
                              if (sh.mapFailed) {
                                Log.warn("KartPad draw self-check: readback failed");
-                               sh.readback[0] = {};
-                               sh.readback[1] = {};
+                               for (auto& buffer : sh.readback) buffer = {};
                                set_state(sh, State::Done);
                                return;
                              }
