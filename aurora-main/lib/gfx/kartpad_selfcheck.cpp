@@ -165,17 +165,26 @@ void skipped(const char* reason) noexcept {
   Log.info("KartPad draw self-check: skipped a draw reason={}", reason);
 }
 
-bool break_twin() noexcept {
-  static const bool value = [] {
+namespace {
+// Test hook only: `adb shell setprop debug.kartpad.selfcheck_break 1` (or 2) before launch.
+// 1 corrupts the other-layout copy; 2 leaves both layout copies empty, as on the S24 Ultra (#104),
+// so only the constant-lookup copy draws.
+int break_mode() noexcept {
+  static const int value = [] {
 #if defined(__ANDROID__)
-    // Test hook only: `adb shell setprop debug.kartpad.selfcheck_break 1` before launch.
     char prop[PROP_VALUE_MAX] = {};
-    if (__system_property_get("debug.kartpad.selfcheck_break", prop) > 0 && std::strcmp(prop, "1") == 0) return true;
+    if (__system_property_get("debug.kartpad.selfcheck_break", prop) > 0) {
+      if (std::strcmp(prop, "1") == 0) return 1;
+      if (std::strcmp(prop, "2") == 0) return 2;
+    }
 #endif
-    return env_is("KARTPAD_DRAW_SELFCHECK_BREAK", "1");
+    return env_is("KARTPAD_DRAW_SELFCHECK_BREAK", "1") ? 1 : env_is("KARTPAD_DRAW_SELFCHECK_BREAK", "2") ? 2 : 0;
   }();
   return value;
 }
+} // namespace
+
+bool break_twin() noexcept { return break_mode() == 1; }
 
 void record(const gx::DrawData& main, const gx::DrawData& twin, const gx::DrawData* constant, bool mainRepacked,
             uint32_t vertices) {
@@ -286,7 +295,9 @@ void encode(const wgpu::CommandEncoder& cmd, const wgpu::BindGroup& staticBindGr
     // A pipeline that is not ready would leave one image empty and read as a mismatch, so the
     // binding is checked here and the attempt retried instead. Not waiting for it keeps the
     // check from stalling a frame while the other layout's shader compiles.
-    if (bind_pipeline(s.draws[k].pipeline, pass, state.currentPipeline, false)) {
+    if (break_mode() == 2 && k < 2) {
+      // Test hook: leave this copy empty.
+    } else if (bind_pipeline(s.draws[k].pipeline, pass, state.currentPipeline, false)) {
       gx::render(s.draws[k], pass, state, false);
     } else {
       pipelinesReady = false;

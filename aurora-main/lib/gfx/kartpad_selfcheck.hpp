@@ -12,8 +12,9 @@
 //   KartPad draw self-check: ... result=match|mismatch|indexing|inconclusive
 // (mismatch: the vertex layout changes the picture; indexing: the matrix lookup does.)
 // It never changes what is shown. KARTPAD_DRAW_SELFCHECK=0 turns it off;
-// KARTPAD_DRAW_SELFCHECK_BREAK=1 or the Android property debug.kartpad.selfcheck_break=1 (tests)
-// corrupts the twin so a mismatch must be reported.
+// Tests: KARTPAD_DRAW_SELFCHECK_BREAK or the Android property debug.kartpad.selfcheck_break set to 1
+// corrupts the other-layout copy (mismatch must be reported); 2 leaves both layout copies empty
+// (indexing must be reported when the constant-lookup copy draws).
 
 #include "../gx/pipeline.hpp"
 
