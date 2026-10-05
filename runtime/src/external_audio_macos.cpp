@@ -1,4 +1,8 @@
 #if defined(__APPLE__)
+#include <TargetConditionals.h>
+#endif
+
+#if defined(__APPLE__) && TARGET_OS_OSX
 
 #include "external_audio_macos.h"
 

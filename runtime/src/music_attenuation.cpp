@@ -11,12 +11,18 @@
 #include <mutex>
 #include <thread>
 
+// The Core Audio monitor is macOS-only; iOS and tvOS (KartPad) take the
+// "unavailable" path, like Android.
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#endif
+
 #if defined(_WIN32)
 #include <winrt/base.h>
 #include <winrt/Windows.Foundation.h>
 #include <winrt/Windows.Foundation.Collections.h>
 #include <winrt/Windows.Media.Control.h>
-#elif defined(__APPLE__)
+#elif defined(__APPLE__) && TARGET_OS_OSX
 #include "external_audio_macos.h"
 #elif defined(__linux__)
 #include <dlfcn.h>
@@ -464,7 +470,7 @@ void MonitorLinuxMprisSessions() noexcept {
 }
 #endif
 
-#if defined(__APPLE__)
+#if defined(__APPLE__) && TARGET_OS_OSX
 void MonitorMacOSAudio() noexcept {
     using namespace std::chrono_literals;
     for (;;) {
@@ -485,7 +491,7 @@ void StartMonitor() noexcept {
 #elif defined(__linux__)
     // Detached so there is no shutdown ordering to manage against static audio state.
     std::thread(MonitorLinuxMprisSessions).detach();
-#elif defined(__APPLE__)
+#elif defined(__APPLE__) && TARGET_OS_OSX
     std::thread(MonitorMacOSAudio).detach();
 #else
     g_mediaControlAvailable.store(false, std::memory_order_release);
