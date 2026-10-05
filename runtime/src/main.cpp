@@ -78,6 +78,9 @@
 #if !defined(_WIN32)
 #include <SDL3/SDL_messagebox.h>
 #endif
+#if defined(__APPLE__)
+#include <pthread.h>
+#endif
 
 // Defined in `runtime/src/hle/vi.cpp` (used by GX/VI HLE).
 extern std::atomic_bool g_auroraFrameActive;
@@ -162,6 +165,8 @@ std::atomic_bool g_auroraInitialized{false};
 std::atomic_flag g_abortSignalHandled = ATOMIC_FLAG_INIT;
 std::atomic_bool g_fatalErrorReported{false};
 std::atomic_bool g_fatalPopupShown{false};
+// Set while the POSIX fault handler reports a native crash: no dialog there.
+std::atomic_bool g_inNativeFaultHandler{false};
 std::atomic<int> g_lastExitCode{0};
 std::atomic_bool g_exitCodeSet{false};
 
@@ -788,10 +793,19 @@ void ShowRuntimeFatalPopup(std::string_view category, std::string_view details) 
 #else
         RT_LOGF(RT_TAG_RUNTIME, "fatal dialog: %s\n", message.c_str());
         // macOS and Linux show the same message as Windows, so a fatal error
-        // doesn't close the game without a word. SDL's message box needs no
-        // parent window; if no dialog can be shown, the log line above remains.
-        SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "WiiCompiled - Fatal Error",
-                                 message.c_str(), nullptr);
+        // doesn't close the game without a word. Not from the native fault
+        // handler, where UI isn't safe and the crash log must still be written,
+        // and on macOS only from the main thread: SDL would otherwise wait for
+        // the main thread, which may be waiting for this one. In those cases
+        // the log line above remains the report.
+        bool showDialog = !g_inNativeFaultHandler.load(std::memory_order_acquire);
+#if defined(__APPLE__)
+        showDialog = showDialog && pthread_main_np() != 0;
+#endif
+        if (showDialog) {
+            SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "WiiCompiled - Fatal Error",
+                                     message.c_str(), nullptr);
+        }
 #endif
     } catch (...) {
         // Reporting a crash must never throw or mask the original failure.
@@ -1176,6 +1190,7 @@ void PosixMemoryFaultHandler(int sig, siginfo_t* info, void* ucontextVoid) {
     }
 
     ReportUnhandledSignalFault(sig, faultAddress);
+    g_inNativeFaultHandler.store(true, std::memory_order_release);
     std::ostringstream popupDetails;
     popupDetails << "A native signal (" << sig << ") occurred";
     if (!g_lastEntryLabel.empty()) {
