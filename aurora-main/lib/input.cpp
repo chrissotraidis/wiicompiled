@@ -282,16 +282,56 @@ bool is_instance_claimed(const std::array<Uint32, PAD_MAX_CONTROLLERS>& claimedC
          claimedControllers.begin() + claimedCount;
 }
 
+void ensure_player_index(GameController& controller) noexcept;
+
+// A port is held back from automatic assignment only when the player chose "No
+// controller" for it, or when the controller saved for it is connected. A saved
+// controller that is not connected must not leave its port, or a connected pad,
+// without input. Player 1 has no "No controller" choice: it is always automatic.
+bool port_reserved(uint32_t port) {
+  const auto& preference = g_portPreferences[port];
+  switch (preference.state) {
+  case PortPreferenceState::Unset:
+    return false;
+  case PortPreferenceState::None:
+    return port != 0;
+  case PortPreferenceState::Controller:
+    return std::any_of(g_GameControllers.begin(), g_GameControllers.end(), [&](const auto& entry) {
+      return entry.second.m_controller != nullptr &&
+             identity_match(preference.identity, controller_identity(entry.second)) != IdentityMatch::None;
+    });
+  }
+  return false;
+}
+
+// Every connected controller gets a player; one left without a port reads as dead.
+void assign_free_ports() {
+  for (auto& [instance, controller] : g_GameControllers) {
+    (void)instance;
+    if (controller.m_controller == nullptr || effective_player_index(controller) >= 0) {
+      continue;
+    }
+    ensure_player_index(controller);
+    const char* name = SDL_GetGamepadName(controller.m_controller);
+    if (controller.m_playerIndex >= 0) {
+      Log.info("Controller '{}' moved to player {}", name ? name : "?", controller.m_playerIndex + 1);
+    } else {
+      Log.warn("Controller '{}' has no free player; its input is ignored", name ? name : "?");
+    }
+  }
+}
+
 void apply_port_preferences() noexcept {
   ensure_port_preferences_loaded();
   if (!std::any_of(g_portPreferences.begin(), g_portPreferences.end(),
                    [](const auto& preference) { return preference.state != PortPreferenceState::Unset; })) {
+    assign_free_ports();
     return;
   }
 
   for (auto& [instance, controller] : g_GameControllers) {
     const int32_t player = effective_player_index(controller);
-    if (player >= 0 && player < PAD_MAX_CONTROLLERS && g_portPreferences[player].state != PortPreferenceState::Unset) {
+    if (player >= 0 && player < PAD_MAX_CONTROLLERS && port_reserved(static_cast<uint32_t>(player))) {
       // Keep SDL's default player assignment from taking explicitly configured ports
       assign_player_index(controller, -1);
     }
@@ -336,6 +376,7 @@ void apply_port_preferences() noexcept {
       claimedControllers[claimedCount++] = fallbackInstance;
     }
   }
+  assign_free_ports();
 }
 
 // SDL only hands out a player index when the device already had a gamepad mapping
@@ -352,7 +393,7 @@ void ensure_player_index(GameController& controller) noexcept {
   ensure_port_preferences_loaded();
   const auto claim = [&](bool skipConfiguredPorts) {
     for (int32_t port = 0; port < PAD_MAX_CONTROLLERS; ++port) {
-      if (skipConfiguredPorts && g_portPreferences[port].state != PortPreferenceState::Unset) {
+      if (skipConfiguredPorts && port_reserved(static_cast<uint32_t>(port))) {
         continue;
       }
       const bool taken = std::any_of(g_GameControllers.begin(), g_GameControllers.end(), [&](const auto& entry) {
@@ -395,8 +436,7 @@ static GameController* resolve_standard_gamepad(
   }
   // First-use convenience must not undo an explicit Unassigned choice.
   if (controller == nullptr && player == 0 && allowSingleUnassigned &&
-      g_portPreferences[0].state == PortPreferenceState::Unset &&
-      g_GameControllers.size() == 1) {
+      !port_reserved(0) && g_GameControllers.size() == 1) {
     auto& [instance, candidate] = *g_GameControllers.begin();
     (void)instance;
     if (candidate.m_playerIndex < 0) {
@@ -565,6 +605,8 @@ bool assign_standard_gamepad(uint32_t instance, uint32_t player) noexcept {
   g_portPreferences[player].state = PortPreferenceState::Controller;
   g_portPreferences[player].identity = controller_identity(selected);
   save_port_preferences();
+  // A controller this replaced moves to a free player instead of going silent.
+  apply_port_preferences();
   return true;
 }
 
@@ -580,9 +622,11 @@ bool clear_standard_gamepad_player(uint32_t player) noexcept {
       assign_player_index(controller, -1);
     }
   }
-  g_portPreferences[player].state = PortPreferenceState::None;
+  // Player 1's empty choice is "Automatic": it takes the first connected controller.
+  g_portPreferences[player].state = player == 0 ? PortPreferenceState::Unset : PortPreferenceState::None;
   g_portPreferences[player].identity = {};
   save_port_preferences();
+  apply_port_preferences();
   return true;
 }
 
@@ -733,6 +777,15 @@ SDL_JoystickID add_controller(SDL_JoystickID which) noexcept {
       }
     }
 #endif
+    {
+      const char* name = SDL_GetGamepadName(ctrl);
+      char* mapping = SDL_GetGamepadMapping(ctrl);
+      const int32_t player = g_GameControllers[instance].m_playerIndex;
+      Log.info("Controller connected: '{}' {:04x}:{:04x} player {} mapping {}", name ? name : "?",
+               controller.m_vid, controller.m_pid, player >= 0 ? std::to_string(player + 1) : std::string("none"),
+               mapping ? mapping : "none");
+      SDL_free(mapping);
+    }
     return instance;
   }
 

@@ -127,13 +127,14 @@ int active_mode() noexcept {
     const int value = override_mode();
     const bool qualcomm = webgpu::g_adapterIsQualcomm;
     // 1 = PNMTXIDX-direct (skinned character) draws; 2 = every triangle draw.
-    // Without an explicit choice (Android "Automatic"), Adreno 8xx gets mode 1: on the Z Fold 8
-    // (Adreno 840, #102) it fixes characters and karts in menus and races. Mode 2 also fixes the
-    // track textures there, but in Retro Rewind other karts and item boxes went missing, so it
-    // stays a manual choice. Everything else stays off by default.
+    // Without an explicit choice (Android "Automatic"), Adreno 8xx gets mode 2. Mode 1 fixes only
+    // the characters: menus, karts and tracks stay striped (OnePlus 15, #316). Mode 2 drew
+    // everything correctly on the OnePlus 15 and on a Z Fold 8 in both games (#102); one other Fold 8
+    // lost karts and item boxes in Retro Rewind with it, which a player can still avoid by choosing
+    // "fix broken characters". Everything else stays off by default.
     const int adreno = webgpu::g_adapterAdrenoModel;
     const bool automatic = value < 0;
-    const int result = automatic ? ((qualcomm && adreno >= 800 && adreno < 1000) ? 1 : 0) : value;
+    const int result = automatic ? ((qualcomm && adreno >= 800 && adreno < 1000) ? 2 : 0) : value;
     Log.info("KartPadPNMTX repack mode={} source={} qualcomm={} adreno={} enabled={}",
              result == 2 ? "all_draws" : (result == 1 ? "on" : "off"), automatic ? "auto" : "override", qualcomm,
              adreno, result >= 1);

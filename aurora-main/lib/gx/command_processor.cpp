@@ -4,6 +4,7 @@
 #include "command_processor.hpp"
 
 #include "../gfx/common.hpp"
+#include "../gfx/kartpad_selfcheck.hpp"
 #include "../gfx/pipeline_cache.hpp"
 #include "../dolphin/gx/__gx.h"
 #include "../gfx/texture_replacement.hpp"
@@ -1886,7 +1887,8 @@ static u32 calculate_last_vtx_size(GXVtxFmt fmt) {
 static void handle_draw_unmerged(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount,
                                  gfx::Range vertRange, uint16_t usedPnMtxMask,
                                  HashType matrixTopologySignature,
-                                 HashType geometrySignature, bool interpolationIdentityActive);
+                                 HashType geometrySignature, bool interpolationIdentityActive,
+                                 const u8* rawVertices, u32 vtxSize, bool repacked);
 
 // The per-draw geometry signature, matrix-usage mask and draw-identity hashes exist purely to feed frame interpolation (build_uniform consumes them only after its `frame_interpolation_fps() == 0` early-out).
 static inline bool frame_interpolation_identity_needed() noexcept {
@@ -2118,26 +2120,9 @@ static const CachedPipelineState& cached_pipeline_state(const PipelineConfig& co
 }
 
 // Resolving a pipeline the long way costs a ~2.7KB zero-init, a full populate_pipeline_config, an XXH3 over the whole config and a memcmp against the hash-indexed slot -- roughly 11KB of memory traffic for a result that is almost always identical to the previous draw's.
-static const CachedPipelineState& resolve_pipeline_state(GXPrimitive prim, GXVtxFmt fmt) {
-  struct Memo {
-    const CachedPipelineState* state = nullptr;
-    u32 generation = 0;
-    u32 sceneGeneration = 0;
-    u32 sampleCount = 0;
-    GXPrimitive prim = static_cast<GXPrimitive>(0);
-    GXVtxFmt fmt = static_cast<GXVtxFmt>(0);
-  };
-  static Memo memo{};
-
-  const u32 sampleCount = gfx::get_sample_count();
-  const u32 generation = g_gxState.pipelineStateGeneration;
-  const u32 sceneGeneration = gfx::pipeline_scene_generation();
-  if (memo.state != nullptr && memo.generation == generation && memo.sceneGeneration == sceneGeneration && memo.sampleCount == sampleCount &&
-      memo.prim == prim && memo.fmt == fmt) LIKELY {
-    return *memo.state;
-  }
-
-  PipelineConfig config{};
+// The GX pipeline config for the current state, before the vertex-repack decision (KartPad's
+// constant matrix lookup included). Shared with the draw self-check's twin pipeline.
+static void populate_kartpad_pipeline_config(PipelineConfig& config, GXPrimitive prim, GXVtxFmt fmt) {
   populate_pipeline_config(config, prim, fmt);
   if (kartpad_pnmtx_mode() == 2 ||
       (kartpad_pnmtx_mode() == 1 &&
@@ -2176,6 +2161,29 @@ static const CachedPipelineState& resolve_pipeline_state(GXPrimitive prim, GXVtx
       }
     }
   }
+}
+
+static const CachedPipelineState& resolve_pipeline_state(GXPrimitive prim, GXVtxFmt fmt) {
+  struct Memo {
+    const CachedPipelineState* state = nullptr;
+    u32 generation = 0;
+    u32 sceneGeneration = 0;
+    u32 sampleCount = 0;
+    GXPrimitive prim = static_cast<GXPrimitive>(0);
+    GXVtxFmt fmt = static_cast<GXVtxFmt>(0);
+  };
+  static Memo memo{};
+
+  const u32 sampleCount = gfx::get_sample_count();
+  const u32 generation = g_gxState.pipelineStateGeneration;
+  const u32 sceneGeneration = gfx::pipeline_scene_generation();
+  if (memo.state != nullptr && memo.generation == generation && memo.sceneGeneration == sceneGeneration && memo.sampleCount == sampleCount &&
+      memo.prim == prim && memo.fmt == fmt) LIKELY {
+    return *memo.state;
+  }
+
+  PipelineConfig config{};
+  populate_kartpad_pipeline_config(config, prim, fmt);
   // Adreno workaround: PNMTXIDX-direct draws (or every triangle draw in all-draws mode) upload
   // CPU-repacked, aligned, fully direct vertices. Must match kartpad_repack::applies().
   HashType repackSourceHash = 0;
@@ -2330,8 +2338,15 @@ bool submit_raw_draw(GXPrimitive prim, GXVtxFmt fmt, const uint8_t* vertices, ui
   handle_draw_unmerged(prim, fmt, vtxCount, vertRange,
                        matrixUsage.mask, matrixUsage.topologySignature,
                        interpolationIdentityActive ? draw_geometry_signature(fmt, vertices, vtxCount, vtxSize) : 0,
-                       interpolationIdentityActive);
+                       interpolationIdentityActive, vertices, vtxSize, repack);
   return true;
+}
+
+// Draw self-check: one large skinned draw per session stays out of merging so the whole model is
+// compared (see kartpad_selfcheck.hpp). One atomic load per draw once the check has finished.
+static inline bool selfcheck_keeps_whole(u16 vtxCount) noexcept {
+  return vtxCount >= gfx::kartpad_selfcheck::MinVertices && g_gxState.vtxDesc[GX_VA_PNMTXIDX] == GX_DIRECT &&
+         gfx::kartpad_selfcheck::wanted();
 }
 
 static bool handle_draw(u8 cmd, const u8* data, u32& pos, u32 size, bool bigEndian) {
@@ -2368,7 +2383,7 @@ static bool handle_draw(u8 cmd, const u8* data, u32& pos, u32 size, bool bigEndi
   // Decide admission before allocating anything. The merged path needs only
   // vertices and indices; it must not resolve pipelines or upload arrays.
   // Try to merge with previous draw call
-  if (!g_gxState.stateDirty && kartpad_pnmtx_mode() < 0) LIKELY {
+  if (!g_gxState.stateDirty && kartpad_pnmtx_mode() < 0 && !selfcheck_keeps_whole(vtxCount)) LIKELY {
     auto* lastDraw = gfx::get_last_draw_command<DrawData>();
     // Expanded lines/points have different vertex interpretation even with one instance.
     // Triangle-list output has no restart index; index 65535 is usable.
@@ -2426,14 +2441,58 @@ static bool handle_draw(u8 cmd, const u8* data, u32& pos, u32 size, bool bigEndi
   handle_draw_unmerged(prim, fmt, vtxCount, vertRange,
                        matrixUsage.mask, matrixUsage.topologySignature,
                        interpolationIdentityActive ? draw_geometry_signature(fmt, vertices, vtxCount, vtxSize) : 0,
-                       interpolationIdentityActive);
+                       interpolationIdentityActive, vertices, vtxSize, repack);
   return true;
+}
+
+// Draw self-check: the same skinned draw again with the other vertex layout (CPU repack versus
+// shader fetch), recorded for an off-screen comparison. Builds its pipeline without the cached
+// table so the main draw's memoized state is untouched. When staging is short it skips this draw
+// (logged once) and the next eligible draw tries again.
+static void kartpad_selfcheck_twin(const DrawData& main, GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount,
+                                   const u8* rawVertices, u32 vtxSize, bool mainRepacked,
+                                   const BindGroupRanges& ranges) {
+  PipelineConfig config{};
+  populate_kartpad_pipeline_config(config, prim, fmt);
+  std::vector<u8> twinVertices;
+  if (mainRepacked) {
+    twinVertices.assign(rawVertices, rawVertices + static_cast<size_t>(vtxCount) * vtxSize);
+  } else {
+    config.shaderConfig.vtxStride = kartpad_repack::repacked_layout(config.shaderConfig.attrs);
+    twinVertices = kartpad_repack::repack(fmt, rawVertices, vtxCount, vtxSize);
+  }
+  if (twinVertices.empty()) {
+    gfx::kartpad_selfcheck::skipped("no_vertices");
+    return;
+  }
+  if (gfx::kartpad_selfcheck::break_twin()) {
+    std::fill(twinVertices.begin(), twinVertices.end(), u8{0}); // every triangle collapses
+  }
+  const ShaderInfo info = build_shader_info(config.shaderConfig);
+  gfx::StagingSizes demand{twinVertices.size() + 3, gfx::staging_uniform_bytes(info.uniformSize), 0, 0};
+  if (!gfx::staging_has_space(demand)) {
+    gfx::kartpad_selfcheck::skipped("staging_full");
+    return;
+  }
+  const gfx::Range twinRange = mainRepacked ? gfx::push_verts(twinVertices.data(), twinVertices.size())
+                                            : gfx::push_verts_aligned(twinVertices.data(), twinVertices.size(), 4);
+  DrawData twin = main;
+  twin.pipeline = gfx::pipeline_ref(config);
+  twin.vertRange = twinRange;
+  twin.uniformRange = build_uniform(info, twinRange.offset, ranges, {}, false, 0).current;
+  twin.interpolatedUniformRanges = {};
+  twin.bindGroups = build_bind_groups(info);
+  twin.dstAlpha = config.dstAlpha;
+  twin.diagnosticOriginalPipeline = 0;
+  // Records both and ends this frame's merging after the main draw (the marker follows it).
+  gfx::kartpad_selfcheck::record(main, twin, mainRepacked, vtxCount);
 }
 
 static void handle_draw_unmerged(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount,
                                  gfx::Range vertRange, uint16_t usedPnMtxMask,
                                  HashType matrixTopologySignature,
-                                 HashType geometrySignature, bool interpolationIdentityActive) {
+                                 HashType geometrySignature, bool interpolationIdentityActive,
+                                 const u8* rawVertices, u32 vtxSize, bool repacked) {
   ZoneScoped;
   // GX_CULL_ALL rasterizes nothing on hardware - no color, no depth.
   if (g_gxState.cullMode == GX_CULL_ALL && prim != GX_LINES && prim != GX_LINESTRIP && prim != GX_POINTS)
@@ -2513,7 +2572,7 @@ static void handle_draw_unmerged(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount,
   } else if (prim == GX_POINTS) {
     instanceCount = vtxCount;
   }
-  gfx::push_draw_command(DrawData{
+  const DrawData draw{
       .pipeline = pipeline,
       .vertRange = vertRange,
       .idxRange = idxRange,
@@ -2527,8 +2586,14 @@ static void handle_draw_unmerged(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount,
       .dstAlpha = pipelineState.dstAlpha,
       .diagnosticOriginalPipeline = kartpad_pnmtx_target(pipelineState.originalConfigHash)
                                        ? pipelineState.originalConfigHash : 0,
-  });
+  };
+  gfx::push_draw_command(draw);
   g_gxState.stateDirty = false;
+  if (rawVertices != nullptr && vtxCount >= gfx::kartpad_selfcheck::MinVertices &&
+      g_gxState.vtxDesc[GX_VA_PNMTXIDX] == GX_DIRECT && instanceCount == 1 && !draw.expandedPrimitive &&
+      gfx::kartpad_selfcheck::wanted()) UNLIKELY {
+    kartpad_selfcheck_twin(draw, prim, fmt, vtxCount, rawVertices, vtxSize, repacked, ranges);
+  }
 }
 
 std::string read_string(const u8* data, u32& pos, u32 size, bool bigEndian) {

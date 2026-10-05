@@ -421,4 +421,6 @@ void set_scissor(const ClipRect& scissor) noexcept;
 
 void push_debug_group(std::string label);
 void insert_debug_marker(std::string label);
+// KartPad draw self-check: marks the draw just pushed (see kartpad_selfcheck.hpp).
+void push_selfcheck_marker();
 } // namespace aurora::gfx

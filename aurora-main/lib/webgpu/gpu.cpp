@@ -80,6 +80,7 @@ static wgpu::SurfaceCapabilities g_surfaceCapabilities;
 bool g_bcTexturesSupported;
 bool g_adapterIsQualcomm;
 int g_adapterAdrenoModel;
+uint32_t g_adapterMaxInterStageVariables;
 // Written by Dawn's device-loss callback and consumed at ordered frame boundaries. Keep the
 // callback free of logging, allocation, teardown and renderer state mutation.
 static std::atomic_bool g_deviceLost{false};
@@ -736,6 +737,7 @@ bool initialize(AuroraBackend auroraBackend) {
         requiredLimits.minUniformBufferOffsetAlignment, requiredLimits.minStorageBufferOffsetAlignment);
     // PowerVR drivers report the Vulkan floor here (14 with the relaxed Dawn check, #304).
     Log.info("Adapter maxInterStageShaderVariables: {}", supportedLimits.maxInterStageShaderVariables);
+    g_adapterMaxInterStageVariables = supportedLimits.maxInterStageShaderVariables;
     std::vector<wgpu::FeatureName> requiredFeatures;
     bool implicitDeviceSynchronizationSupported = false;
     wgpu::SupportedFeatures supportedFeatures;

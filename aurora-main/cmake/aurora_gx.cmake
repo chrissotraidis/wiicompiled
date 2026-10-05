@@ -4,6 +4,7 @@ add_library(aurora_gx STATIC
         lib/gfx/depth_peek.cpp
         lib/gfx/efb_ram_copy.cpp
         lib/gfx/efb_ram_encoder.cpp
+        lib/gfx/kartpad_selfcheck.cpp
         lib/gfx/pipeline_cache.cpp
         lib/gfx/dds_io.cpp
         lib/gfx/tex_copy_conv.cpp
