@@ -6,11 +6,15 @@
 // draw correctly. To tell from a player's own log whether that is happening, one real skinned
 // draw per session is drawn twice off screen: with the vertex layout the game used and with the
 // other one (shader fetch versus CPU repack), each from the same uniforms and textures. Both
-// images are read back and compared, and one line is logged:
-//   KartPad draw self-check: ... result=match|mismatch|inconclusive
+// images are read back and compared. When the draw can use it, a third copy keeps the game's layout
+// but looks the bone matrices up with the constant (switch) lookup instead of indexing. One line is
+// logged:
+//   KartPad draw self-check: ... result=match|mismatch|indexing|inconclusive
+// (mismatch: the vertex layout changes the picture; indexing: the matrix lookup does.)
 // It never changes what is shown. KARTPAD_DRAW_SELFCHECK=0 turns it off;
-// KARTPAD_DRAW_SELFCHECK_BREAK=1 or the Android property debug.kartpad.selfcheck_break=1 (tests)
-// corrupts the twin so a mismatch must be reported.
+// Tests: KARTPAD_DRAW_SELFCHECK_BREAK or the Android property debug.kartpad.selfcheck_break set to 1
+// corrupts the other-layout copy (mismatch must be reported); 2 leaves both layout copies empty
+// (indexing must be reported when the constant-lookup copy draws).
 
 #include "../gx/pipeline.hpp"
 
@@ -26,8 +30,10 @@ inline constexpr uint32_t MinVertices = 64;
 // Record side (game thread). True when the next large skinned draw should be checked; such a
 // draw is then kept out of merging so the whole model is compared.
 bool wanted() noexcept;
-// Stores both draws and places a marker right after the real draw in this frame's commands.
-void record(const gx::DrawData& main, const gx::DrawData& twin, bool mainRepacked, uint32_t vertices);
+// Stores the draws and places a marker right after the real draw in this frame's commands.
+// `constant` is the optional constant-lookup copy.
+void record(const gx::DrawData& main, const gx::DrawData& twin, const gx::DrawData* constant, bool mainRepacked,
+            uint32_t vertices);
 // Test hook: whether the twin's vertices should be corrupted.
 bool break_twin() noexcept;
 // Logs (once) why a wanted draw could not be checked; the next eligible draw tries again.

@@ -2469,7 +2469,28 @@ static void kartpad_selfcheck_twin(const DrawData& main, GXPrimitive prim, GXVtx
     std::fill(twinVertices.begin(), twinVertices.end(), u8{0}); // every triangle collapses
   }
   const ShaderInfo info = build_shader_info(config.shaderConfig);
-  gfx::StagingSizes demand{twinVertices.size() + 3, gfx::staging_uniform_bytes(info.uniformSize), 0, 0};
+
+  // Third copy: the game's own layout and vertices, with the bone matrices looked up by the constant
+  // (switch) lookup instead of indexing (#104/#193: on Adreno 750 only that lookup drew bodies). Only
+  // for draws that lookup supports, and only when the game didn't already use it.
+  PipelineConfig constantConfig{};
+  populate_kartpad_pipeline_config(constantConfig, prim, fmt);
+  bool withConstant = false;
+  if (constantConfig.shaderConfig.kartpadConstantPnMtx == 0) {
+    const auto layout = build_shader_info(constantConfig.shaderConfig).matrixLayout;
+    withConstant = constantConfig.shaderConfig.lineMode == 0 && layout.absolutePosRegion &&
+                   layout.postexCount == 20 && layout.nrmCount == MaxPnMtx;
+    constantConfig.shaderConfig.kartpadConstantPnMtx = 1;
+    if (mainRepacked) {
+      constantConfig.shaderConfig.vtxStride = kartpad_repack::repacked_layout(constantConfig.shaderConfig.attrs);
+    }
+  }
+  const ShaderInfo constantInfo = withConstant ? build_shader_info(constantConfig.shaderConfig) : ShaderInfo{};
+
+  gfx::StagingSizes demand{twinVertices.size() + 3,
+                           gfx::staging_uniform_bytes(info.uniformSize) +
+                               (withConstant ? gfx::staging_uniform_bytes(constantInfo.uniformSize) : 0),
+                           0, 0};
   if (!gfx::staging_has_space(demand)) {
     gfx::kartpad_selfcheck::skipped("staging_full");
     return;
@@ -2484,8 +2505,17 @@ static void kartpad_selfcheck_twin(const DrawData& main, GXPrimitive prim, GXVtx
   twin.bindGroups = build_bind_groups(info);
   twin.dstAlpha = config.dstAlpha;
   twin.diagnosticOriginalPipeline = 0;
-  // Records both and ends this frame's merging after the main draw (the marker follows it).
-  gfx::kartpad_selfcheck::record(main, twin, mainRepacked, vtxCount);
+  DrawData constant = main;
+  if (withConstant) {
+    constant.pipeline = gfx::pipeline_ref(constantConfig);
+    constant.uniformRange = build_uniform(constantInfo, main.vertRange.offset, ranges, {}, false, 0).current;
+    constant.interpolatedUniformRanges = {};
+    constant.bindGroups = build_bind_groups(constantInfo);
+    constant.dstAlpha = constantConfig.dstAlpha;
+    constant.diagnosticOriginalPipeline = 0;
+  }
+  // Records the copies and ends this frame's merging after the main draw (the marker follows it).
+  gfx::kartpad_selfcheck::record(main, twin, withConstant ? &constant : nullptr, mainRepacked, vtxCount);
 }
 
 static void handle_draw_unmerged(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount,
