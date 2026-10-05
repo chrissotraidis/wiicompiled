@@ -5,6 +5,7 @@
 #include "clear.hpp"
 #include "depth_peek.hpp"
 #include "efb_ram_copy.hpp"
+#include "kartpad_selfcheck.hpp"
 #include "../internal.hpp"
 #include "../webgpu/gpu.hpp"
 #include "../gx/pipeline.hpp"
@@ -60,6 +61,7 @@ enum class CommandType {
   SetScissor,
   Draw,
   DebugMarker,
+  KartPadSelfCheck,
 };
 struct Command {
   CommandType type;
@@ -1376,6 +1378,9 @@ static void render_impl(std::vector<RenderPass>& renderPasses, wgpu::CommandEnco
     auto pass = cmd.BeginRenderPass(&renderPassDescriptor);
     render_pass_impl(pass, renderPasses, i, interpolatedFrame, debugFrame);
     pass.End();
+    if (interpolatedFrame < 0) {
+      kartpad_selfcheck::encode(cmd, g_staticBindGroup);
+    }
 
     if (finalize && i == renderPasses.size() - 1) {
       depth_peek::encode_frame_snapshot(cmd, passInfo.copySourceDepthView, passInfo.targetSize, passInfo.msaaSamples, depthMapping);
@@ -1503,6 +1508,7 @@ void render(wgpu::CommandEncoder& cmd, int32_t interpolatedFrame, bool finalize)
 void after_submit() noexcept {
   depth_peek::after_submit();
   efb_ram::after_submit();
+  kartpad_selfcheck::after_submit();
   // Retire this frame's completed GPU work. Dawn only reclaims destroyed resources inside a device
   // tick, and a frame that never ticks keeps every released image and its memory for the run.
   if (g_instance) {
@@ -1522,6 +1528,9 @@ static void render_pass_impl(const wgpu::RenderPassEncoder& pass, const std::vec
   // Bind static bind group for the whole pass
   pass.SetBindGroup(0, g_staticBindGroup);
   pass.SetBindGroup(2, gx::g_emptyTextureBindGroup);
+  // Last viewport and scissor seen, for the KartPad draw self-check.
+  const Viewport* lastViewport = nullptr;
+  const ClipRect* lastScissor = nullptr;
 
   for (const auto& cmd : renderPasses[idx].commands) {
 #ifdef AURORA_GFX_DEBUG_GROUPS
@@ -1545,6 +1554,7 @@ static void render_pass_impl(const wgpu::RenderPassEncoder& pass, const std::vec
     switch (cmd.type) {
     case CommandType::SetViewport: {
       const auto& vp = cmd.data.setViewport;
+      lastViewport = &vp;
       // WebGPU requires 0 <= minDepth <= maxDepth <= 1. vp.znear/vp.zfar are in GX's own distance
       // terms (0 = near); under UseReversedZ the host depth-buffer storage direction is flipped
       // (near = 1, far = 0), so this range has to be remapped through 1-x the same way the
@@ -1567,6 +1577,7 @@ static void render_pass_impl(const wgpu::RenderPassEncoder& pass, const std::vec
     } break;
     case CommandType::SetScissor: {
       const auto& sc = cmd.data.setScissor;
+      lastScissor = &sc;
       const auto& size = renderPasses[idx].targetSize;
       const auto left = std::clamp(sc.x, 0, static_cast<int32_t>(size.width));
       const auto top = std::clamp(sc.y, 0, static_cast<int32_t>(size.height));
@@ -1599,6 +1610,12 @@ static void render_pass_impl(const wgpu::RenderPassEncoder& pass, const std::vec
       pass.InsertDebugMarker(wgpu::StringView(debugFrame.markers[cmd.data.debugMarkerIndex]));
 #endif
     } break;
+    case CommandType::KartPadSelfCheck:
+      if (interpolatedFrame < 0) {
+        kartpad_selfcheck::capture(lastViewport, lastScissor, renderPasses[idx].targetSize,
+                                   renderPasses[idx].msaaSamples);
+      }
+      break;
     }
   }
 
@@ -1760,6 +1777,8 @@ void insert_debug_marker(std::string label) {
   push_command(CommandType::DebugMarker, {.debugMarkerIndex = idx});
 #endif
 }
+
+void push_selfcheck_marker() { push_command(CommandType::KartPadSelfCheck, {.debugMarkerIndex = 0}); }
 
 } // namespace aurora::gfx
 
