@@ -561,7 +561,8 @@ inline RuntimeUserConfig ParseConfig(std::istream& input, std::string sourceName
     try {
         return ParseConfigDocument(toml::parse(input, std::move(sourceName)));
     } catch (const std::exception& exception) {
-        std::cerr << "[runtime-config] Invalid TOML; using built-in defaults: "
+        // stdout, so the message reaches the session log players attach to reports.
+        std::cout << "[runtime-config] Invalid TOML; using built-in defaults: "
                   << exception.what() << std::endl;
         return {};
     }

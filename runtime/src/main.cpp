@@ -1415,6 +1415,12 @@ int RuntimeMain(int argc, char** argv) {
         }
         RuntimeConfigFile::Reload();
 #endif
+#if defined(__ANDROID__)
+        // libmain.so can be loaded earlier in this process (the Retro Rewind download worker), before
+        // the Activity exported KARTPAD_ANDROID_FILES_DIR and before setup wrote retro_rewind_root,
+        // which left an empty Config.toml cached and the first game start without a DVD root.
+        RuntimeConfigFile::Reload();
+#endif
         RuntimeConfigFile::LogLoadedConfig();
 #if defined(__APPLE__) && TARGET_OS_IOS
         if (const char* requestedProfile = KartPadMobileSelectedRuntimeProfile()) {
