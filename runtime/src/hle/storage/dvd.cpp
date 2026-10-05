@@ -685,6 +685,49 @@ static fs::path ResolveDvdMappedHostPath(const std::string& dvdPath, const fs::p
     FailDvd("dvd_fst", "DVD file table is unavailable", reason);
 }
 
+// The import check only looks at a few key files, so a partial copy of the game
+// data (for example a cloud or Files copy that did not finish) passed it, showed
+// "Ready to play" and then crashed on a missing resource (KartPad #370). Every
+// file the disc's own table lists must be present at its full size.
+static void RequireCompleteDiscFiles() {
+    if (g_fstFiles.empty()) {
+        return;  // No readable sys/fst.bin: the existing checks report that case.
+    }
+    size_t missing = 0;
+    size_t shortFiles = 0;
+    std::vector<std::string> examples;
+    for (const FstFileEntry& file : g_fstFiles) {
+        const fs::path hostPath = GetDvdRoot() / "files" / fs::path(file.dvdPath.substr(1));
+        std::error_code ec;
+        const uintmax_t size = fs::file_size(hostPath, ec);
+        if (ec) {
+            ++missing;
+        } else if (size < file.size) {
+            ++shortFiles;
+        } else {
+            continue;
+        }
+        if (examples.size() < 5) {
+            examples.push_back(file.dvdPath);
+        }
+    }
+    RT_LOG(RT_TAG_DVD) << "game data check: " << g_fstFiles.size() << " file(s) listed, "
+                       << missing << " missing, " << shortFiles << " incomplete" << std::endl;
+    if (missing == 0 && shortFiles == 0) {
+        return;
+    }
+    std::string details = "Your Mario Kart Wii game data is incomplete: ";
+    details += std::to_string(missing + shortFiles) + " of " + std::to_string(g_fstFiles.size()) +
+               " game files are missing or cut short. This usually means a copy (for example "
+               "from a cloud drive or the Files app) did not finish.\n\n"
+               "Import your game data again from your own disc or a complete extracted folder.\n\n"
+               "For example:";
+    for (const std::string& example : examples) {
+        details += "\n" + example;
+    }
+    FailDvd("game_data_incomplete", "the game data is incomplete", details);
+}
+
 static void BuildAndPublishRuntimeFst() {
     // Preserve real disc offsets where a runtime entry replaces a file from the
     // extracted image. Created Riivolution paths have no physical disc extent;
@@ -908,6 +951,7 @@ extern "C" void DVDInit_8015EA1C()
 
     // Load FST mapping so real files keep their physical disc extents.
     LoadFstIndex();
+    RequireCompleteDiscFiles();
     BuildAndPublishRuntimeFst();
 
     // Initialize the translated DVD filesystem so it can use the published FST.
