@@ -739,6 +739,14 @@ bool initialize(AuroraBackend auroraBackend) {
     Log.info("Adapter maxInterStageShaderVariables: {}", supportedLimits.maxInterStageShaderVariables);
     g_adapterMaxInterStageVariables = supportedLimits.maxInterStageShaderVariables;
     std::vector<wgpu::FeatureName> requiredFeatures;
+    // Optional native sharing for MetalFX. Devices without either feature keep
+    // the normal renderer; the upscaler checks the enabled pair at runtime.
+    if (backend == wgpu::BackendType::Metal &&
+        g_adapter.HasFeature(wgpu::FeatureName::SharedTextureMemoryIOSurface) &&
+        g_adapter.HasFeature(wgpu::FeatureName::SharedFenceMTLSharedEvent)) {
+      requiredFeatures.push_back(wgpu::FeatureName::SharedTextureMemoryIOSurface);
+      requiredFeatures.push_back(wgpu::FeatureName::SharedFenceMTLSharedEvent);
+    }
     bool implicitDeviceSynchronizationSupported = false;
     wgpu::SupportedFeatures supportedFeatures;
     g_adapter.GetFeatures(&supportedFeatures);
