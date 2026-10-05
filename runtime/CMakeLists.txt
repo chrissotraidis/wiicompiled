@@ -5,6 +5,7 @@ if(NOT APPLE OR NOT CMAKE_SIZEOF_VOID_P EQUAL 8 OR
    NOT CMAKE_SYSTEM_PROCESSOR MATCHES "^(arm64|aarch64|ARM64)$")
     message(FATAL_ERROR "KartPad G7 runtime spike requires 64-bit Apple arm64")
 endif()
+
 if(NOT CMAKE_BUILD_TYPE STREQUAL "Release")
     message(FATAL_ERROR "WiiCompiled only supports Release builds")
 endif()
