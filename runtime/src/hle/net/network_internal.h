@@ -249,7 +249,6 @@ void WritePollResults(uint32_t outAddress,
                       const std::vector<NetworkPollContract::CopiedDescriptor>& descriptors);
 
 // network_socket.cpp
-int32_t DeleteWiiSocket(uint32_t fd);
 void CleanupAllWiiSockets();
 void TraceWfcTcp(const char* operation, uint32_t fd, WiiSocket* socket,
                  const char* data, int bytes, int error);
