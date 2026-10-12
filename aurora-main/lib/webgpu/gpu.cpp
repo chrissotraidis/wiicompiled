@@ -524,8 +524,8 @@ wgpu::BindGroup create_copy_bind_group(const TextureWithSampler& source) {
 }
 
 // Native uniform buffers: KARTPAD_RENDERER_NATIVE_UNIFORMS=1/0 (environment), or on Android
-// `adb shell setprop debug.kartpad.native_uniforms 1|0` before starting the game. Unset is
-// automatic (Adreno 6xx/7xx only). Read once per process.
+// `adb shell setprop debug.kartpad.native_uniforms 1|0` before starting the game. Unset keeps
+// Dawn's default (off). Read once per process.
 static int native_uniform_mode() {
   static const int mode = [] {
     const auto parse = [](const char* value) {
@@ -711,10 +711,12 @@ bool initialize(AuroraBackend auroraBackend) {
     // rebuilds each value from raw words (decompose_uniform_buffers, on by default). On Adreno
     // 6xx/7xx, skinned character bodies draw nothing that way. Native uniform buffers read float
     // rows directly, as Dolphin does. Every Aurora uniform block keeps std140 layout for this.
+    // Automatic keeps Dawn's default: 0.8.0 turned native buffers on for every Adreno 6xx/7xx,
+    // which didn't bring bodies back on the S24 Ultra (#104) and made characters invisible on
+    // phones that drew them before. Native buffers are an explicit Character Graphics Test option.
     const int mode = native_uniform_mode();
     const bool automatic = mode < 0;
-    const bool want = automatic ? (g_adapterIsQualcomm && g_adapterAdrenoModel >= 600 && g_adapterAdrenoModel < 800)
-                                : mode == 1;
+    const bool want = mode == 1;
     if (want) {
       static constexpr std::array<const char*, 1> kNativeUniforms{"decompose_uniform_buffers"};
       wgpu::DawnTogglesDescriptor adapterToggles{};
