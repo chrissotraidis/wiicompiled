@@ -802,7 +802,11 @@ u32 PADRead(PADStatus* status) {
       status[i].triggerRight = static_cast<u8>(std::min(static_cast<int>(status[i].triggerRight) + tr, 255));
     }
 
-    if (controller && !g_keyboardBindings[i].m_mappingsSet) {
+    // KartPad keeps keyboard bindings active on port 0, so a controller assigned to the same
+    // player must still be read. Buttons are OR'd; sticks and triggers keep whichever source
+    // is pushed further, so an idle controller doesn't cancel the keyboard or vice versa.
+    const PADStatus keyboardStatus = status[i];
+    if (controller) {
       EnsureMappingLoaded(controller);
 
       // Wii U Pro Controller raw D-pad fallback. SDL's HIDAPI Wii driver posts
@@ -988,6 +992,14 @@ u32 PADRead(PADStatus* status) {
 
       status[i].triggerLeft = static_cast<int8_t>(tl);
       status[i].triggerRight = static_cast<int8_t>(tr);
+
+      const auto further = [](s8 a, s8 b) { return std::abs(int(a)) >= std::abs(int(b)) ? a : b; };
+      status[i].stickX = further(status[i].stickX, keyboardStatus.stickX);
+      status[i].stickY = further(status[i].stickY, keyboardStatus.stickY);
+      status[i].substickX = further(status[i].substickX, keyboardStatus.substickX);
+      status[i].substickY = further(status[i].substickY, keyboardStatus.substickY);
+      status[i].triggerLeft = std::max(status[i].triggerLeft, keyboardStatus.triggerLeft);
+      status[i].triggerRight = std::max(status[i].triggerRight, keyboardStatus.triggerRight);
 
       if (controller->m_hasRumble) {
         rumbleSupport |= PAD_CHAN0_BIT >> i;
