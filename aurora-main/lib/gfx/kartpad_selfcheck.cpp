@@ -17,6 +17,9 @@
 #include <sys/system_properties.h>
 #endif
 
+namespace aurora::gx {
+bool kartpad_matrix_rows() noexcept; // shader.cpp
+} // namespace aurora::gx
 namespace aurora::gfx::kartpad_selfcheck {
 namespace {
 Module Log("aurora::gfx::selfcheck");
@@ -127,10 +130,11 @@ void compare(Shared& s) {
                                          : "match";
   const std::string constant =
       s.count == 3 ? fmt::format("drawn_constant={} constant_differing={}", drawn[2], strong[2]) : "drawn_constant=n/a";
-  Log.info("KartPad draw self-check: adapter_qualcomm={} adreno={} native_uniforms={} game_layout={} vertices={} "
+  Log.info("KartPad draw self-check: adapter_qualcomm={} adreno={} native_uniforms={} matrix_rows={} game_layout={} vertices={} "
            "target={}x{}x{} "
            "drawn_game={} drawn_other={} differing={} strongly_differing={} {} attempt={} result={}",
            webgpu::g_adapterIsQualcomm, webgpu::g_adapterAdrenoModel, webgpu::g_nativeUniformBuffers,
+           gx::kartpad_matrix_rows(),
            s.mainRepacked ? "cpu_repack" : "shader_fetch", s.vertices, w, h, s.samples, drawn[0], drawn[1],
            differing[1], strong[1], constant, s.attempts, result);
   for (auto& buffer : s.readback) buffer = {};

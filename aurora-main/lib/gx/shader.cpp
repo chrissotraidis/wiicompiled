@@ -10,9 +10,14 @@
 
 #include <array>
 #include <atomic>
+#include <cstdlib>
+#include <cstring>
 #include <mutex>
 #include <string_view>
 #include <utility>
+#if defined(__ANDROID__)
+#include <sys/system_properties.h>
+#endif
 
 #include "tracy/Tracy.hpp"
 
@@ -29,6 +34,38 @@ static std::string array_start_ref(int slot) {
   return fmt::format("ubuf.array_start[{}u].{}", slot / 4, "xyzw"[slot % 4]);
 }
 
+// #104/#301: Dolphin reads each matrix as three float4 rows of a plain uniform array and
+// transforms with dot products; Aurora declares array<mat3x4f, N>. KARTPAD_RENDERER_MATRIX_ROWS=1
+// (or on Android `adb shell setprop debug.kartpad.matrix_rows 1`) declares postex_mtx and nrm_mtx
+// as array<vec4f, 3N>, the same bytes, and reads rows the Dolphin way. Off unless asked; read once.
+bool kartpad_matrix_rows() noexcept {
+  static const bool rows = [] {
+    const char* value = std::getenv("KARTPAD_RENDERER_MATRIX_ROWS");
+    bool result = value != nullptr && std::strcmp(value, "1") == 0;
+#if defined(__ANDROID__)
+    char property[PROP_VALUE_MAX] = {};
+    if (__system_property_get("debug.kartpad.matrix_rows", property) > 0) {
+      result = std::strcmp(property, "1") == 0;
+    }
+#endif
+    Log.info("KartPadMatrixRows rows={}", result);
+    return result;
+  }();
+  return rows;
+}
+
+// `vec * ubuf.array[index]` for a mat3x4f palette entry: column j of a mat3x4f is row 3*index+j.
+// With rows off this is the original expression, so the default WGSL is unchanged.
+static std::string kartpad_matrix_mul(std::string_view arrayName, std::string_view vec,
+                                      std::string_view index) {
+  if (!kartpad_matrix_rows()) {
+    return fmt::format("{} * ubuf.{}[{}]", vec, arrayName, index);
+  }
+  return fmt::format("vec3f(dot({0}, ubuf.{1}[({2}) * 3u]), dot({0}, ubuf.{1}[({2}) * 3u + 1u]), "
+                     "dot({0}, ubuf.{1}[({2}) * 3u + 2u]))",
+                     vec, arrayName, index);
+}
+
 static std::string kartpad_const_matrix_switch(std::string_view arrayName,
                                                std::string_view localName,
                                                std::string_view vectorExpression, u32 count,
@@ -38,8 +75,8 @@ static std::string kartpad_const_matrix_switch(std::string_view arrayName,
       "\n    switch ({1}) {{",
       localName, indexExpression);
   for (u32 slot = 0; slot < count; ++slot) {
-    result += fmt::format("\n      case {0}u: {{ {1} = {2} * ubuf.{3}[{0}u]; }}", slot, localName,
-                          vectorExpression, arrayName);
+    result += fmt::format("\n      case {0}u: {{ {1} = {2}; }}", slot, localName,
+                          kartpad_matrix_mul(arrayName, vectorExpression, fmt::format("{}u", slot)));
   }
   result += fmt::format(
       "\n      default: {{ {0} = vec3f(0.0); }}"
@@ -946,8 +983,9 @@ wgpu::ShaderModule build_shader(const ShaderConfig& config) noexcept {
           "\n    let in_vidx = iidx;"
           "\n    let in_pos = {};"
           "\n    let in_pnmtxidx = {};"
-          "\n    let mv_pos = vec4f(in_pos, 1.0) * ubuf.postex_mtx[in_pnmtxidx];",
-          attr_load(config, GX_VA_POS, "in_vidx"sv), attr_load(config, GX_VA_PNMTXIDX, "in_vidx"sv));
+          "\n    let mv_pos = {};",
+          attr_load(config, GX_VA_POS, "in_vidx"sv), attr_load(config, GX_VA_PNMTXIDX, "in_vidx"sv),
+          kartpad_matrix_mul("postex_mtx"sv, "vec4f(in_pos, 1.0)"sv, "in_pnmtxidx"sv));
     } else {
       // GX_LINES / GX_LINESTRIP: each instance = two vertices, expand to quad
       vtxXfrAttrsPre += fmt::format(
@@ -961,12 +999,14 @@ wgpu::ShaderModule build_shader(const ShaderConfig& config) noexcept {
           "\n    let pnmtxidx_a = {};"
           "\n    let pnmtxidx_b = {};"
           "\n    let in_pnmtxidx = select(pnmtxidx_a, pnmtxidx_b, use_b);"
-          "\n    let mv_pos_a = vec4f(pos_a, 1.0) * ubuf.postex_mtx[pnmtxidx_a];"
-          "\n    let mv_pos_b = vec4f(pos_b, 1.0) * ubuf.postex_mtx[pnmtxidx_b];"
+          "\n    let mv_pos_a = {};"
+          "\n    let mv_pos_b = {};"
           "\n    let mv_pos = select(mv_pos_a, mv_pos_b, use_b);",
           config.lineMode == 1 ? 2 : 1, attr_load(config, GX_VA_POS, "vidx_a"sv),
           attr_load(config, GX_VA_POS, "vidx_b"sv), attr_load(config, GX_VA_PNMTXIDX, "vidx_a"sv),
-          attr_load(config, GX_VA_PNMTXIDX, "vidx_b"sv));
+          attr_load(config, GX_VA_PNMTXIDX, "vidx_b"sv),
+          kartpad_matrix_mul("postex_mtx"sv, "vec4f(pos_a, 1.0)"sv, "pnmtxidx_a"sv),
+          kartpad_matrix_mul("postex_mtx"sv, "vec4f(pos_b, 1.0)"sv, "pnmtxidx_b"sv));
     }
     vidxAttr = "in_vidx"sv;
   } else if (config.attrs[GX_VA_PNMTXIDX].attrType == GX_NONE) {
@@ -997,9 +1037,10 @@ wgpu::ShaderModule build_shader(const ShaderConfig& config) noexcept {
       vtxXfrAttrsPre += "\n    out.pos = vec4f(mv_pos, 1.0) * ubuf.proj;";
     } else {
       vtxXfrAttrsPre += fmt::format(
-          "\n    let mv_pos = vec4f({}, 1.0) * ubuf.postex_mtx[in_pnmtxidx];"
+          "\n    let mv_pos = {};"
           "\n    out.pos = vec4f(mv_pos, 1.0) * ubuf.proj;",
-          vtx_attr(config, GX_VA_POS));
+          kartpad_matrix_mul("postex_mtx"sv, fmt::format("vec4f({}, 1.0)", vtx_attr(config, GX_VA_POS)),
+                             "in_pnmtxidx"sv));
     }
   } else if (config.lineMode == 3) {
     // GX_POINTS: expand single vertex to axis-aligned screen-space square
@@ -1047,15 +1088,21 @@ wgpu::ShaderModule build_shader(const ShaderConfig& config) noexcept {
     vtxXfrAttrsPre += "\n    let mv_nrm = select(nrm_tmp, normalize(nrm_tmp), dot(nrm_tmp, nrm_tmp) > 1e-10);";
   } else {
     vtxXfrAttrsPre += fmt::format(
-        "\n    let nrm_tmp = vec4f({}, 0.0) * ubuf.nrm_mtx[in_pnmtxidx];"
+        "\n    let nrm_tmp = {};"
         "\n    let mv_nrm = select(nrm_tmp, normalize(nrm_tmp), dot(nrm_tmp, nrm_tmp) > 1e-10);",
-        vtx_attr(config, GX_VA_NRM));
+        kartpad_matrix_mul("nrm_mtx"sv, fmt::format("vec4f({}, 0.0)", vtx_attr(config, GX_VA_NRM)),
+                           "in_pnmtxidx"sv));
   }
 
   uniBufAttrs += "\n    proj: mat4x4f,";
   // Only the matrix slots this shader can read are uploaded, in compacted order; see UniformMatrixLayout.
-  uniBufAttrs += fmt::format("\n    postex_mtx: array<mat3x4f, {}>,", info.matrixLayout.postexCount);
-  uniBufAttrs += fmt::format("\n    nrm_mtx: array<mat3x4f, {}>,", info.matrixLayout.nrmCount);
+  if (kartpad_matrix_rows()) {
+    uniBufAttrs += fmt::format("\n    postex_mtx: array<vec4f, {}>,", info.matrixLayout.postexCount * 3);
+    uniBufAttrs += fmt::format("\n    nrm_mtx: array<vec4f, {}>,", info.matrixLayout.nrmCount * 3);
+  } else {
+    uniBufAttrs += fmt::format("\n    postex_mtx: array<mat3x4f, {}>,", info.matrixLayout.postexCount);
+    uniBufAttrs += fmt::format("\n    nrm_mtx: array<mat3x4f, {}>,", info.matrixLayout.nrmCount);
+  }
   std::string fragmentFnPre;
   std::string fragmentFn;
   const int zTexStage = tev_z_texture_stage(config);
@@ -1244,7 +1291,9 @@ wgpu::ShaderModule build_shader(const ShaderConfig& config) noexcept {
                                                      fmt::format("tc{}", i), info.matrixLayout.postexCount,
                                                      fmt::format("in_texmtxidx{} / 3u", i));
         } else {
-          vtxXfrAttrs += fmt::format("\n    var tc{0}_tmp = tc{0} * ubuf.postex_mtx[in_texmtxidx{0} / 3u];", i);
+          vtxXfrAttrs += fmt::format("\n    var tc{}_tmp = {};", i,
+                                     kartpad_matrix_mul("postex_mtx"sv, fmt::format("tc{}", i),
+                                                        fmt::format("in_texmtxidx{} / 3u", i)));
         }
       } else if (tcg.mtx == GX_IDENTITY) {
         vtxXfrAttrs += fmt::format("\n    var tc{0}_tmp = tc{0}.xyz;", i);
@@ -1254,7 +1303,9 @@ wgpu::ShaderModule build_shader(const ShaderConfig& config) noexcept {
                                                         : texMtxSlot;
         CHECK(texMtxIdx != UniformMatrixLayout::kAbsent,
               "texgen {} matrix slot {} missing from the uniform layout", i, texMtxSlot);
-        vtxXfrAttrs += fmt::format("\n    var tc{0}_tmp = tc{0} * ubuf.postex_mtx[{1}];", i, texMtxIdx);
+        vtxXfrAttrs += fmt::format("\n    var tc{}_tmp = {};", i,
+                                   kartpad_matrix_mul("postex_mtx"sv, fmt::format("tc{}", i),
+                                                      fmt::format("{}", texMtxIdx)));
       }
       if (tcg.type == GX_TG_MTX2x4) {
         vtxXfrAttrs += fmt::format("\n    tc{0}_tmp.z = 1.0f;", i);
