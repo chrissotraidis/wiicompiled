@@ -127,10 +127,12 @@ void compare(Shared& s) {
                                          : "match";
   const std::string constant =
       s.count == 3 ? fmt::format("drawn_constant={} constant_differing={}", drawn[2], strong[2]) : "drawn_constant=n/a";
-  Log.info("KartPad draw self-check: adapter_qualcomm={} adreno={} game_layout={} vertices={} target={}x{}x{} "
+  Log.info("KartPad draw self-check: adapter_qualcomm={} adreno={} native_uniforms={} game_layout={} vertices={} "
+           "target={}x{}x{} "
            "drawn_game={} drawn_other={} differing={} strongly_differing={} {} attempt={} result={}",
-           webgpu::g_adapterIsQualcomm, webgpu::g_adapterAdrenoModel, s.mainRepacked ? "cpu_repack" : "shader_fetch",
-           s.vertices, w, h, s.samples, drawn[0], drawn[1], differing[1], strong[1], constant, s.attempts, result);
+           webgpu::g_adapterIsQualcomm, webgpu::g_adapterAdrenoModel, webgpu::g_nativeUniformBuffers,
+           s.mainRepacked ? "cpu_repack" : "shader_fetch", s.vertices, w, h, s.samples, drawn[0], drawn[1],
+           differing[1], strong[1], constant, s.attempts, result);
   for (auto& buffer : s.readback) buffer = {};
   if (tooSmall) {
     retry(s, most == 0 ? "nothing_drawn" : "too_small"); // off screen, culled or tiny; try another draw

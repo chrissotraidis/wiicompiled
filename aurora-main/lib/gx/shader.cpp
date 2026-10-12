@@ -23,6 +23,12 @@ using namespace std::string_view_literals;
 
 static Module Log("aurora::gfx::gx");
 
+// The twelve vertex-array base offsets live in three vec4u, the same 48 bytes as array<u32, 12>,
+// so the uniform block keeps std140 layout and Dawn can read it natively (#104/#301).
+static std::string array_start_ref(int slot) {
+  return fmt::format("ubuf.array_start[{}u].{}", slot / 4, "xyzw"[slot % 4]);
+}
+
 static std::string kartpad_const_matrix_switch(std::string_view arrayName,
                                                std::string_view localName,
                                                std::string_view vectorExpression, u32 count,
@@ -708,13 +714,13 @@ auto normal_group_load(const ShaderConfig& config, u8 group, std::string_view vi
 
   if (mapping.attrType == GX_INDEX8) {
     const std::string indexOffs = offset_plus(offs, mapping.nrmIndexCount == 3 ? group : 0);
-    offs = fmt::format("ubuf.array_start[{}] + raw_fetch_u8_1(&{}, {}) * {}u + {}u", GX_VA_NRM - GX_VA_POS, buf,
+    offs = fmt::format("{} + raw_fetch_u8_1(&{}, {}) * {}u + {}u", array_start_ref(GX_VA_NRM - GX_VA_POS), buf,
                        indexOffs, mapping.stride, groupOffset);
     buf = "abuf"sv;
     le = mapping.le;
   } else if (mapping.attrType == GX_INDEX16) {
     const std::string indexOffs = offset_plus(offs, mapping.nrmIndexCount == 3 ? group * 2u : 0);
-    offs = fmt::format("ubuf.array_start[{}] + raw_fetch_u16_1(&{}, {}, {}) * {}u + {}u", GX_VA_NRM - GX_VA_POS,
+    offs = fmt::format("{} + raw_fetch_u16_1(&{}, {}, {}) * {}u + {}u", array_start_ref(GX_VA_NRM - GX_VA_POS),
                        buf, indexOffs, le, mapping.stride, groupOffset);
     buf = "abuf"sv;
     le = mapping.le;
@@ -734,12 +740,12 @@ auto attr_load(const ShaderConfig& config, GXAttr attr, std::string_view vidx) -
   auto offs = fmt::format("ubuf.vtx_start + {} * {}u + {}u", vidx, config.vtxStride, mapping.offset);
   auto le = false; // Vertex buffer is always big endian (for now)
   if (mapping.attrType == GX_INDEX8) {
-    offs = fmt::format("ubuf.array_start[{}] + raw_fetch_u8_1(&{}, {}) * {}u", attr - GX_VA_POS, buf, offs,
+    offs = fmt::format("{} + raw_fetch_u8_1(&{}, {}) * {}u", array_start_ref(attr - GX_VA_POS), buf, offs,
                        mapping.stride);
     buf = "abuf"sv;
     le = mapping.le;
   } else if (mapping.attrType == GX_INDEX16) {
-    offs = fmt::format("ubuf.array_start[{}] + raw_fetch_u16_1(&{}, {}, {}) * {}u", attr - GX_VA_POS, buf, offs, le,
+    offs = fmt::format("{} + raw_fetch_u16_1(&{}, {}, {}) * {}u", array_start_ref(attr - GX_VA_POS), buf, offs, le,
                        mapping.stride);
     buf = "abuf"sv;
     le = mapping.le;
@@ -2096,7 +2102,7 @@ struct Uniform {{
     render_viewport_size: vec2f,
     logical_viewport_size: vec2f,
     pad: vec2u,
-    array_start: array<u32, 12>,{0}
+    array_start: array<vec4u, 3>,{0}
 }};
 @group(0) @binding(0)
 var<storage, read> vbuf: array<u32>;

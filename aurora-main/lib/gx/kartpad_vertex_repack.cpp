@@ -131,10 +131,14 @@ int active_mode() noexcept {
     // the characters: menus, karts and tracks stay striped (OnePlus 15, #316). Mode 2 drew
     // everything correctly on the OnePlus 15 and on a Z Fold 8 in both games (#102); one other Fold 8
     // lost karts and item boxes in Retro Rewind with it, which a player can still avoid by choosing
-    // "fix broken characters". Everything else stays off by default.
+    // "fix broken characters". Adreno 6xx/7xx get mode 1 when native uniform buffers are active
+    // (#104/#301): their bodies drew only when both the vertex fetch and the matrix read changed.
+    // Everything else stays off by default.
     const int adreno = webgpu::g_adapterAdrenoModel;
     const bool automatic = value < 0;
-    const int result = automatic ? ((qualcomm && adreno >= 800 && adreno < 1000) ? 2 : 0) : value;
+    const bool adreno8xx = qualcomm && adreno >= 800 && adreno < 1000;
+    const bool adreno67xx = qualcomm && adreno >= 600 && adreno < 800 && webgpu::g_nativeUniformBuffers;
+    const int result = automatic ? (adreno8xx ? 2 : (adreno67xx ? 1 : 0)) : value;
     Log.info("KartPadPNMTX repack mode={} source={} qualcomm={} adreno={} enabled={}",
              result == 2 ? "all_draws" : (result == 1 ? "on" : "off"), automatic ? "auto" : "override", qualcomm,
              adreno, result >= 1);

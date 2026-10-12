@@ -62,6 +62,8 @@ extern bool g_bcTexturesSupported;
 // Qualcomm/Adreno adapter; selects the KartPad vertex repack workaround by default.
 extern bool g_adapterIsQualcomm;
 extern int g_adapterAdrenoModel;
+// True when Dawn reads uniform buffers natively instead of decomposing them (#104/#301).
+extern bool g_nativeUniformBuffers;
 // Adapter-reported limit; PowerVR reports 14 (#304). 0 until the adapter is chosen.
 extern uint32_t g_adapterMaxInterStageVariables;
 

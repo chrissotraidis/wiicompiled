@@ -6,6 +6,7 @@
 #include <android/log.h>
 #include <android/native_window.h>
 #include <dlfcn.h>
+#include <sys/system_properties.h>
 extern "C" void KartPadAndroidLogMetric(const char*, const char*, ...);
 #endif
 #include "gpu.hpp"
@@ -80,6 +81,7 @@ static wgpu::SurfaceCapabilities g_surfaceCapabilities;
 bool g_bcTexturesSupported;
 bool g_adapterIsQualcomm;
 int g_adapterAdrenoModel;
+bool g_nativeUniformBuffers;
 uint32_t g_adapterMaxInterStageVariables;
 // Written by Dawn's device-loss callback and consumed at ordered frame boundaries. Keep the
 // callback free of logging, allocation, teardown and renderer state mutation.
@@ -521,6 +523,29 @@ wgpu::BindGroup create_copy_bind_group(const TextureWithSampler& source) {
   return create_copy_bind_group(source.view, source.sampler);
 }
 
+// Native uniform buffers: KARTPAD_RENDERER_NATIVE_UNIFORMS=1/0 (environment), or on Android
+// `adb shell setprop debug.kartpad.native_uniforms 1|0` before starting the game. Unset is
+// automatic (Adreno 6xx/7xx only). Read once per process.
+static int native_uniform_mode() {
+  static const int mode = [] {
+    const auto parse = [](const char* value) {
+      if (value == nullptr) return -1;
+      if (std::strcmp(value, "1") == 0) return 1;
+      if (std::strcmp(value, "0") == 0) return 0;
+      return -1;
+    };
+    int result = parse(std::getenv("KARTPAD_RENDERER_NATIVE_UNIFORMS"));
+#if defined(__ANDROID__)
+    char value[PROP_VALUE_MAX] = {};
+    if (__system_property_get("debug.kartpad.native_uniforms", value) > 0 && parse(value) >= 0) {
+      result = parse(value);
+    }
+#endif
+    return result;
+  }();
+  return mode;
+}
+
 static wgpu::BackendType to_wgpu_backend(AuroraBackend backend) {
   switch (backend) {
   case BACKEND_WEBGPU:
@@ -626,12 +651,14 @@ bool initialize(AuroraBackend auroraBackend) {
       return false;
     }
   }
-  {
-    const wgpu::RequestAdapterOptions options{
+  const auto requestAdapter = [&](const wgpu::ChainedStruct* chain) {
+    g_adapter = {};
+    wgpu::RequestAdapterOptions options{
         .powerPreference = wgpu::PowerPreference::HighPerformance,
         .backendType = backend,
         .compatibleSurface = g_surface,
     };
+    options.nextInChain = chain;
     event(Boundary::Adapter, "begin", static_cast<int>(backend));
     const auto future = g_instance.RequestAdapter(
         &options, wgpu::CallbackMode::WaitAnyOnly,
@@ -659,10 +686,8 @@ bool initialize(AuroraBackend auroraBackend) {
       Log.error("No {} adapter is available on this system", magic_enum::enum_name(backend));
       return false;
     }
-  }
-  g_adapter.GetInfo(&g_adapterInfo);
-  g_backendType = g_adapterInfo.backendType;
-  {
+    g_adapter.GetInfo(&g_adapterInfo);
+    g_backendType = g_adapterInfo.backendType;
     const auto contains = [](wgpu::StringView text, std::string_view needle) {
       return !text.IsUndefined() && std::string_view(text.data, text.length).find(needle) != std::string_view::npos;
     };
@@ -674,7 +699,41 @@ bool initialize(AuroraBackend auroraBackend) {
         g_adapterAdrenoModel = adreno_model_from_name(std::string_view(text.data, text.length));
       }
     }
+    return true;
+  };
+  if (!requestAdapter(nullptr)) {
+    return false;
   }
+  g_nativeUniformBuffers = false;
+#if defined(WEBGPU_DAWN) && !defined(__MINGW32__)
+  if (g_backendType == wgpu::BackendType::Vulkan || g_backendType == wgpu::BackendType::OpenGLES) {
+    // #104/#301: on Vulkan and GL, Dawn rewrites every uniform buffer as array<vec4<u32>> and
+    // rebuilds each value from raw words (decompose_uniform_buffers, on by default). On Adreno
+    // 6xx/7xx, skinned character bodies draw nothing that way. Native uniform buffers read float
+    // rows directly, as Dolphin does. Every Aurora uniform block keeps std140 layout for this.
+    const int mode = native_uniform_mode();
+    const bool automatic = mode < 0;
+    const bool want = automatic ? (g_adapterIsQualcomm && g_adapterAdrenoModel >= 600 && g_adapterAdrenoModel < 800)
+                                : mode == 1;
+    if (want) {
+      static constexpr std::array<const char*, 1> kNativeUniforms{"decompose_uniform_buffers"};
+      wgpu::DawnTogglesDescriptor adapterToggles{};
+      adapterToggles.disabledToggleCount = kNativeUniforms.size();
+      adapterToggles.disabledToggles = kNativeUniforms.data();
+      if (!requestAdapter(&adapterToggles) && !requestAdapter(nullptr)) {
+        return false;
+      }
+    }
+    bool decomposed = false;
+    for (const char* toggle : dawn::native::GetTogglesUsed(g_adapter)) {
+      decomposed = decomposed || std::strcmp(toggle, "decompose_uniform_buffers") == 0;
+    }
+    g_nativeUniformBuffers = !decomposed;
+    Log.info("KartPadUniforms mode={} qualcomm={} adreno={} native={}",
+             automatic ? "auto" : (mode == 1 ? "forced_on" : "forced_off"), g_adapterIsQualcomm,
+             g_adapterAdrenoModel, g_nativeUniformBuffers);
+  }
+#endif
   const auto backendName = magic_enum::enum_name(g_backendType);
   auto adapterName = g_adapterInfo.device;
   if (adapterName.IsUndefined()) {
