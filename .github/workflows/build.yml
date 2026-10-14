@@ -86,7 +86,7 @@ jobs:
         working-directory: kartpad
         run: |
           source scripts/android-toolchain-versions.sh
-          sdkmanager "platforms;android-$KARTPAD_ANDROID_COMPILE_SDK" "build-tools;$KARTPAD_ANDROID_BUILD_TOOLS" "ndk;$KARTPAD_ANDROID_NDK" "cmake;$KARTPAD_ANDROID_CMAKE"
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-$KARTPAD_ANDROID_COMPILE_SDK" "build-tools;$KARTPAD_ANDROID_BUILD_TOOLS" "ndk;$KARTPAD_ANDROID_NDK" "cmake;$KARTPAD_ANDROID_CMAKE"
       - name: Compile and link the complete runtime without game inputs
         working-directory: kartpad
         run: scripts/build-android-runtime-ci.sh build/runtime-ci
