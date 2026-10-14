@@ -52,7 +52,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           repository: chrissotraidis/kartpad
-          ref: 5f18b3924fb25867af88a05e223d840b4d5bce81
+          ref: 9293d8d404891a6e2bd3bb794a167f07e52dc34a
           path: kartpad
           submodules: recursive
           persist-credentials: false

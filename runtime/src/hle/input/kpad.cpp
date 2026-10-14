@@ -732,9 +732,10 @@ kartpad::android::ClassicInputState ReadAndroidClassicInput(uint32_t chan)
     return classic;
 }
 
-kartpad::android::TouchInputState ReadAndroidTouchInput(uint32_t chan)
+kartpad::android::TouchInputState ReadAndroidTouchInput(
+    uint32_t chan, kartpad::android::TouchInputReader reader)
 {
-    return chan == 0 ? kartpad::android::ConsumeTouchInput() :
+    return chan == 0 ? kartpad::android::ConsumeTouchInput(reader) :
                        kartpad::android::TouchInputState{};
 }
 
@@ -1165,7 +1166,7 @@ extern "C" int32_t KPAD__Read_HLE(uint32_t chan, uint32_t statusPtr, uint32_t co
 #if defined(__ANDROID__)
     const auto androidInput = ReadAndroidClassicInput(chan);
     const bool androidConnected = androidInput.connected;
-    const auto touchInput = ReadAndroidTouchInput(chan);
+    const auto touchInput = ReadAndroidTouchInput(chan, kartpad::android::TouchInputReader::Kpad);
     const bool touchConnected = touchInput.connected;
 #else
     const bool androidConnected = false;
@@ -1294,7 +1295,7 @@ extern "C" int32_t KPAD__GetUnifiedWpadStatus_HLE(uint32_t chan, uint32_t status
 #if defined(__ANDROID__)
     const auto androidInput = ReadAndroidClassicInput(chan);
     const bool androidConnected = androidInput.connected;
-    const auto touchInput = ReadAndroidTouchInput(chan);
+    const auto touchInput = ReadAndroidTouchInput(chan, kartpad::android::TouchInputReader::UnifiedWpad);
     const bool touchConnected = touchInput.connected;
 #else
     const bool androidConnected = false;
