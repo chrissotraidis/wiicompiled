@@ -890,7 +890,8 @@ void initialize() {
   };
   createBuffer(g_uniformBuffer, wgpu::BufferUsage::Uniform | wgpu::BufferUsage::CopyDst, UniformBufferSize,
                "Shared Uniform Buffer");
-  createBuffer(g_vertexBuffer, wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopyDst, VertexBufferSize,
+  createBuffer(g_vertexBuffer, wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopyDst |
+                   (gx::kartpad_vertex_pnmtx() ? wgpu::BufferUsage::Vertex : wgpu::BufferUsage::None), VertexBufferSize,
                "Shared Vertex Buffer");
   createBuffer(g_indexBuffer, wgpu::BufferUsage::Index | wgpu::BufferUsage::CopyDst, IndexBufferSize,
                "Shared Index Buffer");

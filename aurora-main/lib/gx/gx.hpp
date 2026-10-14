@@ -784,6 +784,10 @@ u8 populate_vertex_layout(std::array<AttrConfig, MaxVtxAttr>& attrs, GXVtxFmt fm
 wgpu::RenderPipeline build_pipeline(const PipelineConfig& config, ArrayRef<wgpu::VertexBufferLayout> vtxBuffers,
                                     wgpu::ShaderModule shader, const char* label) noexcept;
 wgpu::ShaderModule build_shader(const ShaderConfig& config) noexcept;
+// Developer-only experiment: fetch the bone index through a native vertex
+// attribute instead of the storage-buffer vertex puller. Off by default.
+bool kartpad_vertex_pnmtx() noexcept;
+bool kartpad_uses_vertex_pnmtx(const ShaderConfig& config) noexcept;
 GXBindGroups build_bind_groups(const ShaderInfo& info) noexcept;
 void notify_copy_texture_created() noexcept;
 

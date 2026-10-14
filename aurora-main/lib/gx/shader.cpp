@@ -28,6 +28,30 @@ using namespace std::string_view_literals;
 
 static Module Log("aurora::gfx::gx");
 
+bool kartpad_vertex_pnmtx() noexcept {
+  static const bool enabled = [] {
+    const char* value = std::getenv("KARTPAD_RENDERER_VERTEX_PNMTX");
+    bool result = value != nullptr && std::strcmp(value, "1") == 0;
+#if defined(__ANDROID__)
+    char property[PROP_VALUE_MAX]{};
+    if (__system_property_get("debug.kartpad.vertex_pnmtx", property) > 0)
+      result = std::strcmp(property, "1") == 0;
+#endif
+    Log.info("KartPadVertexPNMTX attribute={}", result);
+    return result;
+  }();
+  return enabled;
+}
+
+bool kartpad_uses_vertex_pnmtx(const ShaderConfig& config) noexcept {
+  const auto& index = config.attrs[GX_VA_PNMTXIDX];
+  // Uint32 requires a four-byte slot/stride. Repacked character vertices meet
+  // this contract; odd-stride original draws and expanded lines keep pulling.
+  return kartpad_vertex_pnmtx() && config.lineMode == 0 && !config.kartpadConstantPnMtx &&
+         index.attrType == GX_DIRECT && index.offset % 4 == 0 && config.vtxStride % 4 == 0 &&
+         config.vtxStride >= index.offset + 4;
+}
+
 // The twelve vertex-array base offsets live in three vec4u, the same 48 bytes as array<u32, 12>,
 // so the uniform block keeps std140 layout and Dawn can read it natively (#104/#301).
 static std::string array_start_ref(int slot) {
@@ -1014,7 +1038,18 @@ wgpu::ShaderModule build_shader(const ShaderConfig& config) noexcept {
   }
 
   // Load vertex attributes
+  if (kartpad_uses_vertex_pnmtx(config)) {
+    static std::atomic<unsigned> reported{0};
+    if (reported.fetch_add(1, std::memory_order_relaxed) < 8)
+      Log.info("KartPadPNMTX shader_variant=vertex_attribute config={:016x} stride={} offset={}",
+               hash, config.vtxStride, config.attrs[GX_VA_PNMTXIDX].offset);
+    vtxInAttrs += ",\n    @location(0) pnmtx_attribute: u32";
+    // Uint32 vertex fetch is little endian; the original GX byte is the low
+    // byte of its padded slot. GX stores row indices (three rows per matrix).
+    vtxXfrAttrsPre += "\n    let in_pnmtxidx = (pnmtx_attribute & 255u) / 3u;";
+  }
   for (GXAttr attr = GX_VA_PNMTXIDX; attr <= GX_VA_TEX7; attr = static_cast<GXAttr>(attr + 1)) {
+    if (attr == GX_VA_PNMTXIDX && kartpad_uses_vertex_pnmtx(config)) continue;
     const auto attrType = config.attrs[attr].attrType;
     if (attrType == GX_NONE) {
       continue;

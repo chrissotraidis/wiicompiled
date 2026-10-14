@@ -61,6 +61,19 @@ wgpu::ShaderModule cached_shader_module(const ShaderConfig& config) {
 wgpu::RenderPipeline create_pipeline(const PipelineConfig& config) {
   ZoneScoped;
   const auto shader = cached_shader_module(config.shaderConfig);
+  if (kartpad_uses_vertex_pnmtx(config.shaderConfig)) {
+    wgpu::VertexAttribute attribute{};
+    attribute.format = wgpu::VertexFormat::Uint32;
+    attribute.offset = config.shaderConfig.attrs[GX_VA_PNMTXIDX].offset;
+    attribute.shaderLocation = 0;
+    wgpu::VertexBufferLayout layout{};
+    layout.arrayStride = config.shaderConfig.vtxStride;
+    layout.stepMode = wgpu::VertexStepMode::Vertex;
+    layout.attributeCount = 1;
+    layout.attributes = &attribute;
+    const std::array layouts{layout};
+    return build_pipeline(config, layouts, shader, "GX Vertex PNMTX Experiment");
+  }
   return build_pipeline(config, {}, shader, "GX Pipeline");
 }
 
@@ -113,6 +126,10 @@ void render(const DrawData& data, const wgpu::RenderPassEncoder& pass, DrawEncod
     // Bound once for the pass; draws select their range with firstIndex below.
     pass.SetIndexBuffer(gfx::g_indexBuffer, wgpu::IndexFormat::Uint16, 0, wgpu::kWholeSize);
     state.indexBufferBound = true;
+  }
+  if (kartpad_vertex_pnmtx() && data.vertRange.size != 0) {
+    // Indices are relative to this draw's vertex range, including merged draws.
+    pass.SetVertexBuffer(0, gfx::g_vertexBuffer, data.vertRange.offset, data.vertRange.size);
   }
   pass.DrawIndexed(data.indexCount, data.instanceCount,
                    static_cast<uint32_t>(data.idxRange.offset / sizeof(uint16_t)));
