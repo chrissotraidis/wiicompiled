@@ -1540,8 +1540,9 @@ bool IsMouseActivity(const SDL_Event& event) {
     }
 }
 
-// Runs on the thread that pumps SDL events (the same one that calls Draw), so
-// the SDL cursor calls are safe here.
+// On Android this runs only from HandleEvents on the original scheduler stack.
+// Draw can run on a guest fiber: SDL cursor calls enter Java there and invalidate
+// ART's JNI transition frames even though the pthread is still SDLThread.
 void UpdateCursorAutoHide() {
     const bool shouldHide =
         !g_topBarVisible && Clock::now() - g_lastMouseActivity >= kCursorAutoHideDelay;
@@ -1549,12 +1550,17 @@ void UpdateCursorAutoHide() {
         return;
     }
     g_cursorHidden = shouldHide;
-    // ImGui_ImplSDL3_NewFrame calls SDL_ShowCursor every frame unless this flag is set.
+    // Android disables ImGui cursor changes when its context is created; only
+    // this scheduler-side path may update the system cursor there.
     if (shouldHide) {
+#if !defined(__ANDROID__)
         ImGui::GetIO().ConfigFlags |= ImGuiConfigFlags_NoMouseCursorChange;
+#endif
         SDL_HideCursor();
     } else {
+#if !defined(__ANDROID__)
         ImGui::GetIO().ConfigFlags &= ~ImGuiConfigFlags_NoMouseCursorChange;
+#endif
         SDL_ShowCursor();
     }
 }
@@ -1711,6 +1717,9 @@ void HandleEvents(const AuroraEvent* events) noexcept {
             g_lastMouseActivity = Clock::now();
         }
     }
+#if defined(__ANDROID__)
+    UpdateCursorAutoHide();
+#endif
 }
 
 bool FrameReadyForOverlay() noexcept {
@@ -1749,7 +1758,9 @@ bool Draw() noexcept {
     RefreshHostSettings();
     ApplyConfiguredMappings();
     PersistDisplayModeIfChanged();
+#if !defined(__ANDROID__)
     UpdateCursorAutoHide();
+#endif
     UpdateBootShaderState();
     if (!StartupScreenVisible()) {
         DrawShaderCompilationStatus();

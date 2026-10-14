@@ -46,6 +46,11 @@ void create_context() noexcept {
   ImGui::CreateContext();
   ImGuiIO& io = ImGui::GetIO();
   io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;
+#if defined(SDL_PLATFORM_ANDROID)
+  // NewFrame may run on a guest fiber or the frame worker. SDL cursor updates
+  // enter Java, so settings_overlay services them on the scheduler stack.
+  io.ConfigFlags |= ImGuiConfigFlags_NoMouseCursorChange;
+#endif
   remove_legacy_ini_file(g_config.userPath);
   remove_legacy_ini_file(g_config.cachePath);
   g_imguiLog = std::string{g_config.cachePath} + "/imgui.log";
