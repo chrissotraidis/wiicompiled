@@ -1,5 +1,6 @@
 #include "hle_stubs.h"
 #include "memory.h"
+#include "input_bindings.h"
 
 #include <SDL3/SDL_keyboard.h>
 #include <SDL3/SDL_events.h>
@@ -72,6 +73,11 @@ std::array<std::atomic<bool>, 4> g_keyboardConnected{};
 std::atomic<bool> g_fixtureArmRequested{false};
 std::atomic<bool> g_preciseMenuPulseRequested{false};
 std::array<std::atomic<uint64_t>, SDL_SCANCODE_COUNT> g_syntheticExpiryNs{};
+// Keep queued taps as keys, not actions: a remap/clear before the next guest
+// read must use the current mapping, just like a physically held key.
+std::array<std::atomic<bool>, SDL_SCANCODE_COUNT> g_pendingMappedKeys{};
+std::array<std::atomic<bool>, SDL_SCANCODE_COUNT> g_suppressedMappedKeys{};
+std::atomic<bool> g_keyboardUnavailable{false};
 
 bool PreciseMenuPulseEnabled()
 {
@@ -398,6 +404,85 @@ bool ForceFixtureMetadataEnabled()
     return enabled && Fixture().EnsureLoaded();
 }
 
+struct KeyboardClassicState {
+    uint32_t core = 0;
+    uint32_t classic = 0;
+    std::array<float, 2> left{};
+    std::array<float, 2> right{};
+    std::array<float, 2> triggers{};
+};
+
+// Resolve the same PAD mappings edited by the native Controls panel. This is
+// a semantic PAD -> Classic conversion, not a second table of physical keys.
+template <typename KeyLevel>
+KeyboardClassicState ReadMappedKeyboard(KeyLevel level)
+{
+    KeyboardClassicState state;
+    uint32_t count = 0;
+    const auto* buttons = PADGetKeyButtonBindings(0, &count); // also loads saved bindings
+    uint32_t pad = 0;
+    if (buttons) for (uint32_t i = 0; i < count; ++i) {
+        if (level(buttons[i].scancode, false) > 0) pad |= buttons[i].padButton;
+    }
+    if (pad & PAD_BUTTON_A) { state.core |= kWpadButtonA; state.classic |= kClassicButtonA; }
+    if (pad & PAD_BUTTON_B) { state.core |= kWpadButtonB; state.classic |= kClassicButtonB; }
+    if (pad & PAD_BUTTON_X) { state.core |= kWpadButtonOne; state.classic |= kClassicButtonX; }
+    if (pad & PAD_BUTTON_Y) { state.core |= kWpadButtonTwo; state.classic |= kClassicButtonY; }
+    if (pad & PAD_BUTTON_START) { state.core |= kWpadButtonPlus; state.classic |= kClassicButtonPlus; }
+    if (pad & PAD_TRIGGER_Z) state.classic |= kClassicButtonZr; // MKW rear view
+    if (pad & PAD_TRIGGER_L) state.classic |= kClassicButtonL;
+    if (pad & PAD_TRIGGER_R) state.classic |= kClassicButtonR;
+    if (pad & PAD_BUTTON_UP) { state.core |= kWpadButtonUp; state.classic |= kClassicButtonUp; }
+    if (pad & PAD_BUTTON_DOWN) { state.core |= kWpadButtonDown; state.classic |= kClassicButtonDown; }
+    if (pad & PAD_BUTTON_LEFT) { state.core |= kWpadButtonLeft; state.classic |= kClassicButtonLeft; }
+    if (pad & PAD_BUTTON_RIGHT) { state.core |= kWpadButtonRight; state.classic |= kClassicButtonRight; }
+
+    const auto* axes = PADGetKeyAxisBindings(0, &count);
+    if (axes) for (uint32_t i = 0; i < count; ++i) {
+        const auto axis = axes[i].padAxis;
+        const float value = level(axes[i].scancode, axis < PAD_AXIS_TRIGGER_L);
+        switch (axis) {
+        case PAD_AXIS_LEFT_X_POS: state.left[0] += value; break;
+        case PAD_AXIS_LEFT_X_NEG: state.left[0] -= value; break;
+        case PAD_AXIS_LEFT_Y_POS: state.left[1] += value; break;
+        case PAD_AXIS_LEFT_Y_NEG: state.left[1] -= value; break;
+        case PAD_AXIS_RIGHT_X_POS: state.right[0] += value; break;
+        case PAD_AXIS_RIGHT_X_NEG: state.right[0] -= value; break;
+        case PAD_AXIS_RIGHT_Y_POS: state.right[1] += value; break;
+        case PAD_AXIS_RIGHT_Y_NEG: state.right[1] -= value; break;
+        case PAD_AXIS_TRIGGER_L: state.triggers[0] = std::max(state.triggers[0], value); break;
+        case PAD_AXIS_TRIGGER_R: state.triggers[1] = std::max(state.triggers[1], value); break;
+        }
+    }
+    for (auto* stick : {&state.left, &state.right})
+        for (auto& value : *stick) value = std::clamp(value, -1.0f, 1.0f);
+    // Digital clicks and analog axes are independently configurable. A digital
+    // click fully depresses its trigger; clearing it leaves the axis intact.
+    if (state.classic & kClassicButtonL) state.triggers[0] = 1.0f;
+    if (state.classic & kClassicButtonR) state.triggers[1] = 1.0f;
+    if (state.triggers[0] >= 150.0f / 255.0f) state.classic |= kClassicButtonL;
+    if (state.triggers[1] >= 150.0f / 255.0f) state.classic |= kClassicButtonR;
+    return state;
+}
+
+bool UpdateMappedKeyboardGate()
+{
+    const bool unavailable = InputBindings::InputBlocked() || SDL_GetKeyboardFocus() == nullptr;
+    const bool wasUnavailable = g_keyboardUnavailable.exchange(unavailable);
+    if (unavailable || wasUnavailable) {
+        int count = 0;
+        const bool* keys = SDL_GetKeyboardState(&count);
+        const auto now = SDL_GetTicksNS();
+        for (size_t code = 0; code < g_pendingMappedKeys.size(); ++code) {
+            if ((keys && code < static_cast<size_t>(std::max(count, 0)) && keys[code]) ||
+                g_syntheticExpiryNs[code].load() > now || g_pendingMappedKeys[code].load())
+                g_suppressedMappedKeys[code].store(true);
+            g_pendingMappedKeys[code].store(false);
+        }
+    }
+    return !unavailable;
+}
+
 uint32_t ButtonForScancode(uint32_t chan, SDL_Scancode code)
 {
     if (chan == 1) {
@@ -436,21 +521,7 @@ uint32_t ButtonForScancode(uint32_t chan, SDL_Scancode code)
         default: return 0;
         }
     }
-    switch (code) {
-    case SDL_SCANCODE_U: return kWpadButtonA;
-    case SDL_SCANCODE_M: return kWpadButtonB;
-    case SDL_SCANCODE_RETURN: return kWpadButtonA;
-    case SDL_SCANCODE_BACKSPACE: return kWpadButtonB;
-    case SDL_SCANCODE_SPACE: return kWpadButtonPlus;
-    case SDL_SCANCODE_Q: return kWpadButtonOne;
-    case SDL_SCANCODE_E: return kWpadButtonTwo;
-    case SDL_SCANCODE_ESCAPE: return kWpadButtonA;
-    case SDL_SCANCODE_LEFT: return kWpadButtonLeft;
-    case SDL_SCANCODE_RIGHT: return kWpadButtonRight;
-    case SDL_SCANCODE_DOWN: return kWpadButtonDown;
-    case SDL_SCANCODE_UP: return kWpadButtonUp;
-    default: return 0;
-    }
+    return 0; // Channel zero uses the saved PAD mappings.
 }
 
 uint32_t ClassicButtonForScancode(uint32_t chan, SDL_Scancode code)
@@ -471,38 +542,29 @@ uint32_t ClassicButtonForScancode(uint32_t chan, SDL_Scancode code)
         if (chan == 2 && code == SDL_SCANCODE_M) buttons |= kClassicButtonZr;
         return buttons;
     }
-    switch (code) {
-    case SDL_SCANCODE_U: return kClassicButtonA;
-    case SDL_SCANCODE_M: return kClassicButtonB;
-    case SDL_SCANCODE_RETURN: return kClassicButtonA;
-    case SDL_SCANCODE_BACKSPACE: return kClassicButtonB;
-    case SDL_SCANCODE_SPACE: return kClassicButtonPlus;
-    case SDL_SCANCODE_Q: return kClassicButtonB;
-    case SDL_SCANCODE_E: return kClassicButtonR;
-    case SDL_SCANCODE_LSHIFT: return kClassicButtonL;
-    case SDL_SCANCODE_TAB: return kClassicButtonMinus;
-    case SDL_SCANCODE_ESCAPE: return kClassicButtonA;
-    case SDL_SCANCODE_LEFT: return kClassicButtonLeft;
-    case SDL_SCANCODE_RIGHT: return kClassicButtonRight;
-    case SDL_SCANCODE_DOWN: return kClassicButtonDown;
-    case SDL_SCANCODE_UP: return kClassicButtonUp;
-    case SDL_SCANCODE_X: return kClassicButtonX;
-    case SDL_SCANCODE_C: return kClassicButtonY;
-    case SDL_SCANCODE_Z: return kClassicButtonZl;
-    case SDL_SCANCODE_V: return kClassicButtonZr;
-    default: return 0;
-    }
+    return 0;
 }
 
 bool SDLCALL WatchKeyboardEvent(void*, SDL_Event* event)
 {
+    // A paused game may not poll KPAD while a native settings window is open.
+    // Remember focus loss even if the entire capture happens between reads.
+    if (event->type == SDL_EVENT_WINDOW_FOCUS_LOST)
+        g_keyboardUnavailable.store(true);
     if (event->type == SDL_EVENT_KEY_DOWN && !event->key.repeat) {
+        const bool mappedAvailable = UpdateMappedKeyboardGate();
+        const int mappedCode = static_cast<int>(event->key.scancode);
+        if (mappedCode > SDL_SCANCODE_UNKNOWN && mappedCode < SDL_SCANCODE_COUNT) {
+            // Only a fresh press after focus/capture returns can re-enable a
+            // held key. Repeats and stale synthetic holds cannot leak through.
+            g_suppressedMappedKeys[mappedCode].store(!mappedAvailable);
+            g_pendingMappedKeys[mappedCode].store(mappedAvailable);
+        }
         if (event->key.scancode == SDL_SCANCODE_F6) {
             const bool enabled = !g_preciseMenuPulseRequested.load(std::memory_order_acquire);
             g_preciseMenuPulseRequested.store(enabled, std::memory_order_release);
             std::fprintf(stderr, "[input] precise menu pulse %s\n",
                          enabled ? "enabled" : "disabled");
-            return true;
         }
         if (event->key.scancode == SDL_SCANCODE_E) {
             g_fixtureArmRequested.store(true, std::memory_order_release);
@@ -518,7 +580,7 @@ bool SDLCALL WatchKeyboardEvent(void*, SDL_Event* event)
             g_previousClassicButtons[chan] = 0;
             std::fprintf(stderr, "[input] keyboard channel %u disconnected\n", chan);
         }
-        for (uint32_t chan = 0; chan < g_pendingPresses.size(); ++chan) {
+        for (uint32_t chan = 1; chan < g_pendingPresses.size(); ++chan) {
             const uint32_t core = ButtonForScancode(chan, event->key.scancode);
             const uint32_t classic = ClassicButtonForScancode(chan, event->key.scancode);
             if (chan != 0 && (core & kWpadButtonPlus) != 0 &&
@@ -532,7 +594,10 @@ bool SDLCALL WatchKeyboardEvent(void*, SDL_Event* event)
         }
         const auto scancode = static_cast<size_t>(event->key.scancode);
         if (scancode < g_syntheticExpiryNs.size()) {
-            const bool menuKey = event->key.scancode == SDL_SCANCODE_RETURN ||
+            const auto mapped = ReadMappedKeyboard([&](int code, bool) {
+                return code == mappedCode ? 1.0f : 0.0f;
+            });
+            const bool menuKey = mapped.core != 0 || event->key.scancode == SDL_SCANCODE_RETURN ||
                 event->key.scancode == SDL_SCANCODE_BACKSPACE ||
                 event->key.scancode == SDL_SCANCODE_SPACE ||
                 event->key.scancode == SDL_SCANCODE_Q ||
@@ -541,7 +606,8 @@ bool SDLCALL WatchKeyboardEvent(void*, SDL_Event* event)
                 event->key.scancode == SDL_SCANCODE_RIGHT ||
                 event->key.scancode == SDL_SCANCODE_DOWN ||
                 event->key.scancode == SDL_SCANCODE_UP;
-            const bool stickKey = event->key.scancode == SDL_SCANCODE_A ||
+            const bool stickKey = mapped.left != std::array<float, 2>{} ||
+                mapped.right != std::array<float, 2>{} || event->key.scancode == SDL_SCANCODE_A ||
                 event->key.scancode == SDL_SCANCODE_D ||
                 event->key.scancode == SDL_SCANCODE_W ||
                 event->key.scancode == SDL_SCANCODE_S ||
@@ -576,7 +642,8 @@ void EnsureKeyboardWatch()
 bool IsKeyDown(const bool* keys, int keyCount, SDL_Scancode code)
 {
     const auto scancode = static_cast<size_t>(code);
-    const bool physicallyDown = static_cast<int>(code) < keyCount && keys[code];
+    if (code <= SDL_SCANCODE_UNKNOWN || code >= SDL_SCANCODE_COUNT) return false;
+    const bool physicallyDown = keys && static_cast<int>(code) < keyCount && keys[code];
     if (physicallyDown) return true;
     const uint64_t expiry = scancode < g_syntheticExpiryNs.size() ?
         g_syntheticExpiryNs[scancode].load(std::memory_order_acquire) : 0;
@@ -587,7 +654,8 @@ bool IsKeyDown(const bool* keys, int keyCount, SDL_Scancode code)
 
 float ReadKeyboardAxisLevel(const bool* keys, int keyCount, SDL_Scancode code)
 {
-    if (static_cast<int>(code) < keyCount && keys[code]) return 1.0f;
+    if (code <= SDL_SCANCODE_UNKNOWN || code >= SDL_SCANCODE_COUNT) return 0.0f;
+    if (keys && static_cast<int>(code) < keyCount && keys[code]) return 1.0f;
     const auto scancode = static_cast<size_t>(code);
     const uint64_t expiry = scancode < g_syntheticExpiryNs.size() ?
         g_syntheticExpiryNs[scancode].load(std::memory_order_acquire) : 0;
@@ -639,6 +707,33 @@ std::array<float, 2> ReadClassicLeftStick(uint32_t chan)
     return {x, y};
 }
 
+KeyboardClassicState ReadMappedKeyboardSample(KeyboardClassicState& pending)
+{
+    if (!UpdateMappedKeyboardGate()) return {};
+    std::array<bool, SDL_SCANCODE_COUNT> taps{};
+    for (size_t code = 0; code < taps.size(); ++code)
+        taps[code] = g_pendingMappedKeys[code].exchange(false);
+    const auto allowed = [](int code) {
+        return code > SDL_SCANCODE_UNKNOWN && code < SDL_SCANCODE_COUNT &&
+               !g_suppressedMappedKeys[code].load();
+    };
+    pending = ReadMappedKeyboard([&](int code, bool) {
+        return allowed(code) && taps[code] ? 1.0f : 0.0f;
+    });
+    int count = 0;
+    const bool* keys = SDL_GetKeyboardState(&count);
+    auto state = ReadMappedKeyboard([&](int code, bool stick) {
+        if (!allowed(code)) return 0.0f;
+        return stick ? ReadKeyboardAxisLevel(keys, count, static_cast<SDL_Scancode>(code)) :
+            IsKeyDown(keys, count, static_cast<SDL_Scancode>(code)) ? 1.0f : 0.0f;
+    });
+    state.core |= pending.core;
+    state.classic |= pending.classic;
+    for (size_t i = 0; i < state.triggers.size(); ++i)
+        state.triggers[i] = std::max(state.triggers[i], pending.triggers[i]);
+    return state;
+}
+
 uint32_t ClassicButtonsForGhost(const GhostSample& sample)
 {
     uint32_t buttons = 0;
@@ -670,7 +765,7 @@ std::array<float, 2> ClassicStickForGhost(const GhostSample& sample)
 void WriteClassicStatus(uint32_t address, uint32_t hold, uint32_t trigger,
                         uint32_t release, uint32_t classicHold,
                         uint32_t classicTrigger, uint32_t classicRelease,
-                        const std::array<float, 2>& stick)
+                        const KeyboardClassicState& input)
 {
     auto* status = Memory::GetPointer(address, kKpadStatusSize);
     std::memset(status, 0, kKpadStatusSize);
@@ -682,8 +777,12 @@ void WriteClassicStatus(uint32_t address, uint32_t hold, uint32_t trigger,
     Memory::Write32(address + 0x60, classicHold);
     Memory::Write32(address + 0x64, classicTrigger);
     Memory::Write32(address + 0x68, classicRelease);
-    Memory::WriteFloat32(address + 0x6C, stick[0]);
-    Memory::WriteFloat32(address + 0x70, stick[1]);
+    Memory::WriteFloat32(address + 0x6C, input.left[0]);
+    Memory::WriteFloat32(address + 0x70, input.left[1]);
+    Memory::WriteFloat32(address + 0x74, input.right[0]);
+    Memory::WriteFloat32(address + 0x78, input.right[1]);
+    Memory::WriteFloat32(address + 0x7C, input.triggers[0]);
+    Memory::WriteFloat32(address + 0x80, input.triggers[1]);
 }
 
 } // namespace
@@ -989,8 +1088,12 @@ extern "C" int32_t KPAD__Read_HLE(uint32_t chan, uint32_t statusPtr, uint32_t co
 
     const bool connected = chan == 0 || g_keyboardConnected[chan].load(std::memory_order_acquire);
     if (!connected) return 0;
-    const uint32_t pending = g_pendingPresses[chan].exchange(0, std::memory_order_acq_rel);
-    const uint32_t pendingClassic = g_pendingClassicPresses[chan].exchange(0, std::memory_order_acq_rel);
+    KeyboardClassicState mappedPending;
+    KeyboardClassicState input = chan == 0 ? ReadMappedKeyboardSample(mappedPending) : KeyboardClassicState{};
+    const uint32_t pending = chan == 0 ? mappedPending.core :
+        g_pendingPresses[chan].exchange(0, std::memory_order_acq_rel);
+    const uint32_t pendingClassic = chan == 0 ? mappedPending.classic :
+        g_pendingClassicPresses[chan].exchange(0, std::memory_order_acq_rel);
     if (chan == 0 && g_fixtureArmRequested.exchange(false, std::memory_order_acq_rel)) {
         if (Fixture().Active()) {
             Fixture().Disarm();
@@ -1004,11 +1107,11 @@ extern "C" int32_t KPAD__Read_HLE(uint32_t chan, uint32_t statusPtr, uint32_t co
     // ties ghost cadence to host presentation and drifts when the two differ.
     const GhostSample ghost = fixtureActive ? Fixture().Current() : GhostSample{};
     const uint32_t hold = !fixtureActive ?
-        (ReadKeyboardButtons(chan) | pending) : 0;
+        (chan == 0 ? input.core : ReadKeyboardButtons(chan) | pending) : 0;
     const uint32_t classicHold = fixtureActive ? ClassicButtonsForGhost(ghost) :
-        (ReadClassicButtons(chan) | pendingClassic);
-    const auto stick = fixtureActive ? ClassicStickForGhost(ghost) :
-                                       ReadClassicLeftStick(chan);
+        (chan == 0 ? input.classic : ReadClassicButtons(chan) | pendingClassic);
+    if (fixtureActive) { input = {}; input.left = ClassicStickForGhost(ghost); }
+    else if (chan != 0) input.left = ReadClassicLeftStick(chan);
     const uint32_t previous = g_previousButtons[chan];
     const uint32_t previousClassic = g_previousClassicButtons[chan];
     const uint32_t trigger = (fixtureActive ? 0 : pending) | (hold & ~previous);
@@ -1022,12 +1125,12 @@ extern "C" int32_t KPAD__Read_HLE(uint32_t chan, uint32_t statusPtr, uint32_t co
     if (trigger != 0 || classicTrigger != 0) {
         std::fprintf(stderr,
                      "[input] sample core=%08x classic=%08x stick=(%.1f,%.1f)\n",
-                     trigger, classicTrigger, stick[0], stick[1]);
+                     trigger, classicTrigger, input.left[0], input.left[1]);
     }
 
     try {
         WriteClassicStatus(statusPtr, hold, trigger, release, classicHold,
-                           classicTrigger, classicRelease, stick);
+                           classicTrigger, classicRelease, input);
     } catch (const Memory::AccessViolation&) {
         return 0;
     }
@@ -1062,29 +1165,36 @@ extern "C" int32_t KPAD__GetUnifiedWpadStatus_HLE(uint32_t chan, uint32_t status
         return have ? 1 : 0;
     }
     EnsureKeyboardWatch();
-    const uint32_t pending = g_pendingPresses[chan].exchange(0, std::memory_order_acq_rel);
-    const uint32_t pendingClassic =
+    KeyboardClassicState mappedPending;
+    KeyboardClassicState input = chan == 0 ? ReadMappedKeyboardSample(mappedPending) : KeyboardClassicState{};
+    const uint32_t pending = chan == 0 ? mappedPending.core :
+        g_pendingPresses[chan].exchange(0, std::memory_order_acq_rel);
+    const uint32_t pendingClassic = chan == 0 ? mappedPending.classic :
         g_pendingClassicPresses[chan].exchange(0, std::memory_order_acq_rel);
-    const bool fixtureActive = Fixture().Active();
+    const bool fixtureActive = chan == 0 && Fixture().Active();
     try {
         auto* status = Memory::GetPointer(statusPtr, kKpadUnifiedStatusSize);
         std::memset(status, 0, kKpadUnifiedStatusSize);
         Memory::Write16(statusPtr + 0x00,
                         static_cast<uint16_t>(fixtureActive ? 0 :
-                                              (ReadKeyboardButtons(chan) | pending)));
+                                              (chan == 0 ? input.core : ReadKeyboardButtons(chan) | pending)));
         Memory::Write8(statusPtr + 0x28, kWpadExtensionClassic);
         const auto& ghost = Fixture().Current();
         const uint32_t classicButtons = fixtureActive ?
             ClassicButtonsForGhost(ghost) :
-            (ReadClassicButtons(chan) | pendingClassic);
+            (chan == 0 ? input.classic : ReadClassicButtons(chan) | pendingClassic);
         Memory::Write16(statusPtr + 0x2A,
                         static_cast<uint16_t>(classicButtons));
-        const auto stick = fixtureActive ? ClassicStickForGhost(ghost) :
-                                                ReadClassicLeftStick(chan);
-        const auto stickX = static_cast<int16_t>(stick[0] * 511.0f);
-        const auto stickY = static_cast<int16_t>(stick[1] * 511.0f);
+        if (fixtureActive) { input = {}; input.left = ClassicStickForGhost(ghost); }
+        else if (chan != 0) input.left = ReadClassicLeftStick(chan);
+        const auto stickX = static_cast<int16_t>(input.left[0] * 511.0f);
+        const auto stickY = static_cast<int16_t>(input.left[1] * 511.0f);
         Memory::Write16(statusPtr + 0x2C, static_cast<uint16_t>(stickX));
         Memory::Write16(statusPtr + 0x2E, static_cast<uint16_t>(stickY));
+        Memory::Write16(statusPtr + 0x30, static_cast<uint16_t>(static_cast<int16_t>(input.right[0] * 511.0f)));
+        Memory::Write16(statusPtr + 0x32, static_cast<uint16_t>(static_cast<int16_t>(input.right[1] * 511.0f)));
+        Memory::Write8(statusPtr + 0x34, static_cast<uint8_t>(input.triggers[0] * 255.0f));
+        Memory::Write8(statusPtr + 0x35, static_cast<uint8_t>(input.triggers[1] * 255.0f));
         // In Mario Kart's 2008 SDK this byte follows the 0x36-byte WPADCLStatus.
         Memory::Write8(statusPtr + 0x36, kWpadFormatClassic);
     } catch (const Memory::AccessViolation&) {
