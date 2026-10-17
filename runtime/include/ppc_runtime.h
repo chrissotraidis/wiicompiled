@@ -53,6 +53,10 @@ inline bool PpcFmaddsStateInline(double& d, double a, double c, double b) { retu
 inline bool PpcFmsubsStateInline(double& d, double a, double c, double b) { return PpcCommitScalarFpInline(d, kartpad::semantics::EvaluatePpcFused(CurrentCpuContext()->fpscr, a, c, b, true, true, false)); }
 inline bool PpcFnmsubStateInline(double& d, double a, double c, double b) { return PpcCommitScalarFpInline(d, kartpad::semantics::EvaluatePpcFused(CurrentCpuContext()->fpscr, a, c, b, true, false, true)); }
 inline bool PpcFnmsubsStateInline(double& d, double a, double c, double b) { return PpcCommitScalarFpInline(d, kartpad::semantics::EvaluatePpcFused(CurrentCpuContext()->fpscr, a, c, b, true, true, true)); }
+inline bool PpcFmaddStateInline(double& d, double a, double c, double b) { CpuContext* cpu = CurrentCpuContext(); return PpcCommitScalarFpInline(cpu, d, kartpad::semantics::EvaluatePpcFused(cpu->fpscr, a, c, b, false, false, false)); }
+inline bool PpcFmsubStateInline(double& d, double a, double c, double b) { CpuContext* cpu = CurrentCpuContext(); return PpcCommitScalarFpInline(cpu, d, kartpad::semantics::EvaluatePpcFused(cpu->fpscr, a, c, b, true, false, false)); }
+inline bool PpcFnmaddStateInline(double& d, double a, double c, double b) { CpuContext* cpu = CurrentCpuContext(); return PpcCommitScalarFpInline(cpu, d, kartpad::semantics::EvaluatePpcFused(cpu->fpscr, a, c, b, false, false, true)); }
+inline bool PpcFnmaddsStateInline(double& d, double a, double c, double b) { CpuContext* cpu = CurrentCpuContext(); return PpcCommitScalarFpInline(cpu, d, kartpad::semantics::EvaluatePpcFused(cpu->fpscr, a, c, b, false, true, true)); }
 inline bool PpcFrsqrteStateInline(double& d, double value) { return PpcCommitScalarFpInline(d, kartpad::semantics::EvaluatePpcEstimate(CurrentCpuContext()->fpscr, value, true)); }
 
 inline double PpcFresValueStateInline(double current, double value)
