@@ -175,6 +175,19 @@ extern "C" void WPADControlMotor_HLE(uint32_t chan, uint32_t command)
 }
 PPC_NATIVE_OVERRIDE(801C0EC4, WPADControlMotor_HLE, void, (uint32_t chan, uint32_t command), (chan, command));
 
+#if defined(__ANDROID__)
+// Input::WiiController::HasRumble returns false for the Classic Controller
+// type, so Mario Kart Wii never asks a Classic Controller to rumble. Android
+// controllers reach the game as Classic Controllers; report rumble while
+// KartPad's Rumble setting is on so WPADControlMotor receives the requests.
+extern "C" uint32_t WiiControllerHasRumble_HLE(uint32_t controller)
+{
+    (void)controller;
+    return kartpad::android::ControllerRumbleEnabled() ? 1u : 0u;
+}
+PPC_NATIVE_OVERRIDE(805228DC, WiiControllerHasRumble_HLE, uint32_t, (uint32_t controller), (controller));
+#endif
+
 extern "C" int32_t WPADGetInfoAsync_HLE(uint32_t chan, uint32_t infoPtr, uint32_t callback)
 {
     if (chan >= WpadContract::kChannelCount) {
