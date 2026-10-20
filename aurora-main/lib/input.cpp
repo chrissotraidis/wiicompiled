@@ -747,7 +747,9 @@ SDL_JoystickID add_controller(SDL_JoystickID which) noexcept {
       controller.m_deadZones.emulateTriggers = false;
     }
     const auto props = SDL_GetGamepadProperties(ctrl);
-    controller.m_hasRumble = SDL_GetBooleanProperty(props, SDL_PROP_GAMEPAD_CAP_RUMBLE_BOOLEAN, true);
+    // SDL sets this only for controllers with a motor. Defaulting to true made
+    // handheld built-in controls swallow rumble that the device could play.
+    controller.m_hasRumble = SDL_GetBooleanProperty(props, SDL_PROP_GAMEPAD_CAP_RUMBLE_BOOLEAN, false);
     controller.m_hasRgbLed = SDL_GetBooleanProperty(props, SDL_PROP_GAMEPAD_CAP_RGB_LED_BOOLEAN, false);
     sample_standard_gamepad_state(controller);
     SDL_JoystickID instance = SDL_GetJoystickID(SDL_GetGamepadJoystick(ctrl));

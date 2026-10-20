@@ -8,6 +8,7 @@
 
 #if defined(__ANDROID__)
 #include <aurora/input.hpp>
+#include "kartpad/android/controller_mapping.hpp"
 #include "kartpad/android/gamepad_contract.h"
 #endif
 
@@ -160,9 +161,13 @@ PPC_NATIVE_OVERRIDE(801C0990, WPADProbe_HLE, int32_t, (uint32_t chan, uint32_t t
 extern "C" void WPADControlMotor_HLE(uint32_t chan, uint32_t command)
 {
 #if defined(__ANDROID__)
-    aurora::input::set_standard_gamepad_rumble(
-        chan, chan == 0,
-        kartpad::android::WpadMotorCommandEnablesRumble(command));
+    const bool requested = kartpad::android::WpadMotorCommandEnablesRumble(command) &&
+                           kartpad::android::ControllerRumbleEnabled();
+    const bool rumbled = aurora::input::set_standard_gamepad_rumble(chan, chan == 0, requested);
+    if (chan == 0) {
+        kartpad::android::SetDeviceRumble(kartpad::android::DeviceRumbleActive(
+            requested, rumbled, aurora::input::standard_gamepad_connected(0, true)));
+    }
 #else
     (void)chan;
     (void)command;
