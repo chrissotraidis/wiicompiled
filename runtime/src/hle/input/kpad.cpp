@@ -700,6 +700,8 @@ kartpad::android::ClassicInputState ReadAndroidClassicInput(uint32_t chan)
     static_assert(aurora::input::kStandardGamepadDpadLeft == kGamepadDpadLeft);
     static_assert(aurora::input::kStandardGamepadDpadRight ==
                   kGamepadDpadRight);
+    static_assert(aurora::input::kStandardGamepadLeftStick == kGamepadLeftStick);
+    static_assert(aurora::input::kStandardGamepadRightStick == kGamepadRightStick);
     aurora::input::StandardGamepadState snapshot;
     RawGamepadState raw;
     const bool connected = aurora::input::read_standard_gamepad_state(

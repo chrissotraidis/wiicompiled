@@ -29,6 +29,7 @@ struct GameController {
   int16_t m_standardRightTrigger = 0;
   bool m_standardRumbleEnabled = false;
   bool m_standardRumbleDirty = false;
+  float m_standardRumbleStrength = 1.0f;
   PADDeadZones m_deadZones{
       .emulateTriggers = true,
       .useDeadzones = true,

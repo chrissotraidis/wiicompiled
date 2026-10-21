@@ -497,7 +497,7 @@ bool read_standard_gamepad_state(uint32_t player, bool allowSingleUnassigned,
 }
 
 bool set_standard_gamepad_rumble(uint32_t player, bool allowSingleUnassigned,
-                                 bool enabled) noexcept {
+                                 bool enabled, float strength) noexcept {
   std::scoped_lock lock(g_standardGamepadBridgeMutex);
   if (enabled &&
       !g_standardGamepadsActive.load(std::memory_order_acquire)) {
@@ -511,6 +511,7 @@ bool set_standard_gamepad_rumble(uint32_t player, bool allowSingleUnassigned,
   }
 
   controller->m_standardRumbleEnabled = enabled;
+  controller->m_standardRumbleStrength = std::clamp(strength, 0.0f, 2.0f);
   controller->m_standardRumbleDirty = true;
   return true;
 }
@@ -645,6 +646,8 @@ uint32_t standard_button_mask(Uint8 button) noexcept {
   case SDL_GAMEPAD_BUTTON_DPAD_DOWN: return kStandardGamepadDpadDown;
   case SDL_GAMEPAD_BUTTON_DPAD_LEFT: return kStandardGamepadDpadLeft;
   case SDL_GAMEPAD_BUTTON_DPAD_RIGHT: return kStandardGamepadDpadRight;
+  case SDL_GAMEPAD_BUTTON_LEFT_STICK: return kStandardGamepadLeftStick;
+  case SDL_GAMEPAD_BUTTON_RIGHT_STICK: return kStandardGamepadRightStick;
   default: return 0;
   }
 }
@@ -703,8 +706,12 @@ void flush_standard_gamepad_rumble() noexcept {
     }
     const bool enabled = controller.m_standardRumbleEnabled &&
                          g_standardGamepadsActive.load(std::memory_order_acquire);
-    const uint16_t low = enabled ? controller.m_rumbleIntensityLow : 0;
-    const uint16_t high = enabled ? controller.m_rumbleIntensityHigh : 0;
+    const auto intensity = [&](uint16_t base) -> uint16_t {
+      return enabled ? static_cast<uint16_t>(std::clamp(
+          static_cast<float>(base) * controller.m_standardRumbleStrength, 0.0f, 65535.0f)) : 0;
+    };
+    const uint16_t low = intensity(controller.m_rumbleIntensityLow);
+    const uint16_t high = intensity(controller.m_rumbleIntensityHigh);
     if (!SDL_RumbleGamepad(controller.m_controller, low, high, enabled ? 0xffffffffu : 0u)) {
       Log.warn("Failed to {} standard gamepad rumble: {}", enabled ? "start" : "stop", SDL_GetError());
     }

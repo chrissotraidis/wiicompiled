@@ -25,6 +25,9 @@ enum StandardGamepadButton : uint32_t {
   kStandardGamepadDpadDown = 1u << 9,
   kStandardGamepadDpadLeft = 1u << 10,
   kStandardGamepadDpadRight = 1u << 11,
+  // Bits 12 and 13 are the trigger buttons synthesized by the Android bridge.
+  kStandardGamepadLeftStick = 1u << 14,
+  kStandardGamepadRightStick = 1u << 15,
 };
 
 struct StandardGamepadState {
@@ -48,7 +51,7 @@ bool read_standard_gamepad_state(uint32_t player, bool allowSingleUnassigned,
 // rule as read_standard_gamepad_state. Returns false when no suitable
 // rumble-capable controller exists. SDL applies the request during event polling.
 bool set_standard_gamepad_rumble(uint32_t player, bool allowSingleUnassigned,
-                                 bool enabled) noexcept;
+                                 bool enabled, float strength = 1.0f) noexcept;
 
 // Enables or suspends the standard gamepad bridge. Suspension makes snapshots
 // neutral immediately and stops any active rumble before Android releases its
