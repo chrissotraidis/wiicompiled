@@ -145,10 +145,15 @@ else()
     if(NOT EXISTS ${MKW_AURORA_DIR}/CMakeLists.txt)
         message(FATAL_ERROR "Requested aurora-main but ${MKW_AURORA_DIR} is missing")
     endif()
+    # Aurora fetches its own small dependencies. Host packages (pkg-config on the
+    # build Mac) must never stand in for a cross-compiled target's libraries.
+    set(AURORA_USE_SYSTEM_DEPENDENCIES OFF CACHE BOOL "" FORCE)
     if(ANDROID)
         set(AURORA_DAWN_PROVIDER system CACHE STRING "" FORCE)
         set(AURORA_SDL3_PROVIDER system CACHE STRING "" FORCE)
         set(AURORA_SDL3_LINKAGE shared CACHE STRING "" FORCE)
+        # The app's SDL AAR; both graphics layers link the same libSDL3.so.
+        set(AURORA_SDL3_VERSION 3.4.4 CACHE STRING "" FORCE)
     else()
         set(AURORA_DAWN_PROVIDER package CACHE STRING "" FORCE)
     endif()

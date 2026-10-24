@@ -33,6 +33,9 @@ std::mutex g_standardGamepadBridgeMutex;
 
 constexpr uint32_t kPortPreferencesMagic = SBIG('CPRT');
 constexpr uint32_t kPortPreferencesVersion = 3;
+// The WiiCompiled graphics layer writes v4: v3 plus a trailing device rumble preference. Read it
+// so switching graphics layers keeps controller assignments; the trailer is not used here.
+constexpr uint32_t kPortPreferencesNewestReadable = 4;
 constexpr uint32_t kMaxPersistedStringLength = 256;
 
 enum class PortPreferenceState : uint8_t {
@@ -179,7 +182,7 @@ bool read_port_preferences_file(std::array<PortPreference, PAD_MAX_CONTROLLERS>&
   uint32_t magic = 0;
   uint32_t version = 0;
   bool ok = read_value(file, magic) && read_value(file, version) && magic == kPortPreferencesMagic &&
-            version >= 2 && version <= kPortPreferencesVersion;
+            version >= 2 && version <= kPortPreferencesNewestReadable;
 
   for (auto& preference : preferences) {
     uint8_t state = 0;
