@@ -6,6 +6,7 @@
 #include <SDL3/SDL_gamepad.h>
 #include <SDL3/SDL_platform.h>
 #include <SDL3/SDL_joystick.h>
+#include <SDL3/SDL_platform.h>
 
 #include <algorithm>
 #include <array>
