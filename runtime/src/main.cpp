@@ -92,6 +92,11 @@
 #include "kartpad_mobile_runtime_host.h"
 #endif
 
+#if defined(__ANDROID__)
+// KartPad's runtime/src/android/gpu_driver.cpp; weak so a build without it still links.
+extern "C" __attribute__((weak)) void KartPadLoadCustomGpuDriver();
+#endif
+
 // Defined in `runtime/src/hle/vi.cpp` (used by GX/VI HLE).
 extern std::atomic_bool g_auroraFrameActive;
 extern "C" int g_gxFrameCount;
@@ -1575,6 +1580,13 @@ int RuntimeMain(int argc, char** argv) {
         // visible on that first scan.
         WiiRemoteInput::ConfigureSdlHints(RuntimeConfigFile::WiiRemotesEnabled(true));
 
+#if defined(__ANDROID__)
+        // A player-installed Vulkan driver (KartPad's GPU driver setting) has to be loaded before
+        // Dawn opens Vulkan during aurora_initialize. Any failure keeps the phone's own driver.
+        if (KartPadLoadCustomGpuDriver != nullptr) {
+            KartPadLoadCustomGpuDriver();
+        }
+#endif
         const AuroraInfo auroraInfo = aurora_initialize(0, nullptr, &auroraConfig);
         if (auroraInfo.initializationStatus != AURORA_INITIALIZATION_SUCCESS) {
             const std::string reason = auroraInfo.initializationError != nullptr
