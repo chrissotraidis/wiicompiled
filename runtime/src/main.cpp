@@ -95,8 +95,7 @@
 #if defined(__ANDROID__)
 // KartPad's runtime/src/android/gpu_driver.cpp; weak so a build without it still links.
 extern "C" __attribute__((weak)) void KartPadLoadCustomGpuDriver();
-extern "C" __attribute__((weak)) bool KartPadCustomGpuDriverActive();
-extern "C" __attribute__((weak)) void KartPadCustomGpuDriverFailed();
+extern "C" __attribute__((weak)) const char* KartPadGpuDriverStartFailedNote();
 #endif
 
 // Defined in `runtime/src/hle/vi.cpp` (used by GX/VI HLE).
@@ -1596,11 +1595,7 @@ int RuntimeMain(int argc, char** argv) {
             RT_LOG(RT_TAG_RUNTIME) << "Graphics startup rejected: " << reason << std::endl;
             std::string message = "KartPad could not start the graphics renderer on this device.\n\n" + reason;
 #if defined(__ANDROID__)
-            if (KartPadCustomGpuDriverActive != nullptr && KartPadCustomGpuDriverActive()) {
-                message += "\n\nThis start used the GPU driver you chose. KartPad will use the phone's own driver "
-                           "the next time you start the game.";
-                if (KartPadCustomGpuDriverFailed != nullptr) KartPadCustomGpuDriverFailed();
-            }
+            if (KartPadGpuDriverStartFailedNote != nullptr) message += KartPadGpuDriverStartFailedNote();
 #endif
             SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Graphics Unavailable", message.c_str(), nullptr);
             SetRuntimeExitCodeImpl(1);
