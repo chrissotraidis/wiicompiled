@@ -38,7 +38,10 @@
 #include <SDL3/SDL_video.h>
 #include <android/native_window.h>
 #include <dlfcn.h>
+#include <sys/system_properties.h>
 #endif
+#include <cstdlib>
+#include <cstring>
 
 namespace aurora::webgpu {
 static Module Log("aurora::gpu");
@@ -820,6 +823,28 @@ static void wait_surface_retired() noexcept {
   g_device.Tick();
 }
 
+// KARTPAD_RENDERER_NATIVE_UNIFORMS=1/0 (set by the app's Android Graphics Diagnostics), or on Android
+// `adb shell setprop debug.kartpad.native_uniforms 1|0`; -1 when unset. Read once per process.
+static int kartpad_native_uniform_mode() {
+  static const int mode = [] {
+    const auto parse = [](const char* value) {
+      if (value == nullptr) return -1;
+      if (std::strcmp(value, "1") == 0) return 1;
+      if (std::strcmp(value, "0") == 0) return 0;
+      return -1;
+    };
+    int result = parse(std::getenv("KARTPAD_RENDERER_NATIVE_UNIFORMS"));
+#if defined(__ANDROID__)
+    char value[PROP_VALUE_MAX] = {};
+    if (__system_property_get("debug.kartpad.native_uniforms", value) > 0 && parse(value) >= 0) {
+      result = parse(value);
+    }
+#endif
+    return result;
+  }();
+  return mode;
+}
+
 static bool create_surface() {
   SDL_Window* window = window::get_sdl_window();
   if (window == nullptr) {
@@ -906,8 +931,12 @@ bool initialize(AuroraBackend auroraBackend, bool allowCpu) {
   if (!create_surface()) {
     return false;
   }
-  {
+  // KartPad: the Android Graphics Diagnostics option "native uniform buffers" (#104, #301) works as in the
+  // classic layer: Dawn reads uniform buffers directly instead of rebuilding each value from words.
+  // Off unless the player turns it on; if the adapter can't be created that way, the default is used.
+  const auto requestAdapter = [&](const wgpu::ChainedStruct* toggles) -> bool {
     const wgpu::RequestAdapterOptions options{
+        .nextInChain = toggles,
         .featureLevel = wgpu::FeatureLevel::Compatibility,
         .powerPreference = wgpu::PowerPreference::HighPerformance,
         .backendType = backend,
@@ -951,7 +980,27 @@ bool initialize(AuroraBackend auroraBackend, bool allowCpu) {
       }
       return false;
     }
+    return true;
+  };
+#if defined(WEBGPU_DAWN) && !defined(__MINGW32__)
+  static constexpr std::array<const char*, 1> kNativeUniforms{"decompose_uniform_buffers"};
+  wgpu::DawnTogglesDescriptor nativeUniformToggles{};
+  nativeUniformToggles.disabledToggleCount = kNativeUniforms.size();
+  nativeUniformToggles.disabledToggles = kNativeUniforms.data();
+  const bool nativeUniformsRequested = backend == wgpu::BackendType::Vulkan && kartpad_native_uniform_mode() == 1;
+  if (nativeUniformsRequested && !requestAdapter(&nativeUniformToggles)) {
+    Log.warn("Native uniform buffers were requested but the adapter could not be created with them");
+    if (!requestAdapter(nullptr)) {
+      return false;
+    }
+  } else if (!nativeUniformsRequested && !requestAdapter(nullptr)) {
+    return false;
   }
+#else
+  if (!requestAdapter(nullptr)) {
+    return false;
+  }
+#endif
   g_adapter.GetInfo(&g_adapterInfo);
   auto adapterName = g_adapterInfo.device;
   if (adapterName.IsUndefined()) {
@@ -971,6 +1020,17 @@ bool initialize(AuroraBackend auroraBackend, bool allowCpu) {
   const auto backendName = magic_enum::enum_name(g_backendType);
   Log.info("Graphics adapter information\n  API: {}\n  Device: {} ({})\n  Driver: {}", backendName, adapterName,
            magic_enum::enum_name(g_adapterInfo.adapterType), description);
+#if defined(WEBGPU_DAWN) && !defined(__MINGW32__)
+  if (g_backendType == wgpu::BackendType::Vulkan) {
+    bool decomposed = false;
+    for (const char* toggle : dawn::native::GetTogglesUsed(g_adapter)) {
+      decomposed = decomposed || std::strcmp(toggle, "decompose_uniform_buffers") == 0;
+    }
+    const int mode = kartpad_native_uniform_mode();
+    Log.info("KartPadUniforms mode={} native={}", mode < 0 ? "auto" : (mode == 1 ? "forced_on" : "forced_off"),
+             !decomposed);
+  }
+#endif
 
   {
     wgpu::Limits supportedLimits{};
