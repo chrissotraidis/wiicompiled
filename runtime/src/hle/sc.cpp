@@ -7,6 +7,7 @@
 #endif
 #endif
 #include "console_identity.h"
+#include "kartpad/system/wii_country.h"
 #include "sc_serial_contract.h"
 #include <cstdlib>
 #include <cstddef>
@@ -155,3 +156,20 @@ extern "C" uint32_t OS__CheckInstall(uint32_t requiredBlocks, uint32_t titleIdHi
 }
 
 PPC_NATIVE_OVERRIDE(801AD1D4, OS__CheckInstall, uint32_t, (uint32_t requiredBlocks, uint32_t titleIdHi, uint32_t titleIdLo, uint32_t outFlagsPtr), (requiredBlocks, titleIdHi, titleIdLo, outFlagsPtr));
+
+// 0x801B2074 -> SCGetSimpleAddressData(SCSimpleAddressData* data)
+// The console country and globe position (#511). Returns 1 with the country the
+// app chose (KARTPAD_COUNTRY), or 0 as before when there is none.
+extern "C" uint32_t SCGetSimpleAddressData_HLE(uint32_t dataAddress)
+{
+    const KartPad::System::WiiCountry* country = KartPad::System::CountryFromEnvironment();
+    if (country == nullptr || !Memory::Contains(dataAddress, KartPad::System::kSimpleAddressSize)) {
+        return 0;
+    }
+    KartPad::System::FillSimpleAddress(*country, static_cast<uint8_t*>(
+        Memory::GetPointer(dataAddress, KartPad::System::kSimpleAddressSize)));
+    return 1;
+}
+
+PPC_NATIVE_OVERRIDE(801B2074, SCGetSimpleAddressData_HLE, uint32_t, (uint32_t dataAddress), (dataAddress));
+
