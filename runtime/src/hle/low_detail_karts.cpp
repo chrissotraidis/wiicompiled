@@ -115,6 +115,7 @@ void OnLoadKartArchive(CpuContext* ctx) {
     }
     ctx->gpr[8] = kSuffixSplitScreen;
     g_lowDetail[player] = true;
+    RT_LOGF(RT_TAG_RUNTIME, "low-detail karts: player %u uses %s\n", static_cast<unsigned>(player), path.c_str());
 }
 
 // r3 = Kart::BRRESHandle, already constructed; +0x13 is its player.
