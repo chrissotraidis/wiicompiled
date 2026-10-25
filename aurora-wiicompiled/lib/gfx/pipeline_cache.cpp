@@ -42,7 +42,11 @@ namespace aurora::gfx {
 static Module Log("aurora::gfx::pipeline_cache");
 
 constexpr int PipelineCacheSchema = 1;
-constexpr const char* InitialPipelineCacheName = "initial_pipeline_cache.db";
+// KartPad: the classic layer shares this cache folder. Its files use a different pipeline format,
+// and opening the other layer's database deletes the rows it can't read, so this layer keeps its
+// own pipeline cache and seed (recorded with this layer) under its own names.
+constexpr const char* InitialPipelineCacheName = "initial_pipeline_cache_wiicompiled.db";
+constexpr const char* PipelineCacheName = "pipeline_cache_wiicompiled.db";
 constexpr const char* SdlVfsName = "aurora_pipeline_cache_sdl_vfs";
 
 using NewPipelineCallback = std::function<CompiledPipeline()>;
@@ -767,7 +771,7 @@ static bool prepare_pipeline_cache_db() {
     return true;
   }
 
-  const auto path = io::fs_path_to_string(io::fs_path_from_string(g_config.cachePath) / "pipeline_cache.db");
+  const auto path = io::fs_path_to_string(io::fs_path_from_string(g_config.cachePath) / PipelineCacheName);
   auto ret = sqlite3_open(path.c_str(), &g_pipelineCacheDb);
   if (ret != SQLITE_OK) {
     Log.error("Failed to open pipeline cache database: {}", sqlite3_errmsg(g_pipelineCacheDb));

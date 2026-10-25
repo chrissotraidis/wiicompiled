@@ -35,7 +35,11 @@ constexpr int CACHE_SCHEMA = 2;
 // % of rows pruned to trigger a full VACUUM
 constexpr uint64_t VacuumPrunePercentThreshold = 25;
 
-static std::filesystem::path cache_path() { return io::fs_path_from_string(g_config.cachePath) / "dawn_cache.db"; }
+// KartPad: the classic layer's dawn_cache.db uses another schema and would be recreated on every
+// switch between the layers, so this layer keeps its own file.
+static std::filesystem::path cache_path() {
+  return io::fs_path_from_string(g_config.cachePath) / "dawn_cache_wiicompiled.db";
+}
 
 static void init_abort() {
   cache_broken = true;
