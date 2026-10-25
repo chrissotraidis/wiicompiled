@@ -33,6 +33,13 @@
 #endif
 #endif
 
+#if defined(__ANDROID__)
+#include <SDL3/SDL_properties.h>
+#include <SDL3/SDL_video.h>
+#include <android/native_window.h>
+#include <dlfcn.h>
+#endif
+
 namespace aurora::webgpu {
 static Module Log("aurora::gpu");
 
@@ -71,6 +78,26 @@ static std::atomic_bool g_initialized = false;
 static std::atomic_bool g_vsyncEnabled = true;
 
 namespace {
+
+#if defined(__ANDROID__)
+// KartPad: as in the classic layer, ask Android to run the display at the game's rate. Without
+// it, 90/120 Hz phones keep the panel at their highest rate and pace 60 FPS frames unevenly.
+void request_android_frame_rate(SDL_Window* window) {
+  using SetFrameRate = int32_t (*)(ANativeWindow*, float, int8_t);
+  static const SetFrameRate setFrameRate = [] {
+    void* library = dlopen("libandroid.so", RTLD_NOW | RTLD_LOCAL);
+    return library ? reinterpret_cast<SetFrameRate>(dlsym(library, "ANativeWindow_setFrameRate")) : nullptr;
+  }();
+  if (!setFrameRate) return; // API 28-29 do not have this API.
+  auto* nativeWindow = static_cast<ANativeWindow*>(
+      SDL_GetPointerProperty(SDL_GetWindowProperties(window), SDL_PROP_WINDOW_ANDROID_WINDOW_POINTER, nullptr));
+  if (!nativeWindow) return;
+  const uint32_t interpolatedFps = aurora_get_frame_interpolation_fps();
+  const float outputFps = interpolatedFps ? static_cast<float>(interpolatedFps) : 60.0f;
+  const int32_t result = setFrameRate(nativeWindow, outputFps, ANATIVEWINDOW_FRAME_RATE_COMPATIBILITY_DEFAULT);
+  Log.info("Android surface frame-rate request {} Hz: {}", outputFps, result);
+}
+#endif
 
 AuroraLogLevel wgpu_log_level(wgpu::LoggingType type) {
   switch (type) {
@@ -813,6 +840,9 @@ static bool create_surface() {
     Log.error("Failed to create surface");
     return false;
   }
+#if defined(__ANDROID__)
+  request_android_frame_rate(window);
+#endif
   return true;
 }
 
