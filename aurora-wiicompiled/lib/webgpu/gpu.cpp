@@ -817,6 +817,12 @@ static bool create_surface() {
 }
 
 bool initialize(AuroraBackend auroraBackend, bool allowCpu) {
+#ifdef __ANDROID__
+  if (auroraBackend == BACKEND_NULL) {
+    Log.error("Null cannot present a mobile game; no rendering backend was selected");
+    return false;
+  }
+#endif
   if (!g_instance) {
     Log.info("Creating WebGPU instance");
     const std::array requiredInstanceFeatures{

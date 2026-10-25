@@ -277,9 +277,15 @@ void render(const wgpu::RenderPassEncoder& pass, const DrawData& drawData) noexc
     ImGui_ImplSDLRenderer3_RenderDrawData(data, renderer);
     SDL_RenderPresent(renderer);
   } else {
+    // Debug groups are diagnostic-only, as in the classic layer: an Adreno 740
+    // driver (512.676) faults in vkCmdEndDebugUtilsLabelEXT on the first overlay pass.
+#ifdef AURORA_GFX_DEBUG_GROUPS
     pass.PushDebugGroup("Aurora: Dear Imgui");
+#endif
     ImGui_ImplWGPU_RenderDrawData(data, pass.Get());
+#ifdef AURORA_GFX_DEBUG_GROUPS
     pass.PopDebugGroup();
+#endif
   }
 }
 

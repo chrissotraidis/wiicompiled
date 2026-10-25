@@ -91,10 +91,13 @@ constexpr std::array PreferredBackendOrder{
 // #ifdef DAWN_ENABLE_BACKEND_DESKTOP_GL
 //     BACKEND_OPENGL,
 // #endif
-#ifdef DAWN_ENABLE_BACKEND_OPENGLES
+// KartPad's Android Dawn has neither OpenGL ES nor a backend that can present
+// with Null, so Android tries Vulkan only and reports a real failure instead of
+// starting with nothing drawn (as the classic layer does).
+#if defined(DAWN_ENABLE_BACKEND_OPENGLES) && !defined(__ANDROID__)
     BACKEND_OPENGLES,
 #endif
-#ifdef DAWN_ENABLE_BACKEND_NULL
+#if defined(DAWN_ENABLE_BACKEND_NULL) && !defined(__ANDROID__)
     BACKEND_NULL,
 #endif
 };
