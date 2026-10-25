@@ -585,7 +585,8 @@ void populate_pipeline_config(PipelineConfig& config, GXPrimitive primitive, GXV
     stage = g_gxState.tevStages[i];
     // GX reads texcoord 0 for a coordinate beyond the texgen count, and samples nothing without texgens.
     if (stage.texCoordId != GX_TEXCOORD_NULL && underlying(stage.texCoordId) >= g_gxState.numTexGens) {
-      if (g_gxState.numTexGens == 0) {
+      const bool zTextureStage = g_gxState.zTextureOp != GX_ZT_DISABLE && i == g_gxState.numTevStages - 1;
+      if (g_gxState.numTexGens == 0 && !zTextureStage) {
         stage.texCoordId = GX_TEXCOORD_NULL;
         stage.texMapId = GX_TEXMAP_NULL;
       } else {
@@ -604,7 +605,11 @@ void populate_pipeline_config(PipelineConfig& config, GXPrimitive primitive, GXV
   }
   config.shaderConfig.tevStageCount = g_gxState.numTevStages;
   for (u8 i = 0; i < g_gxState.numIndStages; ++i) {
-    config.shaderConfig.indStages[i] = g_gxState.indStages[i];
+    auto& indStage = config.shaderConfig.indStages[i];
+    indStage = g_gxState.indStages[i];
+    if (underlying(indStage.texCoordId) >= g_gxState.numTexGens) {
+      indStage.texCoordId = GX_TEXCOORD0;
+    }
   }
   config.shaderConfig.numIndStages = g_gxState.numIndStages;
   for (u8 i = 0; i < MaxColorChannels; ++i) {
@@ -621,7 +626,7 @@ void populate_pipeline_config(PipelineConfig& config, GXPrimitive primitive, GXV
   for (u8 i = 0; i < g_gxState.numTexGens; ++i) {
     auto& tcg = config.shaderConfig.tcgs[i];
     tcg = g_gxState.tcgs[i];
-    if (tcg.type < GX_TG_BUMP0 || tcg.type > GX_TG_BUMP7) {
+    if (tcg.type < GX_TG_BUMP0 || tcg.type > GX_TG_BUMP7 || tcg.embossSrc >= g_gxState.numTexGens) {
       tcg.embossSrc = 0;
     }
     if (!g_gxState.dualTex) {

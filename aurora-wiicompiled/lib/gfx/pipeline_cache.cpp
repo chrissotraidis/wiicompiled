@@ -49,6 +49,7 @@ using NewPipelineCallback = std::function<CompiledPipeline()>;
 
 struct PendingPipeline {
   PipelineRef hash;
+  HashType cacheKey;
   NewPipelineCallback create;
 };
 
@@ -71,6 +72,7 @@ struct KnownPipeline {
   ShaderType type;
   SavedPipelineConfig config;
   uint32_t firstFrameUsed;
+  uint32_t persistedFrame = UINT32_MAX;
 };
 
 struct SdlVfsSqliteFile {
@@ -451,21 +453,44 @@ static void notify_pipeline_ready(bool queued, uint32_t pipelineCount) {
 }
 
 template <typename Config>
-static void remember_pipeline_config(ShaderType type, const Config& config, uint32_t firstFrameUsed, bool persist) {
+static void remember_pipeline_config(ShaderType type, const Config& config, uint32_t firstFrameUsed, bool persisted) {
   const auto cacheKey = xxh3_hash(config, static_cast<HashType>(type));
-  bool changed = false;
-  {
-    std::lock_guard lock{g_pipelineMutex};
-    auto [it, inserted] = g_knownPipelines.try_emplace(cacheKey, KnownPipeline{type, config, firstFrameUsed});
-    changed = inserted || firstFrameUsed < it->second.firstFrameUsed;
-    it->second.firstFrameUsed = std::min(it->second.firstFrameUsed, firstFrameUsed);
-  }
-  if (persist && changed) {
-    enqueue_pipeline_cache_write(make_pipeline_cache_write(type, cacheKey, config, firstFrameUsed));
+  std::lock_guard lock{g_pipelineMutex};
+  auto [it, inserted] = g_knownPipelines.try_emplace(cacheKey, KnownPipeline{type, config, firstFrameUsed});
+  auto& known = it->second;
+  known.firstFrameUsed = std::min(known.firstFrameUsed, firstFrameUsed);
+  if (persisted) {
+    known.persistedFrame = std::min(known.persistedFrame, firstFrameUsed);
   }
 }
 
-static PipelineRef find_pipeline_impl(PipelineRef runtimeKey, NewPipelineCallback&& cb,
+// Only configs that compiled are persisted, so a bad config can't fail every later startup.
+static void persist_known_pipeline_locked(HashType cacheKey) {
+  const auto it = g_knownPipelines.find(cacheKey);
+  if (it == g_knownPipelines.end()) {
+    return;
+  }
+  auto& known = it->second;
+  if (known.firstFrameUsed >= known.persistedFrame) {
+    return;
+  }
+  known.persistedFrame = known.firstFrameUsed;
+  std::visit(
+      [&](const auto& config) {
+        enqueue_pipeline_cache_write(make_pipeline_cache_write(known.type, cacheKey, config, known.firstFrameUsed));
+      },
+      known.config);
+}
+
+static void store_pipeline_locked(PipelineRef hash, HashType cacheKey, CompiledPipeline&& pipeline) {
+  const bool compiled = static_cast<bool>(pipeline.main);
+  g_pipelines.try_emplace(hash, std::move(pipeline));
+  if (compiled) {
+    persist_known_pipeline_locked(cacheKey);
+  }
+}
+
+static PipelineRef find_pipeline_impl(PipelineRef runtimeKey, HashType cacheKey, NewPipelineCallback&& cb,
                                       PipelinePriority priority = PipelinePriority::Normal) {
   ZoneScoped;
 
@@ -476,7 +501,10 @@ static PipelineRef find_pipeline_impl(PipelineRef runtimeKey, NewPipelineCallbac
   bool queued = false;
   {
     std::scoped_lock guard{g_pipelineMutex};
-    if (g_pipelines.contains(runtimeKey)) {
+    if (const auto it = g_pipelines.find(runtimeKey); it != g_pipelines.end()) {
+      if (it->second.main) {
+        persist_known_pipeline_locked(cacheKey);
+      }
       return runtimeKey;
     }
 
@@ -490,7 +518,7 @@ static PipelineRef find_pipeline_impl(PipelineRef runtimeKey, NewPipelineCallbac
         if (pending) {
           auto result = pending->create();
           pipelineCount = result.pipeline_count();
-          g_pipelines.try_emplace(runtimeKey, std::move(result));
+          store_pipeline_locked(runtimeKey, cacheKey, std::move(result));
           g_pipelinesPerFrame += std::max(1u, pipelineCount);
           createdPipeline = true;
           queued = true;
@@ -502,12 +530,13 @@ static PipelineRef find_pipeline_impl(PipelineRef runtimeKey, NewPipelineCallbac
     } else if (!g_hasPipelineThread && (blocking || g_pipelinesPerFrame < BuildPipelinesPerFrame)) {
       auto result = cb();
       pipelineCount = result.pipeline_count();
-      g_pipelines.try_emplace(runtimeKey, std::move(result));
+      store_pipeline_locked(runtimeKey, cacheKey, std::move(result));
       g_pipelinesPerFrame += std::max(1u, pipelineCount);
       createdPipeline = true;
     } else {
       PendingPipeline pending{
           .hash = runtimeKey,
+          .cacheKey = cacheKey,
           .create = std::move(cb),
       };
       switch (priority) {
@@ -542,23 +571,27 @@ static PipelineRef find_pipeline_impl(PipelineRef runtimeKey, NewPipelineCallbac
 
 static PipelineRef resolve_pipeline(ShaderType type, const gx::PipelineConfig& config, const RenderTargetLayout& layout,
                                     PipelinePriority priority) {
-  const auto runtimeKey = xxh3_hash(layout.key, xxh3_hash(config, static_cast<HashType>(type)));
-  return find_pipeline_impl(runtimeKey, [config, layout] { return create_pipeline(config, layout); }, priority);
+  const auto cacheKey = xxh3_hash(config, static_cast<HashType>(type));
+  const auto runtimeKey = xxh3_hash(layout.key, cacheKey);
+  return find_pipeline_impl(
+      runtimeKey, cacheKey, [config, layout] { return create_pipeline(config, layout); }, priority);
 }
 
 static PipelineRef resolve_pipeline(ShaderType type, const clear::PipelineConfig& config,
                                     const RenderTargetLayout& layout, PipelinePriority priority) {
-  const auto runtimeKey = xxh3_hash(layout.key, xxh3_hash(config, static_cast<HashType>(type)));
+  const auto cacheKey = xxh3_hash(config, static_cast<HashType>(type));
+  const auto runtimeKey = xxh3_hash(layout.key, cacheKey);
   return find_pipeline_impl(
-      runtimeKey, [config, layout] { return CompiledPipeline{.main = create_pipeline(config, layout)}; }, priority);
+      runtimeKey, cacheKey, [config, layout] { return CompiledPipeline{.main = create_pipeline(config, layout)}; },
+      priority);
 }
 
 #ifdef AURORA_ENABLE_RMLUI
 static PipelineRef resolve_pipeline(ShaderType type, const rmlui::PipelineConfig& config, const RenderTargetLayout&,
                                     PipelinePriority priority) {
+  const auto cacheKey = xxh3_hash(config, static_cast<HashType>(type));
   return find_pipeline_impl(
-      xxh3_hash(config, static_cast<HashType>(type)),
-      [config] { return CompiledPipeline{.main = rmlui::create_pipeline(config)}; }, priority);
+      cacheKey, cacheKey, [config] { return CompiledPipeline{.main = rmlui::create_pipeline(config)}; }, priority);
 }
 #endif
 
@@ -998,7 +1031,7 @@ static void pipeline_worker() {
     const auto pipelineCount = result.pipeline_count();
     {
       std::lock_guard lock{g_pipelineMutex};
-      g_pipelines.try_emplace(pending.hash, std::move(result));
+      store_pipeline_locked(pending.hash, pending.cacheKey, std::move(result));
       g_pendingPipelines.erase(pending.hash);
     }
     if (!g_hasPipelineThread) {
@@ -1042,7 +1075,7 @@ static size_t load_pipeline_cache_entries(ShaderType type, uint32_t configVersio
       continue;
     }
 
-    remember_pipeline_config(type, config, firstFrameUsed, false);
+    remember_pipeline_config(type, config, firstFrameUsed, true);
     ++acceptedRows;
   }
 
@@ -1100,20 +1133,20 @@ static void stop_pipeline_cache_writer() {
 }
 
 PipelineRef find_pipeline(const clear::PipelineConfig& config, const RenderTargetLayout& layout, bool blocking) {
-  remember_pipeline_config(ShaderType::Clear, config, current_frame(), true);
+  remember_pipeline_config(ShaderType::Clear, config, current_frame(), false);
   return resolve_pipeline(ShaderType::Clear, config, layout,
                           blocking ? PipelinePriority::Blocking : PipelinePriority::Normal);
 }
 
 PipelineRef find_pipeline(const gx::PipelineConfig& config, const RenderTargetLayout& layout, bool blocking) {
-  remember_pipeline_config(ShaderType::GX, config, current_frame(), true);
+  remember_pipeline_config(ShaderType::GX, config, current_frame(), false);
   return resolve_pipeline(ShaderType::GX, config, layout,
                           blocking ? PipelinePriority::Blocking : PipelinePriority::Normal);
 }
 
 #ifdef AURORA_ENABLE_RMLUI
 PipelineRef find_pipeline(const rmlui::PipelineConfig& config) {
-  remember_pipeline_config(ShaderType::Rml, config, 0, true);
+  remember_pipeline_config(ShaderType::Rml, config, 0, false);
   return resolve_pipeline(ShaderType::Rml, config, {}, PipelinePriority::Blocking);
 }
 #endif

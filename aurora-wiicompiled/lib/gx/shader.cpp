@@ -1394,7 +1394,8 @@ std::string build_shader_source(const ShaderConfig& config, DstAlphaMode dstAlph
     } else if (tcg.src == GX_TG_TANGENT) {
       vtxXfrAttrs += fmt::format("\n    var tc{} = vec4f({}, 1.0);", i, nbt_slice_local(NbtSlice::T));
     } else {
-      UNLIKELY FATAL("unhandled tcg src {}", underlying(tcg.src));
+      // Texgen was never configured
+      vtxXfrAttrs += fmt::format("\n    var tc{} = vec4f(0.0, 0.0, 1.0, 1.0);", i);
     }
     if (tcg.inputFormAB11) {
       vtxXfrAttrs += fmt::format("\n    tc{}.z = 1.0;", i);
