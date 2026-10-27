@@ -530,8 +530,9 @@ void process_event(SDL_Event& event) {
     break;
   default:
     if (event.type == g_sdlCustomEventsStart + CustomEvent::FutureResize) {
-      // The request flag is set before this wakeup is queued. Renderer resource mutation belongs to
-      // begin/end_frame_impl, which may be running on the frame worker.
+      // Queue the new size just like a native window resize. This only publishes the request;
+      // render targets are recreated by apply_pending_surface_changes at the GX frame boundary.
+      resize_swapchain();
       g_events.push_back(AuroraEvent{
           .type = AURORA_WINDOW_RESIZED,
           .windowSize = get_window_size(),
