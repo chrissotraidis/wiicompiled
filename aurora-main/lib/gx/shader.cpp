@@ -829,7 +829,8 @@ auto attr_load(const ShaderConfig& config, GXAttr attr, std::string_view vidx) -
   }
   switch (attr) {
   case GX_VA_PNMTXIDX:
-    return fmt::format("(raw_fetch_u8_1(&{}, {}) / 3u)", buf, offs);
+    // GX matrix selectors are six bits; the upper two FIFO bits are ignored.
+    return fmt::format("((raw_fetch_u8_1(&{}, {}) & 63u) / 3u)", buf, offs);
   case GX_VA_TEX0MTXIDX:
   case GX_VA_TEX1MTXIDX:
   case GX_VA_TEX2MTXIDX:
@@ -838,7 +839,7 @@ auto attr_load(const ShaderConfig& config, GXAttr attr, std::string_view vidx) -
   case GX_VA_TEX5MTXIDX:
   case GX_VA_TEX6MTXIDX:
   case GX_VA_TEX7MTXIDX:
-    return fmt::format("raw_fetch_u8_1(&{}, {})", buf, offs);
+    return fmt::format("(raw_fetch_u8_1(&{}, {}) & 63u)", buf, offs);
   case GX_VA_POS: {
     const auto posLoad = fetch_attr(mapping, buf, offs, le);
     if (mapping.cnt == 2) {
@@ -1062,7 +1063,7 @@ wgpu::ShaderModule build_shader(const ShaderConfig& config) noexcept {
     vtxInAttrs += ",\n    @location(0) pnmtx_attribute: u32";
     // Uint32 vertex fetch is little endian; the original GX byte is the low
     // byte of its padded slot. GX stores row indices (three rows per matrix).
-    vtxXfrAttrsPre += "\n    let in_pnmtxidx = (pnmtx_attribute & 255u) / 3u;";
+    vtxXfrAttrsPre += "\n    let in_pnmtxidx = (pnmtx_attribute & 63u) / 3u;";
   }
   for (GXAttr attr = GX_VA_PNMTXIDX; attr <= GX_VA_TEX7; attr = static_cast<GXAttr>(attr + 1)) {
     if (attr == GX_VA_PNMTXIDX && kartpad_uses_vertex_pnmtx(config)) continue;
