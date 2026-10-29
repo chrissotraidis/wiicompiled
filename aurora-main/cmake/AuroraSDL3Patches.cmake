@@ -40,6 +40,30 @@ function(aurora_sdl3_apply_patches sdl_source_dir)
   if (NOT EXISTS "${_hidapi}")
     message(FATAL_ERROR "aurora: SDL3 source tree at ${sdl_source_dir} has no SDL_hidapijoystick.c")
   endif ()
+  set(_gamepad "${sdl_source_dir}/src/joystick/SDL_gamepad.c")
+  if (NOT EXISTS "${_gamepad}")
+    message(FATAL_ERROR "aurora: SDL3 source tree at ${sdl_source_dir} has no SDL_gamepad.c")
+  endif ()
+
+  # Wii Classic extensions report D-pad buttons 11..14, not a hat. The generic
+  # HIDAPI mapping uses hat 0, leaving the SDL gamepad D-pad permanently neutral.
+  # Keep the standalone sideways remote and Nunchuk mappings unchanged.
+  _aurora_sdl3_replace("${_gamepad}" "Wii Classic Controller gamepad mapping selector"
+[==[                guid.data[15] == k_eWiiExtensionControllerType_Nunchuk ||
+]==]
+[==[                guid.data[15] == k_eWiiExtensionControllerType_Nunchuk ||
+                guid.data[15] == k_eWiiExtensionControllerType_Gamepad ||
+]==])
+  _aurora_sdl3_replace("${_gamepad}" "Wii Classic Controller D-pad buttons"
+[==[        case k_eWiiExtensionControllerType_Nunchuk:
+        {
+]==]
+[==[        case k_eWiiExtensionControllerType_Gamepad:
+            SDL_strlcat(mapping_string, "a:b0,b:b1,back:b4,dpdown:b12,dpleft:b13,dpright:b14,dpup:b11,guide:b5,leftshoulder:b9,leftstick:b7,lefttrigger:a4,leftx:a0,lefty:a1,rightshoulder:b10,rightstick:b8,righttrigger:a5,rightx:a2,righty:a3,start:b6,x:b2,y:b3,", sizeof(mapping_string));
+            break;
+        case k_eWiiExtensionControllerType_Nunchuk:
+        {
+]==])
 
   # Backport of SDL 71f4af732 (drop once SDL includes it): rumble writes must not hold dev_lock.
   _aurora_sdl3_replace("${_rumble}" "HIDAPI rumble writes no longer hold the device lock"

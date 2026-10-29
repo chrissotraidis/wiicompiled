@@ -260,10 +260,6 @@ int identity_score(const ControllerIdentity& saved, const ControllerIdentity& cu
     }
     return score;
   }
-  if (!serial_matches(saved.serial, current.serial)) {
-    return 0;
-  }
-
   // Attempt to match against VID/PID as a fallback if the GUID changes
   uint16_t savedVendor = 0;
   uint16_t savedProduct = 0;
@@ -273,7 +269,21 @@ int identity_score(const ControllerIdentity& saved, const ControllerIdentity& cu
   SDL_GetJoystickGUIDInfo(SDL_StringToGUID(current.guid.c_str()), &currentVendor, &currentProduct, nullptr, nullptr);
   const bool sameDevice =
       savedVendor != 0 && savedVendor == currentVendor && savedProduct != 0 && savedProduct == currentProduct;
-  return sameDevice ? kScoreVidPid : 0;
+  if (sameDevice && serial_matches(saved.serial, current.serial)) {
+    return kScoreVidPid;
+  }
+  // SDL recreates a Wii Remote when its extension changes, updating GUID byte
+  // 15. Some HID backends supply no serial. Keep that remote's saved port only
+  // when its nonempty device path and every other GUID byte still match. Do
+  // not let another remote of the same model or a conflicting serial claim it.
+  const bool wiiRemote = savedVendor == 0x057e && (savedProduct == 0x0306 || savedProduct == 0x0330);
+  if (sameDevice && wiiRemote && saved.serial.empty() && current.serial.empty() &&
+      !saved.path.empty() && saved.path == current.path &&
+      saved.guid.size() == 32 && current.guid.size() == 32 &&
+      saved.guid.compare(0, 30, current.guid, 0, 30) == 0) {
+    return kScoreGuid + kScorePath;
+  }
+  return 0;
 }
 
 void assign_player_index(GameController& controller, int32_t port) {

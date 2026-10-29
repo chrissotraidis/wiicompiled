@@ -1,6 +1,13 @@
 include(FetchContent)
 include(GoogleTest)
 
+if (AURORA_SDL3_TARGET)
+  add_executable(wii_classic_mapping_test wii_classic_mapping_test.cpp)
+  target_compile_features(wii_classic_mapping_test PRIVATE cxx_std_20)
+  target_link_libraries(wii_classic_mapping_test PRIVATE ${AURORA_SDL3_TARGET})
+  add_test(NAME wii_classic_mapping COMMAND wii_classic_mapping_test)
+endif ()
+
 if (NOT TARGET gtest)
   FetchContent_Declare(googletest
     URL https://github.com/google/googletest/archive/refs/tags/v1.17.0.tar.gz
