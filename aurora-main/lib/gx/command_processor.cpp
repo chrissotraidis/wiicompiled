@@ -1932,7 +1932,7 @@ static uint16_t pn_mtx_mask(const uint8_t* vertices, uint16_t vtxCount,
   }
   uint16_t mask = 0;
   for (uint16_t vertex = 0; vertex < vtxCount; ++vertex) {
-    const uint32_t matrixIndex = vertices[static_cast<size_t>(vertex) * vtxStride] / 3u;
+    const uint32_t matrixIndex = (vertices[static_cast<size_t>(vertex) * vtxStride] & 0x3fu) / 3u;
     if (matrixIndex < MaxPnMtx) {
       mask |= static_cast<uint16_t>(1u << matrixIndex);
     }
@@ -1956,7 +1956,7 @@ static PnMtxUsage pn_mtx_usage(const uint8_t* vertices, uint16_t vtxCount,
   uint16_t mask = 0;
   for (uint16_t vertex = 0; vertex < vtxCount; ++vertex) {
     // GX matrix-index attributes precede every other vertex attribute and are always one byte.
-    const uint8_t rawMatrixIndex = vertices[static_cast<size_t>(vertex) * vtxStride];
+    const uint8_t rawMatrixIndex = vertices[static_cast<size_t>(vertex) * vtxStride] & 0x3f;
     topologyHasher.update(rawMatrixIndex);
     const uint32_t matrixIndex = rawMatrixIndex / 3u;
     if (matrixIndex < MaxPnMtx) {
