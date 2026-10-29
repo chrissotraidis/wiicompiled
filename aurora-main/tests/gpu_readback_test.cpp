@@ -20,6 +20,12 @@
 #include <thread>
 #include <vector>
 
+// The standalone host probe does not link the Android app tracing service.
+#if !defined(__ANDROID__)
+extern "C" bool KartPadAndroidBeginTrace(const char*) { return false; }
+extern "C" void KartPadAndroidEndTrace() {}
+#endif
+
 namespace {
 using namespace aurora;
 std::atomic<unsigned> errors{};
@@ -59,12 +65,14 @@ Pixels expected(unsigned extent) {
   return bytes;
 }
 
-Pixels run(unsigned splitEvery, bool async = false, bool offscreen = false, unsigned geometry = 0, bool capacityStress = false, bool interpolate = false, bool frameWorker = false, unsigned copyCase = 0) {
+Pixels run(unsigned splitEvery, bool async = false, bool offscreen = false, unsigned geometry = 0, bool capacityStress = false, bool interpolate = false, bool frameWorker = false, unsigned copyCase = 0, unsigned matrixUpperBits = 0) {
   require(!async || !offscreen, "Combined probe mode is not supported");
   guardedBake.fill(0xa5);
   gx::g_gxState.clearColor = {0.f, 0.f, 0.f, 1.f};
   require(frameWorker ? aurora_begin_frame() : gfx::begin_frame(), "Frame begin failed");
   std::array<std::array<float, 3>, 4> positions{};
+  alignas(32) std::array<uint8_t, 64> matrixTexture{};
+  GXTexObj matrixTextureObject{};
   if (geometry) {
     alignas(32) static std::array<uint8_t, 32768> fifo;
     GXInit(fifo.data(), fifo.size());
@@ -91,6 +99,35 @@ Pixels run(unsigned splitEvery, bool async = false, bool offscreen = false, unsi
     if (geometry == 2) GXSetArray(GX_VA_POS, positions.data(), sizeof(positions), sizeof(positions[0]), true);
     GXSetVtxAttrFmt(GX_VTXFMT0, GX_VA_POS, GX_POS_XYZ, GX_F32, 0);
     GXSetVtxAttrFmt(GX_VTXFMT0, GX_VA_CLR0, GX_CLR_RGBA, GX_RGBA8, 0);
+    if (geometry == 4 || geometry == 5) {
+      const float identity[3][4]{{1, 0, 0, 0}, {0, 1, 0, 0}, {0, 0, 1, 0}};
+      GXLoadPosMtxImm(identity, GX_PNMTX1);
+      GXSetVtxDesc(GX_VA_PNMTXIDX, GX_DIRECT);
+    }
+    if (geometry == 5) {
+      // Upper texture rows are black and lower rows white. Only TEXMTX0's
+      // translation selects white, preserving the four independently expected colors.
+      for (unsigned pixel = 0; pixel < 16; ++pixel) {
+        const uint8_t c = pixel >= 8 ? 255 : 0;
+        matrixTexture[pixel * 2] = 255;
+        matrixTexture[pixel * 2 + 1] = c;
+        matrixTexture[32 + pixel * 2] = c;
+        matrixTexture[33 + pixel * 2] = c;
+      }
+      GXInitTexObj(&matrixTextureObject, matrixTexture.data(), 4, 4, GX_TF_RGBA8,
+                   GX_CLAMP, GX_CLAMP, GX_FALSE);
+      GXInitTexObjLOD(&matrixTextureObject, GX_NEAR, GX_NEAR, 0, 0, 0, GX_FALSE, GX_FALSE, GX_ANISO_1);
+      GXLoadTexObj(&matrixTextureObject, GX_TEXMAP0);
+      const float translated[3][4]{{1, 0, 0, 0.5f}, {0, 1, 0, 0.75f}, {0, 0, 1, 0}};
+      GXLoadTexMtxImm(translated, GX_TEXMTX0, GX_MTX2x4);
+      GXSetNumTexGens(1);
+      GXSetTexCoordGen2(GX_TEXCOORD0, GX_TG_MTX2x4, GX_TG_TEX0, GX_TEXMTX0, GX_FALSE, GX_PTIDENTITY);
+      GXSetVtxDesc(GX_VA_TEX0MTXIDX, GX_DIRECT);
+      GXSetVtxDesc(GX_VA_TEX0, GX_DIRECT);
+      GXSetVtxAttrFmt(GX_VTXFMT0, GX_VA_TEX0, GX_TEX_ST, GX_F32, 0);
+      GXSetTevOrder(GX_TEVSTAGE0, GX_TEXCOORD0, GX_TEXMAP0, GX_COLOR0A0);
+      GXSetTevOp(GX_TEVSTAGE0, GX_MODULATE);
+    }
     gx::fifo::drain();
   }
   const auto pipeline = gfx::pipeline_ref(gfx::clear::PipelineConfig{});
@@ -118,9 +155,13 @@ Pixels run(unsigned splitEvery, bool async = false, bool offscreen = false, unsi
       } else {
       GXBegin(GX_QUADS, GX_VTXFMT0, 4);
       for (unsigned index = 0; index < positions.size(); ++index) {
+        if (geometry == 4 || geometry == 5)
+          GXMatrixIndex1u8(GX_VA_PNMTXIDX, GX_PNMTX1 | (geometry == 4 ? matrixUpperBits : 0));
+        if (geometry == 5) GXMatrixIndex1u8(GX_VA_TEX0MTXIDX, GX_TEXMTX0 | matrixUpperBits);
         if (geometry == 2) GXPosition1x8(index);
         else GXPosition3f32(positions[index][0], positions[index][1], positions[index][2]);
         GXColor4u8(c[0], c[1], c[2], 255);
+        if (geometry == 5) GXTexCoord2f32(0.f, 0.f);
       }
       GXEnd();
       }
@@ -244,6 +285,18 @@ int main(int argc, char** argv) {
       std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
     std::printf("Actual Aurora completed seeded startup queue (%u observed pending)\n", prewarmQueued);
+    // GX matrix selectors are six bits (Dolphin VertexLoader's direct-byte path).
+    // Exercise real FIFO decode, generated WGSL and GPU output. The same binary
+    // also runs with KARTPAD_RENDERER_VERTEX_REPACK=2 and VERTEX_PNMTX=1.
+    bool matrixSelectorsMatched = true;
+    for (unsigned geometry : {4u, 5u}) {
+      for (unsigned bits : {0u, 0x40u, 0x80u, 0xc0u}) {
+        const bool matched = run(0, false, false, geometry, false, false, false, 0, bits) == expected(16);
+        matrixSelectorsMatched &= matched;
+        std::printf("Actual Aurora matrix selector geometry=%u upper_bits=%u matched=%d\n", geometry, bits, matched);
+      }
+    }
+    require(matrixSelectorsMatched, "Matrix selector upper bits changed pixels");
     const auto control = run(0);
     for (unsigned band = 0; band < 4; ++band) {
       const auto tile = band * 4 * 64;
