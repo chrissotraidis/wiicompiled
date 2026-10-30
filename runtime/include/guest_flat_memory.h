@@ -100,6 +100,12 @@ inline bool RequiresCheckedAccess() noexcept { return g_requiresCheckedAccess; }
 // fallback would let translated code read from an unmapped constant base.
 void Initialize(const std::vector<RegionRequest>& regions);
 
+// Size of the address-space reservation for a layout: the highest mapped byte
+// plus one guard page, never more than the full 32-bit guest space. iOS caps an
+// app's virtual address space, so reserving the full 4 GiB can fail on
+// player-signed builds that lack the extended-virtual-addressing entitlement.
+uint64_t ReservationSizeFor(const std::vector<RegionRequest>& regions);
+
 // Host-view pointer for a mapped guest address, or nullptr when the address is
 // outside every mapped region. This is what the page table and
 // Memory::GetPointer hand out.
