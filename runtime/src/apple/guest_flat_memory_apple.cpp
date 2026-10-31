@@ -54,6 +54,10 @@ std::atomic<uint32_t> g_xguard{0};
 std::atomic<uint32_t> g_unmapped{0};
 std::atomic<uint32_t> g_unmappedRegions{0};
 
+// Bytes actually reserved for the flat guest view. iOS may reserve only the span
+// the layout reaches; every fixed remap and the failure cleanup must stay inside it.
+uint64_t g_reservedSize = 0;
+
 uint64_t RoundUp(uint64_t value, uint64_t alignment)
 {
     return (value + alignment - 1) & ~(alignment - 1);
@@ -119,13 +123,36 @@ void SetProtection(uint32_t address, size_t length, int protection)
         return;
     const uint64_t pageSize = static_cast<uint64_t>(getpagesize());
     const uint64_t first = static_cast<uint64_t>(address) & ~(pageSize - 1);
-    const uint64_t last = RoundUp(static_cast<uint64_t>(address) + length, pageSize);
+    uint64_t last = RoundUp(static_cast<uint64_t>(address) + length, pageSize);
+    // The reservation can be smaller than the full 32-bit space, so a range that
+    // runs past it must be clipped rather than passed to mprotect.
+    if (g_reservedSize != 0) {
+        if (first >= g_reservedSize)
+            return;
+        if (last > g_reservedSize)
+            last = g_reservedSize;
+    }
     mprotect(g_base + first, static_cast<size_t>(last - first), protection);
 }
 
 } // namespace
 
 bool IsActive() { return g_initialized; }
+
+uint64_t ReservationSizeFor(const std::vector<RegionRequest>& regions)
+{
+    const uint64_t pageSize = static_cast<uint64_t>(getpagesize());
+    uint64_t highestEnd = 0;
+    for (const auto& region : regions) {
+        if (region.size == 0) continue;
+        const uint64_t end = static_cast<uint64_t>(region.base) + RoundUp(region.size, pageSize);
+        highestEnd = std::max(highestEnd, end);
+    }
+    // One trailing guard page keeps the byte just past the last mapping inside the
+    // reservation, so a same-page alias can never land outside it.
+    const uint64_t needed = RoundUp(highestEnd, pageSize) + pageSize;
+    return std::min(needed, kGuestSpaceSize + pageSize);
+}
 
 void Initialize(const std::vector<RegionRequest>& regions)
 {
@@ -156,10 +183,28 @@ void Initialize(const std::vector<RegionRequest>& regions)
     }
     const uint64_t reservationSize = kGuestSpaceSize + pageSize;
 #if TARGET_OS_IPHONE
-    void* reserved = mmap(nullptr, static_cast<size_t>(reservationSize), PROT_NONE,
-                          MAP_PRIVATE | MAP_ANON, -1, 0);
-    if (reserved == MAP_FAILED)
-        ThrowErrno("mmap iOS flat guest reservation");
+    // iOS caps an app's virtual address space unless the extended-virtual-addressing
+    // entitlement is present, and player-signed builds do not carry it. Reserve only
+    // the span the guest layout actually reaches (the Wii map ends at 0xE0002000),
+    // which stays under the default ceiling. Guest RAM is unchanged: every section
+    // is backed by its own anonymous pages at its own size. The flat guest view is
+    // only an alias table, and this platform always resolves guest memory through
+    // the checked path because iOS host pages exceed a 4 KiB Wii page.
+    const uint64_t needed = ReservationSizeFor(regions);
+    void* reserved = MAP_FAILED;
+    if (needed < reservationSize) {
+        reserved = mmap(nullptr, static_cast<size_t>(needed), PROT_NONE,
+                        MAP_PRIVATE | MAP_ANON, -1, 0);
+    }
+    if (reserved == MAP_FAILED) {
+        reserved = mmap(nullptr, static_cast<size_t>(reservationSize), PROT_NONE,
+                        MAP_PRIVATE | MAP_ANON, -1, 0);
+        if (reserved == MAP_FAILED)
+            ThrowErrno("mmap iOS flat guest reservation");
+        g_reservedSize = reservationSize;
+    } else {
+        g_reservedSize = needed;
+    }
     g_base = static_cast<uint8_t*>(reserved);
     gFlatGuestBase = g_base;
 #else
@@ -241,7 +286,7 @@ void Initialize(const std::vector<RegionRequest>& regions)
         g_initialized = true;
     } catch (...) {
         // A failed allocation/remap must not leave stale aliases or backing pages.
-        munmap(g_base, static_cast<size_t>(reservationSize));
+        munmap(g_base, static_cast<size_t>(g_reservedSize != 0 ? g_reservedSize : reservationSize));
         for (auto& section : g_sections) {
             if (section.host)
                 munmap(section.host, static_cast<size_t>(section.size));

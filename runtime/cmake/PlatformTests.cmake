@@ -179,6 +179,18 @@ if(MKW_PLATFORM_MACOS)
     target_compile_features(mkw_macos_guest_flat_memory_tests PRIVATE cxx_std_17)
     add_test(NAME mkw_macos_guest_flat_memory_tests COMMAND mkw_macos_guest_flat_memory_tests)
 
+    # iOS caps an app's virtual address space, so the flat reservation must cover the
+    # guest layout instead of always asking for 4 GiB. Built for the host so the
+    # sizing arithmetic is covered without a device.
+    add_executable(mkw_apple_guest_flat_reservation_tests
+        "${MKW_TEST_RUNTIME_DIR}/tests/apple_guest_flat_reservation_tests.cpp"
+        "${MKW_TEST_RUNTIME_DIR}/src/apple/guest_flat_memory_apple.cpp")
+    target_include_directories(mkw_apple_guest_flat_reservation_tests PRIVATE
+        "${MKW_TEST_RUNTIME_DIR}/include")
+    target_compile_features(mkw_apple_guest_flat_reservation_tests PRIVATE cxx_std_17)
+    add_test(NAME mkw_apple_guest_flat_reservation_tests
+        COMMAND mkw_apple_guest_flat_reservation_tests)
+
     add_executable(mkw_macos_external_audio_tests
         "${MKW_TEST_RUNTIME_DIR}/tests/macos_external_audio_tests.cpp"
         "${MKW_TEST_RUNTIME_DIR}/src/external_audio_macos.cpp")
