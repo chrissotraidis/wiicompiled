@@ -167,9 +167,10 @@ PnMtxUsage pn_mtx_usage(const uint8_t* vertices, uint16_t vtxCount, uint32_t vtx
   uint16_t mask = 0;
   for (uint16_t vertex = 0; vertex < vtxCount; ++vertex) {
     // Matrix-index attributes come first in a vertex and are one byte each.
-    const uint8_t rawIndex = vertices[static_cast<size_t>(vertex) * vtxStride];
-    topology.update(rawIndex);
-    if (const uint32_t index = rawIndex / 3u; index < MaxPnMtx) {
+    // The hardware uses the low six bits of a matrix index (upstream aurora-wiicompiled 4aa01413).
+    const uint8_t row = vertices[static_cast<size_t>(vertex) * vtxStride] & 0x3fu;
+    topology.update(row);
+    if (const uint32_t index = row / 3u; index < MaxPnMtx) {
       mask |= static_cast<uint16_t>(1u << index);
     }
   }

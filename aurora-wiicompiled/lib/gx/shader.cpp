@@ -775,7 +775,7 @@ auto attr_load(const ShaderConfig& config, GXAttr attr, std::string_view vidx) -
 
   switch (attr) {
   case GX_VA_PNMTXIDX:
-    return fmt::format("(raw_fetch_u8_1(&{}, {}) / 3u)", buf, offs);
+    return fmt::format("((raw_fetch_u8_1(&{}, {}) & 0x3fu) / 3u)", buf, offs);
   case GX_VA_TEX0MTXIDX:
   case GX_VA_TEX1MTXIDX:
   case GX_VA_TEX2MTXIDX:
@@ -784,7 +784,7 @@ auto attr_load(const ShaderConfig& config, GXAttr attr, std::string_view vidx) -
   case GX_VA_TEX5MTXIDX:
   case GX_VA_TEX6MTXIDX:
   case GX_VA_TEX7MTXIDX:
-    return fmt::format("raw_fetch_u8_1(&{}, {})", buf, offs);
+    return fmt::format("(raw_fetch_u8_1(&{}, {}) & 0x3fu)", buf, offs);
   case GX_VA_POS: {
     const auto posLoad = fetch_attr(mapping, buf, offs, le);
 
