@@ -235,6 +235,13 @@ bool apply_cache_domain(const CacheDomain&) noexcept { return false; }
 #endif
 
 void pin_shared_cache() noexcept {
+#if defined(__ANDROID__)
+  // KartPad: Android kernels often report only per-core caches (a Pixel 9 Pro XL lists just each
+  // core's L1), so the "shared cache" domain is the single core this thread starts on. The game,
+  // GX FIFO and render threads then time-slice that one core: in a Luigi Circuit race at 4x the
+  // game ran at 19-22 FPS pinned and 48-60 FPS unpinned. Leave placement to the Android scheduler.
+  return;
+#endif
   std::lock_guard lock{sDomainMutex};
   if (!sDomainConfigured) {
     auto domain = find_cache_domain();
