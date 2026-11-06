@@ -1,7 +1,7 @@
 // "30 FPS races": every race runs in Mario Kart Wii's own 30 frames-per-second mode.
 //
 // Adapted from DriftDroid's frame_rate_lock.cpp (github.com/dorPXP/driftdroid, GPL-3.0), with the
-// Retro Rewind call site for KartPad's pack 6.13.4.
+// Retro Rewind call site for KartPad's pack 6.13.5.
 //
 // When a race scene starts, the game picks 30 FPS for three or four screens (and two screens
 // online) and passes the answer to GameScene::setFramerate (0x8051AF84, r4 = 1 for 30 FPS). The
@@ -12,8 +12,8 @@
 // menus and every other scene choose for themselves. Time Trial and ghost races (game modes 2
 // and 5) keep 60, as Retro Rewind itself does, so recorded ghosts stay 60 FPS ghosts.
 //
-// Retro Rewind 6.13.4 decides again after the game: its routine at 0x8183B7B4 calls
-// setFramerate with the pack's own 30 FPS setting (returning to 0x8183B82C), and forces 60 in
+// Retro Rewind 6.13.5 decides again after the game: its routine at 0x8183A988 calls
+// setFramerate with the pack's own 30 FPS setting (returning to 0x8183AA00), and forces 60 in
 // modes 2 and 5 when the scene kind (+0x28) is 2. That call is changed the same way.
 
 #include "abi_bridge.h"
@@ -24,7 +24,7 @@
 namespace {
 
 constexpr uint32_t kSetFramerateReturnInRaceScene = 0x80554274u;
-constexpr uint32_t kSetFramerateReturnInRetroRewind = 0x8183B82Cu;
+constexpr uint32_t kSetFramerateReturnInRetroRewind = 0x8183AA00u;
 constexpr uint32_t kThirtyFramesPerSecond = 1u;
 constexpr uint32_t kRacedataPointer = 0x809BD728u;  // Racedata::sInstance
 constexpr uint32_t kGameModeOffset = 0xB70u;
