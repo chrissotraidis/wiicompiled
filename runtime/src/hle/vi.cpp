@@ -328,6 +328,15 @@ static std::atomic<bool> s_inAdvanceRetrace{false};
 // end the freshly pre-warmed empty frame and show it as a black frame group.
 static std::atomic<bool> s_presentSequenceActive{false};
 
+// KartPad #390: during start-up MKWii draws the safety screen while VI black is still set, so every
+// retrace also presented a black frame between the game's own frames (about 100 presents a second).
+// Which one a 60/120 Hz display showed was down to timing: smooth on an iPad Pro, black on 8 of 9
+// frames on several iPhones. Once the game has presented a frame since VI black was switched on, that
+// frame stays on screen (as the Wii keeps showing its last XFB); black is presented again only after
+// the game switches VI black on anew and until its next frame.
+static std::atomic<bool> s_copiedSinceBlack{false};
+static bool s_wasBlack = false; // retrace context only
+
 void AdvanceRetrace(CpuContext* ctx, Clock::time_point retraceStamp, bool serviceAurora) {
     // Prevent re-entry - this can happen if OSWakeupThread triggers SelectThread
     // which goes idle and calls ProcessTimerEvents again
@@ -432,7 +441,12 @@ void AdvanceRetrace(CpuContext* ctx, Clock::time_point retraceStamp, bool servic
         const bool frameActive = g_auroraFrameActive.load(std::memory_order_acquire);
         const bool xfbMatches = (readyXfb != 0 && readyXfb == currentFb);
         const bool shouldPresentXfb = hasXfbReady && !isBlack && xfbMatches;
-        const bool shouldPresentBlack = isBlack && frameActive;
+        if (isBlack && !s_wasBlack) {
+            s_copiedSinceBlack.store(false, std::memory_order_release);
+        }
+        s_wasBlack = isBlack;
+        const bool shouldPresentBlack =
+            isBlack && frameActive && !s_copiedSinceBlack.load(std::memory_order_acquire);
         const bool shouldSubmit = frameActive && (shouldPresentXfb || shouldPresentBlack);
 
         if (shouldSubmit) {
@@ -589,6 +603,42 @@ void PaceToRetraceBoundary(Clock::time_point deadline) {
 
 } // namespace
 
+// KartPad #390: some iPhones/iPads show black on most frames while the Wii safety screen fades out.
+// Count what each present was: a game copy with draws, a game copy with no draws (shows the clear
+// colour), or a VI-black present. Logged once per 60 retraces, only for windows that had an empty or
+// black present, and at most 120 times, so the log says which path the black frames take.
+namespace {
+struct PresentKinds {
+    uint32_t copies = 0;
+    uint32_t emptyCopies = 0;
+    uint32_t black = 0;
+    uint32_t windowStartRetrace = 0;
+    uint32_t linesLogged = 0;
+};
+PresentKinds s_presentKinds;
+
+void CountPresentKind(bool presentedXfb, bool hadWork) {
+    uint32_t retrace = 0;
+    {
+        std::lock_guard<std::mutex> lock(g_viMutex);
+        retrace = g_vi.retraceCount;
+    }
+    PresentKinds& k = s_presentKinds;
+    if (presentedXfb) {
+        (hadWork ? k.copies : k.emptyCopies)++;
+    } else {
+        k.black++;
+    }
+    if (retrace - k.windowStartRetrace < 60) return;
+    if ((k.emptyCopies != 0 || k.black != 0) && k.linesLogged < 120) {
+        ++k.linesLogged;
+        RT_LOGF(RT_TAG_VI, "present kinds: retraces=%u copies=%u empty_copies=%u black=%u\n",
+                retrace - k.windowStartRetrace, k.copies, k.emptyCopies, k.black);
+    }
+    k = PresentKinds{0, 0, 0, retrace, k.linesLogged};
+}
+} // namespace
+
 // Single owner of the Aurora frame presentation sequence: seals the active frame, optionally paces the
 // producer to the VI retrace boundary, and pre-warms the next frame. Paced from GXCopyDisp; unpaced for
 // the retrace-context black/boot present path in AdvanceRetrace.
@@ -659,6 +709,7 @@ void VI_HLE_PresentFrame(bool presentedXfb, bool paceToRetrace) {
     if (presentedXfb && paceToRetrace) {
         TraceKartStateAtFrameEnd(traceRetraceCount);
     }
+    CountPresentKind(presentedXfb, g_auroraFrameHadWork.load(std::memory_order_acquire));
     aurora_end_frame();
     if (paceThisFrame) {
         PaceToRetraceBoundary(paceDeadline);
@@ -672,6 +723,7 @@ void VI_HLE_PresentFrame(bool presentedXfb, bool paceToRetrace) {
         std::lock_guard<std::mutex> lock(g_viMutex);
         g_vi.hasValidXfb = false;
         g_vi.readyXfb = 0;
+        s_copiedSinceBlack.store(true, std::memory_order_release);
     }
     // Pre-warm the next frame so subsequent GX work has a valid frame context.
     {
