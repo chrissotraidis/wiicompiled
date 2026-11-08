@@ -20,6 +20,7 @@
 #include "memory.h"
 
 #include <atomic>
+#include <cstdio>
 
 namespace {
 
@@ -50,12 +51,22 @@ extern "C" __attribute__((visibility("default"))) void RuntimeSetThirtyFpsRaces(
 }
 
 extern "C" __attribute__((visibility("default"))) void RuntimeFrameRateLockHook(CpuContext* ctx) {
-    if (!g_enabled.load(std::memory_order_relaxed)) {
-        return;
-    }
-    if ((ctx->lr == kSetFramerateReturnInRaceScene || ctx->lr == kSetFramerateReturnInRetroRewind) &&
+    const bool enabled = g_enabled.load(std::memory_order_relaxed);
+    const uint32_t requested = ctx->gpr[4];
+    const uint32_t scene = ctx->gpr[3];
+    const uint32_t scene_kind = Memory::Contains(scene + 0x28u, 4) ? Memory::Read32(scene + 0x28u) : 0xFFFFFFFFu;
+    bool forced = false;
+    if (enabled &&
+        (ctx->lr == kSetFramerateReturnInRaceScene || ctx->lr == kSetFramerateReturnInRetroRewind) &&
         !SixtyOnlyMode()) {
         ctx->gpr[4] = kThirtyFramesPerSecond;
+        forced = true;
     }
+    // Scene changes only, so a handful of lines per race; lets a log show which frame rate each
+    // scene ran at and whether this option chose it (#510).
+    std::printf("[KartPadFrameRate] scene lr=0x%08X scene_kind=%u requested=%s option=%s result=%s\n",
+                ctx->lr, scene_kind, requested == kThirtyFramesPerSecond ? "30" : "60",
+                enabled ? "on" : "off", ctx->gpr[4] == kThirtyFramesPerSecond ? (forced ? "30_forced" : "30") : "60");
+    std::fflush(stdout);
 }
 
