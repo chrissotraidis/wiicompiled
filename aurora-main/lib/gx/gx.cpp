@@ -291,6 +291,11 @@ static size_t static_texture_source_cache_size() noexcept { return s_staticTextu
 static size_t static_palette_texture_source_cache_size() noexcept { return s_staticPaletteTextureSourceCache.size(); }
 static size_t texture_object_cache_size() noexcept { return s_textureObjectCaches.size(); }
 
+TextureCacheSizes texture_cache_sizes() noexcept {
+  return {texture_object_cache_size(), static_texture_source_cache_size(),
+          static_palette_texture_source_cache_size(), s_tlutObjectCaches.size()};
+}
+
 namespace {
 
 struct StaticSourceFrontCacheEntry {

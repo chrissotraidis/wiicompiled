@@ -485,6 +485,14 @@ struct CopyTexturePoolStats {
 };
 // Relaxed snapshot for diagnostics; safe to read from any thread.
 CopyTexturePoolStats copy_texture_pool_stats() noexcept;
+// KartPad #510: entry counts of the texture caches; game thread only.
+struct TextureCacheSizes {
+  size_t objects;
+  size_t staticSources;
+  size_t staticPaletteSources;
+  size_t tlutObjects;
+};
+TextureCacheSizes texture_cache_sizes() noexcept;
 void evict_texture_object(u32 texObjId) noexcept;
 void evict_tlut_object(u32 tlutObjId) noexcept;
 void invalidate_static_texture_cache() noexcept;

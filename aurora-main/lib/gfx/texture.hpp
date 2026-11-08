@@ -1,6 +1,7 @@
 #pragma once
 #include <dolphin/gx.h>
 
+#include <algorithm>
 #include <utility>
 
 #include "common.hpp"
@@ -36,6 +37,14 @@ TextureFormatInfo format_info(wgpu::TextureFormat format) noexcept;
 uint64_t calc_texture_size(wgpu::TextureFormat format, uint32_t width, uint32_t height, uint32_t mips) noexcept;
 
 constexpr u32 InvalidTextureFormat = -1;
+// KartPad #510: live converted/uploaded textures, for the periodic GPU resource log line.
+void note_texture_created(uint64_t bytes) noexcept;
+void note_texture_destroyed(uint64_t bytes) noexcept;
+struct LiveTextureStats {
+  uint64_t count;
+  uint64_t bytes;
+};
+LiveTextureStats live_texture_stats() noexcept;
 struct TextureRef {
   wgpu::Texture texture;
   wgpu::TextureView sampleTextureView;
@@ -55,7 +64,14 @@ struct TextureRef {
   , size(size)
   , format(format)
   , mipCount(mipCount)
-  , gxFormat(gxFormat) {}
+  , gxFormat(gxFormat)
+  , trackedBytes(calc_texture_size(format, size.width, size.height, mipCount) * std::max(size.depthOrArrayLayers, 1u)) {
+    note_texture_created(trackedBytes);
+  }
+  ~TextureRef() { note_texture_destroyed(trackedBytes); }
+  TextureRef(const TextureRef&) = delete;
+  TextureRef& operator=(const TextureRef&) = delete;
+  uint64_t trackedBytes;
 };
 
 TextureHandle new_static_texture_2d(uint32_t width, uint32_t height, uint32_t mips, u32 gxFormat,

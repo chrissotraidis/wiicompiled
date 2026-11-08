@@ -8,6 +8,7 @@
 #include "../gx/gx_fmt.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <cstdint>
 #include <memory>
 #include <utility>
@@ -75,6 +76,25 @@ uint64_t calc_texture_size(wgpu::TextureFormat format, u32 width, u32 height, u3
     total += mipBytes;
   }
   return total;
+}
+
+namespace {
+std::atomic<uint64_t> s_liveTextures{0};
+std::atomic<uint64_t> s_liveTextureBytes{0};
+} // namespace
+
+void note_texture_created(uint64_t bytes) noexcept {
+  s_liveTextures.fetch_add(1, std::memory_order_relaxed);
+  s_liveTextureBytes.fetch_add(bytes, std::memory_order_relaxed);
+}
+
+void note_texture_destroyed(uint64_t bytes) noexcept {
+  s_liveTextures.fetch_sub(1, std::memory_order_relaxed);
+  s_liveTextureBytes.fetch_sub(bytes, std::memory_order_relaxed);
+}
+
+LiveTextureStats live_texture_stats() noexcept {
+  return {s_liveTextures.load(std::memory_order_relaxed), s_liveTextureBytes.load(std::memory_order_relaxed)};
 }
 
 TextureHandle new_static_texture_2d(uint32_t width, uint32_t height, uint32_t mips, u32 format, ArrayRef<uint8_t> data,

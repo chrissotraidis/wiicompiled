@@ -308,15 +308,21 @@ extern "C" void KartPadAndroidLogMetric(const char*, const char*, ...);
 // Called from the periodic telemetry on the game thread; reads only relaxed counters.
 extern "C" void KartPadLogGpuResourceMetrics() {
   const auto pool = aurora::gx::copy_texture_pool_stats();
+  const auto live = aurora::gfx::live_texture_stats();
+  const auto caches = aurora::gx::texture_cache_sizes();
   KartPadAndroidLogMetric("KartPadGpuResources",
                           "copy_pool_entries=%u copy_pool_approx_mib=%.1f copy_pool_released=%llu "
                           "live_copies=%u live_copy_approx_mib=%.1f "
-                          "texture_copies=%llu staging_splits=%llu",
+                          "texture_copies=%llu staging_splits=%llu live_textures=%llu live_texture_mib=%.1f "
+                          "texobj_cache=%zu static_sources=%zu palette_sources=%zu tlut_objects=%zu",
                           pool.entries, static_cast<double>(pool.approxBytes) / (1024.0 * 1024.0),
                           static_cast<unsigned long long>(pool.released),
                           pool.liveCopies, static_cast<double>(pool.liveCopyApproxBytes) / (1024.0 * 1024.0),
                           static_cast<unsigned long long>(pool.textureCopies),
-                          static_cast<unsigned long long>(aurora::gfx::staging_split_count()));
+                          static_cast<unsigned long long>(aurora::gfx::staging_split_count()),
+                          static_cast<unsigned long long>(live.count),
+                          static_cast<double>(live.bytes) / (1024.0 * 1024.0), caches.objects,
+                          caches.staticSources, caches.staticPaletteSources, caches.tlutObjects);
 }
 #endif
 
