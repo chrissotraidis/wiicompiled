@@ -14,12 +14,15 @@
 //
 // Retro Rewind 6.13.5 decides again after the game: its routine at 0x8183A988 calls
 // setFramerate with the pack's own 30 FPS setting (returning to 0x8183AA00), and forces 60 in
-// modes 2 and 5 when the scene kind (+0x28) is 2. That call is changed the same way.
+// modes 2 and 5 when the scene kind (+0x28) is 2. That call is changed the same way, but only
+// when the scene kind is 2 (a race): the routine also runs for Retro Rewind's menus (kind 1),
+// which keep their own frame rate.
 
 #include "abi_bridge.h"
 #include "memory.h"
 
 #include <atomic>
+#include <cstdio>
 
 namespace {
 
@@ -28,6 +31,8 @@ constexpr uint32_t kSetFramerateReturnInRetroRewind = 0x8183AA00u;
 constexpr uint32_t kThirtyFramesPerSecond = 1u;
 constexpr uint32_t kRacedataPointer = 0x809BD728u;  // Racedata::sInstance
 constexpr uint32_t kGameModeOffset = 0xB70u;
+constexpr uint32_t kSceneKindOffset = 0x28u;  // in the GameScene passed in r3
+constexpr uint32_t kRaceSceneKind = 2u;      // 1 is a menu scene
 
 bool SixtyOnlyMode() {
     if (!Memory::Contains(kRacedataPointer, 4)) {
@@ -50,12 +55,25 @@ extern "C" __attribute__((visibility("default"))) void RuntimeSetThirtyFpsRaces(
 }
 
 extern "C" __attribute__((visibility("default"))) void RuntimeFrameRateLockHook(CpuContext* ctx) {
-    if (!g_enabled.load(std::memory_order_relaxed)) {
-        return;
-    }
-    if ((ctx->lr == kSetFramerateReturnInRaceScene || ctx->lr == kSetFramerateReturnInRetroRewind) &&
+    const bool enabled = g_enabled.load(std::memory_order_relaxed);
+    const uint32_t requested = ctx->gpr[4];
+    const uint32_t scene = ctx->gpr[3];
+    const uint32_t scene_kind = Memory::Contains(scene + kSceneKindOffset, 4)
+                                    ? Memory::Read32(scene + kSceneKindOffset)
+                                    : 0xFFFFFFFFu;
+    bool forced = false;
+    // Retro Rewind's routine also runs for its menu scenes; only races are changed.
+    if (enabled && scene_kind == kRaceSceneKind &&
+        (ctx->lr == kSetFramerateReturnInRaceScene || ctx->lr == kSetFramerateReturnInRetroRewind) &&
         !SixtyOnlyMode()) {
         ctx->gpr[4] = kThirtyFramesPerSecond;
+        forced = true;
     }
+    // Scene changes only, so a handful of lines per race; lets a log show which frame rate each
+    // scene ran at and whether this option chose it (#510).
+    std::printf("[KartPadFrameRate] scene lr=0x%08X scene_kind=%u requested=%s option=%s result=%s\n",
+                ctx->lr, scene_kind, requested == kThirtyFramesPerSecond ? "30" : "60",
+                enabled ? "on" : "off", ctx->gpr[4] == kThirtyFramesPerSecond ? (forced ? "30_forced" : "30") : "60");
+    std::fflush(stdout);
 }
 
