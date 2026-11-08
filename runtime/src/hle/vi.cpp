@@ -328,6 +328,14 @@ static std::atomic<bool> s_inAdvanceRetrace{false};
 // end the freshly pre-warmed empty frame and show it as a black frame group.
 static std::atomic<bool> s_presentSequenceActive{false};
 
+// KartPad #390: during start-up MKWii draws the safety screen while VI black is still set, so every
+// retrace also presented a black frame between the game's own frames (about 100 presents a second).
+// Which one a 60/120 Hz display showed was down to timing: smooth on an iPad Pro, black on 8 of 9
+// frames on several iPhones. While the game is presenting its own frames, it owns the screen.
+static std::atomic<uint32_t> s_lastCopyRetrace{0};
+static std::atomic<bool> s_copiedFrame{false};
+constexpr uint32_t kCopyOwnsScreenRetraces = 3;
+
 void AdvanceRetrace(CpuContext* ctx, Clock::time_point retraceStamp, bool serviceAurora) {
     // Prevent re-entry - this can happen if OSWakeupThread triggers SelectThread
     // which goes idle and calls ProcessTimerEvents again
@@ -432,7 +440,9 @@ void AdvanceRetrace(CpuContext* ctx, Clock::time_point retraceStamp, bool servic
         const bool frameActive = g_auroraFrameActive.load(std::memory_order_acquire);
         const bool xfbMatches = (readyXfb != 0 && readyXfb == currentFb);
         const bool shouldPresentXfb = hasXfbReady && !isBlack && xfbMatches;
-        const bool shouldPresentBlack = isBlack && frameActive;
+        const bool gameIsPresenting = s_copiedFrame.load(std::memory_order_acquire) &&
+            retraceValue - s_lastCopyRetrace.load(std::memory_order_acquire) <= kCopyOwnsScreenRetraces;
+        const bool shouldPresentBlack = isBlack && frameActive && !gameIsPresenting;
         const bool shouldSubmit = frameActive && (shouldPresentXfb || shouldPresentBlack);
 
         if (shouldSubmit) {
@@ -672,6 +682,8 @@ void VI_HLE_PresentFrame(bool presentedXfb, bool paceToRetrace) {
         std::lock_guard<std::mutex> lock(g_viMutex);
         g_vi.hasValidXfb = false;
         g_vi.readyXfb = 0;
+        s_lastCopyRetrace.store(g_vi.retraceCount, std::memory_order_release);
+        s_copiedFrame.store(true, std::memory_order_release);
     }
     // Pre-warm the next frame so subsequent GX work has a valid frame context.
     {
