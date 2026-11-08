@@ -31,6 +31,9 @@ struct CachedShaderModule {
 
 std::mutex sShaderModuleCacheMutex;
 absl::flat_hash_map<ShaderConfig, std::shared_ptr<CachedShaderModule>, ShaderConfigHash> sShaderModuleCache;
+// KartPad #510: finished modules are only needed to build further pipelines, so the cache
+// is emptied of them once it is this large instead of growing with every course for the whole session.
+constexpr size_t kShaderModuleCacheLimit = 128;
 
 wgpu::ShaderModule cached_shader_module(const ShaderConfig& config) {
   std::shared_ptr<CachedShaderModule> entry;
@@ -38,6 +41,9 @@ wgpu::ShaderModule cached_shader_module(const ShaderConfig& config) {
     std::unique_lock lock{sShaderModuleCacheMutex};
     const auto it = sShaderModuleCache.find(config);
     if (it == sShaderModuleCache.end()) {
+      if (sShaderModuleCache.size() >= kShaderModuleCacheLimit) {
+        absl::erase_if(sShaderModuleCache, [](const auto& item) { return !item.second->compiling; });
+      }
       entry = std::make_shared<CachedShaderModule>();
       sShaderModuleCache.emplace(config, entry);
     } else {
