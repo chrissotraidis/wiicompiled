@@ -20,6 +20,14 @@
 
 inline void InvokeIndirectCpu(uint32_t target, CpuContext* ctx);
 
+// "30 FPS races" (src/hle/frame_rate_lock.cpp): GameScene::setFramerate, reached by direct calls
+// only, so the test folds away at every other call site. Defined in the app; the game pack binds
+// to it like the other shared runtime entry points.
+extern "C" void RuntimeFrameRateLockHook(CpuContext* ctx);
+// "Simpler computer karts" (src/hle/low_detail_karts.cpp): four entry points of the game's kart
+// loading, reached by direct calls only.
+extern "C" void RuntimeLowDetailKartsHook(uint32_t target, CpuContext* ctx);
+
 // Some game-facing runtime options alter arguments at well-defined ABI
 // boundaries. Keep this independent of the dispatch mechanism: generated
 // static calls deliberately bypass InvokeDirectCpu for performance.
@@ -29,6 +37,12 @@ inline void ApplyRuntimeCallOptions(uint32_t target, CpuContext* ctx) {
     if (target == 0x8023BD38u) {
         // ScnRenderer::createPath receives the post-processing path mask in r4.
         ctx->gpr[4] = RuntimeGameGraphicsOptions::FilterScnRendererPathMask(ctx->gpr[4]);
+    }
+    if (target == 0x8051AF84u) {
+        RuntimeFrameRateLockHook(ctx);
+    }
+    if (target == 0x80540E3Cu || target == 0x80576D8Cu || target == 0x80576E90u || target == 0x807C7828u) {
+        RuntimeLowDetailKartsHook(target, ctx);
     }
 }
 
