@@ -1607,6 +1607,14 @@ int RuntimeMain(int argc, char** argv) {
             if (KartPadGpuDriverStartFailedNote != nullptr) message += KartPadGpuDriverStartFailedNote();
 #endif
             SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Graphics Unavailable", message.c_str(), nullptr);
+#if defined(__ANDROID__)
+            // The game can't start twice in one process ("cannot change translated function
+            // profile after finalization"), and Android keeps this one alive after main returns.
+            // End it, as other fatal errors do, so the next Play starts fresh and can switch to
+            // the phone's own driver.
+            MarkFatalErrorReported();
+            RuntimeCrash::RuntimeTerminate(1, "graphics startup rejected");
+#endif
             SetRuntimeExitCodeImpl(1);
             ShutdownProcessTranscript();
             return 1;
