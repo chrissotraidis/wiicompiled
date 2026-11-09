@@ -920,6 +920,15 @@ void RuntimeAuroraLogCallback(AuroraLogLevel level, const char* module,
     std::cerr << "[aurora] [" << static_cast<int>(level) << "] [" << moduleView << "] "
               << messageView << std::endl;
     if (level == LOG_FATAL) {
+#if defined(__ANDROID__)
+        // A renderer failure during play (device lost, for example) with the player's GPU driver:
+        // say so, and start with the phone's own driver next time (KartPad gpu_driver.cpp).
+        if (KartPadGpuDriverStartFailedNote != nullptr) {
+            const std::string details = std::string(messageView) + KartPadGpuDriverStartFailedNote();
+            ShowRuntimeFatalPopup("Aurora reported a fatal renderer error", details);
+            return;
+        }
+#endif
         ShowRuntimeFatalPopup("Aurora reported a fatal renderer error", messageView);
     }
 }
