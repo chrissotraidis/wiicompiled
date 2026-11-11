@@ -5,9 +5,9 @@
 // moment a higher-priority one becomes ready. Mario Kart Wii's movie player relies on that: the
 // THP thumbnails in the main, single-player and online menus are decoded on a thread below the
 // main thread, and decoding one movie frame can outlast the time the main thread has left before
-// its next retrace. Without preemption the main thread started late after every decoded frame.
-// A late frame leaves the player with more movie frames due, so the decoder then ran several
-// back to back and the menu settled at about 15 frames per second (KartPad #554).
+// its next retrace. Without preemption the main thread started late whenever a movie frame was
+// still decoding at the retrace, and a menu that had fallen behind stayed slow, down to about
+// 15 frames per second on the Android emulator (found while investigating KartPad #554).
 //
 // The game pack calls RuntimeGuestPreemptionPoint on entry to each THP macroblock-row decoder
 // (ApplyRuntimeCallOptions in abi_bridge.h). It delivers what an interrupt would have delivered
