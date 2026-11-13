@@ -155,6 +155,11 @@ elseif (_aurora_sdl3_provider STREQUAL "vendor")
     FetchContent_MakeAvailable(SDL)
     if (CMAKE_SYSTEM_NAME STREQUAL "iOS")
       include("${MKW_KARTPAD_REPO_ROOT}/cmake/PatchSDLUIKitTextFocus.cmake")
+      # Scene-owned window geometry and a single app instance (SDL3UIKitSceneGeometry.cmake).
+      # Applied to the populated tree because KartPad's runtime declares SDL first, so
+      # the PATCH_COMMAND above does not run in that build.
+      include("${CMAKE_CURRENT_LIST_DIR}/SDL3UIKitSceneGeometry.cmake")
+      sdl3_uikit_scene_geometry_patch("${sdl_SOURCE_DIR}")
     endif ()
   else ()
     message(STATUS "aurora: Using existing SDL3")
