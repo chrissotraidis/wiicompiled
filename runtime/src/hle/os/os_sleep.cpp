@@ -77,6 +77,24 @@ void ScheduleSleepTimer(uint32_t threadPtr, uint64_t ticks)
     gSleepTimers.push_back({threadPtr, deadline});
 }
 
+} // namespace OsHleInternal
+
+// The earliest pending OSSleepTicks wake-up, for the idle loop's wait (vi.cpp). False when no
+// thread is parked in OSSleepTicks.
+bool OS_HLE_NextSleepTimerDeadline(std::chrono::steady_clock::time_point* deadline)
+{
+    std::lock_guard<std::mutex> lock(OsHleInternal::gSleepTimerMutex);
+    bool found = false;
+    for (const OsHleInternal::SleepTimerEntry& entry : OsHleInternal::gSleepTimers) {
+        if (!found || entry.deadline < *deadline) {
+            *deadline = entry.deadline;
+            found = true;
+        }
+    }
+    return found;
+}
+
+namespace OsHleInternal {
 bool ProcessSleepTimers(CpuContext* cpu)
 {
     using Clock = std::chrono::steady_clock;
