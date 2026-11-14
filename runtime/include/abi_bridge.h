@@ -27,6 +27,9 @@ extern "C" void RuntimeFrameRateLockHook(CpuContext* ctx);
 // "Simpler computer karts" (src/hle/low_detail_karts.cpp): four entry points of the game's kart
 // loading, reached by direct calls only.
 extern "C" void RuntimeLowDetailKartsHook(uint32_t target, CpuContext* ctx);
+// Guest preemption point (src/hle/os/os_preemption.cpp): delivers due interrupts and lets a
+// higher-priority guest thread run, as the console would in the middle of a long computation.
+extern "C" void RuntimeGuestPreemptionPoint(CpuContext* ctx);
 
 // Some game-facing runtime options alter arguments at well-defined ABI
 // boundaries. Keep this independent of the dispatch mechanism: generated
@@ -43,6 +46,11 @@ inline void ApplyRuntimeCallOptions(uint32_t target, CpuContext* ctx) {
     }
     if (target == 0x80540E3Cu || target == 0x80576D8Cu || target == 0x80576E90u || target == 0x807C7828u) {
         RuntimeLowDetailKartsHook(target, ctx);
+    }
+    if (target == 0x801B4B5Cu || target == 0x801B56C8u || target == 0x801B5918u) {
+        // The three THP macroblock-row decoders (__THPDecompressiMCURow512x448, ...640x480, ...NxN):
+        // one call per row of a movie frame, on the game's low-priority video decode thread.
+        RuntimeGuestPreemptionPoint(ctx);
     }
 }
 
