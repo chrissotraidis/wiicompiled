@@ -11,6 +11,9 @@
 #include "runtime_log.h"
 #include "os_internal.h"
 
+// Scheduler telemetry, defined in fiber_manager.cpp.
+extern "C" void KartPadSchedOnIdle(int entering);
+
 namespace {
 void LinkMutexToThread(uint32_t threadPtr, uint32_t mutexPtr)
 {
@@ -222,6 +225,7 @@ extern "C" void SelectThread_801a9c08(CpuContext* ctx)
         // Set current context to idle thread context
         OS__SetCurrentContext_801a1e70(kIdleThreadContextAddr);
         
+        KartPadSchedOnIdle(1);
         while (true) {
             // Enable interrupts and idle until something becomes runnable.
             OS__EnableInterrupts_801a65c0();
@@ -253,6 +257,7 @@ extern "C" void SelectThread_801a9c08(CpuContext* ctx)
                 break;
             }
         }
+        KartPadSchedOnIdle(0);
 
         OS__ClearContext_801a2098(kIdleThreadContextAddr);
     }

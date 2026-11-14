@@ -5,6 +5,8 @@
 extern "C" void KartPadAndroidLogMetric(const char*, const char*, ...);
 extern "C" void KartPadLogDisplayListCacheMetrics();
 extern "C" void KartPadLogGpuResourceMetrics();
+// Scheduler telemetry, defined in fiber_manager.cpp.
+extern "C" int KartPadSchedFormatAndReset(char* out, int size, unsigned long long presents);
 #include "wup028_adapter.h"
 #include "audio_backend.h"
 #include "aurora_events.h"
@@ -1287,6 +1289,12 @@ void DrawFpsOverlay() {
                         1000.0 * (cpuSeconds - previousCpu) / intervalPresents : 0.0);
             previousWall = wallSeconds;
             previousCpu = cpuSeconds;
+        }
+        // Which guest thread used that time, and what the main thread waited for (KartPad #554).
+        char sched[512];
+        if (KartPadSchedFormatAndReset(sched, sizeof(sched),
+                                       static_cast<unsigned long long>(intervalPresents)) > 0) {
+            KartPadAndroidLogMetric("KartPadSched", "%s", sched);
         }
     }
     if (!g_showFps) {
