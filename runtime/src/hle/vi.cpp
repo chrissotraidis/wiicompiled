@@ -43,6 +43,7 @@
 #include <dlfcn.h>
 #include <time.h>
 #include <unistd.h>
+#include <sys/system_properties.h>
 #endif
 
 // Forward declaration for OSWakeupThread - used to wake threads on VI retrace queue
@@ -662,6 +663,25 @@ void VI_HLE_ProcessRetracesDeferred(int maxToProcess) {
     OS_HLE_EndDeferredGuestCallbacks();
 }
 
+// Defined in hle/os/os_sleep.cpp.
+bool OS_HLE_NextSleepTimerDeadline(std::chrono::steady_clock::time_point* deadline);
+
+namespace {
+// For comparisons: `adb shell setprop debug.kartpad.idle_sleep_to_timer 0` before starting the
+// game restores the fixed 1 ms idle slices.
+bool IdleSleepsToTimer() {
+#if defined(__ANDROID__)
+    static const bool enabled = [] {
+        char value[PROP_VALUE_MAX] = {};
+        return __system_property_get("debug.kartpad.idle_sleep_to_timer", value) <= 0 || value[0] != '0';
+    }();
+    return enabled;
+#else
+    return true;
+#endif
+}
+} // namespace
+
 void VI_HLE_WaitForNextRetracePoll() {
     Clock::time_point retraceDeadline;
     {
@@ -678,6 +698,16 @@ void VI_HLE_WaitForNextRetracePoll() {
     // deadline is farther away. The high-resolution wait removes the 1 ms
     // scheduler overshoot when retrace is the next event.
     const bool retraceIsNext = retraceDeadline <= now + 1ms;
+    if (!retraceIsNext && IdleSleepsToTimer()) {
+        // A thread parked in OSSleepTicks may be due before the 1 ms slice ends. Online, the game's
+        // main loop sleeps for half a millisecond every frame so its network threads can run; with
+        // nothing else runnable that sleep lasted a whole slice or more (KartPad #554).
+        Clock::time_point sleeper;
+        if (OS_HLE_NextSleepTimerDeadline(&sleeper) && sleeper < now + 1ms) {
+            SleepPreciselyUntil(sleeper);
+            return;
+        }
+    }
     SleepPreciselyUntil(retraceIsNext ? retraceDeadline : now + 1ms, retraceIsNext,
                         kFinalSpinWindow);
 }
