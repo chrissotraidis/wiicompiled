@@ -19,6 +19,9 @@
 #include "runtime_log.h"
 #include "os_internal.h"
 
+// Scheduler telemetry, defined in fiber_manager.cpp.
+extern "C" void KartPadSchedOnMainSleep(int64_t requestedNanos, int64_t wallNanos);
+
 namespace OsHleInternal {
 std::mutex gSleepTimerMutex;
 std::vector<SleepTimerEntry> gSleepTimers;
@@ -253,6 +256,8 @@ extern "C" void OS__SleepTicks_HLE_801aaca8(CpuContext* ctx)
 
     const uint64_t ticks = (static_cast<uint64_t>(cpu->gpr[3]) << 32) | cpu->gpr[4];
     const int32_t irqState = OS__DisableInterrupts_801a65ac();
+    const auto sleepStart = std::chrono::steady_clock::now();
+    uint32_t sleeper = 0;
 
     try {
         uint32_t currentThread = ::Memory::Read32(kOSRunningContextAddr);
@@ -266,6 +271,7 @@ extern "C" void OS__SleepTicks_HLE_801aaca8(CpuContext* ctx)
             OS__RestoreInterrupts_801a65d4(irqState);
             return;
         }
+        sleeper = currentThread;
 
         // Parking here is OSSuspendThread plus a one-shot timer that can only peel one suspension.
         // If the scheduler cannot switch away (OSDisableScheduler nesting raised around a deferred
@@ -326,6 +332,14 @@ extern "C" void OS__SleepTicks_HLE_801aaca8(CpuContext* ctx)
         LogMemoryError(RT_TAG_OS, "OSSleepTicks", e);
     }
 
+    if (sleeper == kDefaultThreadContextAddr) {
+        KartPadSchedOnMainSleep(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(TimeBaseContract::TicksToDuration(ticks))
+                .count(),
+            std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() -
+                                                                 sleepStart)
+                .count());
+    }
     OS__RestoreInterrupts_801a65d4(irqState);
 }
 REGISTER_NATIVE_FUNCTION(0x801AACA8, OS__SleepTicks_HLE_801aaca8);

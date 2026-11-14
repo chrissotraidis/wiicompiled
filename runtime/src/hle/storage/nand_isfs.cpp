@@ -779,15 +779,25 @@ static void FinishDeferredIosWait(CpuContext* ctx, uint32_t oldStack, uint64_t t
 // IOS_Ioctl and IOS_Ioctlv park a network request the same way: build the wait
 // frame, hand its queue to the network layer, and either sleep on it or take the
 // immediate answer. True when the request was handled here.
+extern "C" void KartPadSchedOnNetworkWait(uint32_t thread, uint32_t command, int64_t wallNanos);
+
 template <typename StartSync>
-static bool TryDeferredNetworkIosSync(CpuContext* ctx, StartSync&& startSync) {
+static bool TryDeferredNetworkIosSync(CpuContext* ctx, uint32_t command, StartSync&& startSync) {
     const IosWaitFrame frame = InitializeIosWaitQueueFrame(ctx);
     const auto deferred = startSync(frame.valid ? frame.waitQueue : 0u);
     if (deferred.disposition == NetworkDeferredContract::StartDisposition::Started) {
+        // Scheduler telemetry (fiber_manager.cpp): how long the calling thread was blocked.
+        constexpr uint32_t kRunningThreadAddr = 0x800000e4u;
+        const uint32_t waiter = Memory::Contains(kRunningThreadAddr, 4) ? Memory::Read32(kRunningThreadAddr) : 0u;
+        const auto waitStart = std::chrono::steady_clock::now();
         ctx->gpr[1] = frame.newStack;
         ctx->gpr[3] = frame.waitQueue;
         OSSleepThread_HLE_801aa9b8(ctx);
         FinishDeferredIosWait(ctx, frame.oldStack, deferred.token);
+        KartPadSchedOnNetworkWait(
+            waiter, command,
+            std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - waitStart)
+                .count());
         return true;
     }
     if (deferred.disposition == NetworkDeferredContract::StartDisposition::ImmediateResult) {
@@ -806,7 +816,7 @@ extern "C" void NAND_IOS_Ioctl_Entry_HLE(CpuContext* ctx) {
     const uint32_t outLen = ctx->gpr[8];
 
     if (Network_HLE_IsFd(fd)) {
-        const bool handled = TryDeferredNetworkIosSync(ctx, [&](uint32_t waitQueue) {
+        const bool handled = TryDeferredNetworkIosSync(ctx, cmd, [&](uint32_t waitQueue) {
             return Network_HLE_StartIoctlSync(fd, cmd, inBufPtr, inLen, outBufPtr, outLen, waitQueue);
         });
         if (handled) {
@@ -1131,7 +1141,7 @@ extern "C" void NAND_IOS_Ioctlv_Entry_HLE(CpuContext* ctx) {
     const uint32_t vectorPtr = ctx->gpr[7];
 
     if (Network_HLE_IsFd(fd)) {
-        const bool handled = TryDeferredNetworkIosSync(ctx, [&](uint32_t waitQueue) {
+        const bool handled = TryDeferredNetworkIosSync(ctx, cmd, [&](uint32_t waitQueue) {
             return Network_HLE_StartIoctlvSync(fd, cmd, numIn, numOut, vectorPtr, waitQueue);
         });
         if (handled) {

@@ -10,7 +10,9 @@
 extern "C" void OSExitThread_HLE_801aa0f0(CpuContext* ctx);
 
 #include <algorithm>
+#include <array>
 #include <chrono>
+#include <cstdio>
 #include <cstdlib>
 #include <iostream>
 #include <iomanip>
@@ -36,6 +38,185 @@ bool ThreadExitReschedules()
 #endif
 }
 } // namespace
+
+// ---------------------------------------------------------------------------------------------
+// Scheduler telemetry (KartPad #554).
+//
+// KartPadCPU says how busy the game's host thread is, but every guest thread is a fiber on that
+// one thread, so it cannot say which guest thread used the time or what the main thread waited
+// for. These counters split the wall time between two telemetry lines into: the main thread
+// (and, inside it, pacing to the retrace), the other guest threads (naming the busiest), and
+// the idle loop with every thread blocked. They also count thread switches and exits, the main
+// thread's OSSleepTicks calls (asked for against taken), and its waits on blocking network
+// calls. Kept in this file and declared where used, so no header (and so no pack fingerprint)
+// changes. Everything runs on the game's host thread.
+// ---------------------------------------------------------------------------------------------
+namespace {
+using SchedClock = std::chrono::steady_clock;
+constexpr uint32_t kSchedIdleOwner = 1u;
+constexpr uint32_t kSchedMainThread = 0x80347498u; // the default (main) guest thread
+
+struct SchedSlice {
+    uint32_t thread = 0;
+    int64_t nanos = 0;
+};
+
+struct SchedCounters {
+    SchedClock::time_point sliceStart{};
+    uint32_t owner = kSchedMainThread;
+    std::array<SchedSlice, 16> slices{};
+    size_t sliceCount = 0;
+    int64_t idleNanos = 0;
+    int64_t paceNanos = 0;
+    uint32_t switches = 0;
+    uint32_t exits = 0;
+    uint32_t sleeps = 0;
+    int64_t sleepRequestedNanos = 0;
+    int64_t sleepWallNanos = 0;
+    uint32_t netWaits = 0;
+    int64_t netWaitNanos = 0;
+    int64_t netWaitMaxNanos = 0;
+    uint32_t netWaitMaxCommand = 0;
+};
+
+SchedCounters& Sched()
+{
+    static SchedCounters counters;
+    return counters;
+}
+
+void SchedAccount(SchedCounters& s, SchedClock::time_point now)
+{
+    if (s.sliceStart != SchedClock::time_point{}) {
+        const int64_t nanos =
+            std::chrono::duration_cast<std::chrono::nanoseconds>(now - s.sliceStart).count();
+        if (s.owner == kSchedIdleOwner) {
+            s.idleNanos += nanos;
+        } else {
+            SchedSlice* slot = nullptr;
+            for (size_t i = 0; i < s.sliceCount; ++i) {
+                if (s.slices[i].thread == s.owner) {
+                    slot = &s.slices[i];
+                    break;
+                }
+            }
+            if (!slot) {
+                // More threads than slots in one interval: the last slot collects the rest.
+                slot = &s.slices[std::min(s.sliceCount, s.slices.size() - 1)];
+                if (s.sliceCount < s.slices.size()) {
+                    slot->thread = s.owner;
+                    slot->nanos = 0;
+                    ++s.sliceCount;
+                }
+            }
+            slot->nanos += nanos;
+        }
+    }
+    s.sliceStart = now;
+}
+} // namespace
+
+extern "C" void KartPadSchedOnSwitch(uint32_t toThread)
+{
+    SchedCounters& s = Sched();
+    if (toThread == s.owner) {
+        return;
+    }
+    SchedAccount(s, SchedClock::now());
+    s.owner = toThread;
+    ++s.switches;
+}
+
+extern "C" void KartPadSchedOnIdle(int entering)
+{
+    SchedCounters& s = Sched();
+    SchedAccount(s, SchedClock::now());
+    // Whoever the scheduler picks after the idle loop is named by the switch that follows.
+    s.owner = entering ? kSchedIdleOwner : kSchedMainThread;
+}
+
+extern "C" void KartPadSchedOnThreadExit()
+{
+    ++Sched().exits;
+}
+
+extern "C" void KartPadSchedOnMainSleep(int64_t requestedNanos, int64_t wallNanos)
+{
+    SchedCounters& s = Sched();
+    ++s.sleeps;
+    s.sleepRequestedNanos += requestedNanos;
+    s.sleepWallNanos += wallNanos;
+}
+
+extern "C" void KartPadSchedOnNetworkWait(uint32_t thread, uint32_t command, int64_t wallNanos)
+{
+    if (thread != kSchedMainThread) {
+        return;
+    }
+    SchedCounters& s = Sched();
+    ++s.netWaits;
+    s.netWaitNanos += wallNanos;
+    if (wallNanos > s.netWaitMaxNanos) {
+        s.netWaitMaxNanos = wallNanos;
+        s.netWaitMaxCommand = command;
+    }
+}
+
+extern "C" void KartPadSchedOnPace(int64_t nanos)
+{
+    Sched().paceNanos += nanos;
+}
+
+// Writes one telemetry line for the interval since the last call and starts the next interval.
+// Times are milliseconds per presented frame, like KartPadCPU's main_cpu_ms_per_present.
+extern "C" int KartPadSchedFormatAndReset(char* out, int size, unsigned long long presents)
+{
+    SchedCounters& s = Sched();
+    SchedAccount(s, SchedClock::now());
+    if (!out || size <= 0 || presents == 0) {
+        return 0;
+    }
+    int64_t mainNanos = 0;
+    int64_t otherNanos = 0;
+    SchedSlice top{};
+    for (size_t i = 0; i < s.sliceCount; ++i) {
+        const SchedSlice& slice = s.slices[i];
+        if (slice.thread == kSchedMainThread || slice.thread == 0) {
+            mainNanos += slice.nanos;
+            continue;
+        }
+        otherNanos += slice.nanos;
+        if (slice.nanos > top.nanos) {
+            top = slice;
+        }
+    }
+    uint32_t topEntry = 0;
+    if (top.thread != 0) {
+        if (const Fiber::GuestFiber* fiber = Fiber::GuestFiberManager::GetFiber(top.thread)) {
+            topEntry = fiber->entryPoint;
+        }
+    }
+    const double perPresent = 1.0 / (1e6 * static_cast<double>(presents));
+    const int written = std::snprintf(
+        out, static_cast<size_t>(size),
+        "interval_presents=%llu main_ms=%.2f pace_ms=%.2f other_threads_ms=%.2f idle_ms=%.2f "
+        "top_thread=0x%08x top_entry=0x%08x top_ms=%.2f switches=%.1f thread_exits=%u "
+        "main_sleeps=%.2f sleep_asked_ms=%.2f sleep_took_ms=%.2f net_waits=%u net_wait_ms=%.2f "
+        "net_wait_max_ms=%.1f net_wait_max_cmd=%u",
+        presents, mainNanos * perPresent, s.paceNanos * perPresent, otherNanos * perPresent,
+        s.idleNanos * perPresent, top.thread, topEntry, top.nanos * perPresent,
+        static_cast<double>(s.switches) / static_cast<double>(presents), s.exits,
+        static_cast<double>(s.sleeps) / static_cast<double>(presents),
+        s.sleepRequestedNanos * perPresent, s.sleepWallNanos * perPresent, s.netWaits,
+        s.netWaitNanos * perPresent, s.netWaitMaxNanos / 1e6, s.netWaitMaxCommand);
+
+    const SchedClock::time_point start = s.sliceStart;
+    const uint32_t owner = s.owner;
+    s = SchedCounters{};
+    s.sliceStart = start;
+    s.owner = owner;
+    return written;
+}
 
 namespace Fiber {
 
@@ -357,6 +538,9 @@ void GuestFiberManager::ExitGuestThread(uint32_t guestThreadAddr, ThreadState fi
     }
     
     it->second.state = finalState;
+    if (!it->second.terminated) {
+        KartPadSchedOnThreadExit();
+    }
     it->second.terminated = true;
     if (s_currentGuestThread == guestThreadAddr) {
         s_currentGuestThread = 0;
@@ -429,6 +613,8 @@ void GuestFiberManager::SwitchToThread(uint32_t guestThreadAddr, CpuContext* cpu
         }
     }
     
+    KartPadSchedOnSwitch(guestThreadAddr);
+
     // Store CPU context pointer for the target fiber to use
     s_cpuContext = cpu;
     
@@ -719,6 +905,9 @@ void GuestFiberManager::FiberProc(void* param)
         std::lock_guard<std::mutex> lock(s_mutex);
         auto it = s_fibers.find(guestThreadAddr);
         if (it != s_fibers.end()) {
+            if (!it->second.terminated) {
+                KartPadSchedOnThreadExit();
+            }
             it->second.terminated = true;
             it->second.state = ThreadState::MORIBUND;
         }
@@ -726,6 +915,7 @@ void GuestFiberManager::FiberProc(void* param)
     }
     
     // Return to scheduler
+    KartPadSchedOnSwitch(0);
     HostContext::Switch(s_schedulerFiber);
 }
 

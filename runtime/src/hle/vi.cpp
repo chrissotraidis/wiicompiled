@@ -53,6 +53,8 @@ extern "C" void OSSleepThread_HLE_801aa9b8(CpuContext* cpu);
 extern "C" int g_gxFrameCount;
 extern "C" int32_t OS__DisableInterrupts_801a65ac();
 extern "C" int32_t OS__RestoreInterrupts_801a65d4(int32_t level);
+// Scheduler telemetry, defined in fiber_manager.cpp.
+extern "C" void KartPadSchedOnPace(int64_t nanos);
 
 // Aurora frame cycle tracking - needs external linkage for the GX HLE
 // (declared in gx_internal.h, consumed by gx_frame.cpp). We need to call
@@ -834,7 +836,10 @@ void VI_HLE_PresentFrame(bool presentedXfb, bool paceToRetrace) {
     CountPresentKind(presentedXfb, g_auroraFrameHadWork.load(std::memory_order_acquire));
     aurora_end_frame();
     if (paceThisFrame) {
+        const auto paceStart = Clock::now();
         PaceToRetraceBoundary(paceDeadline);
+        KartPadSchedOnPace(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - paceStart).count());
         std::lock_guard<std::mutex> lock(g_viMutex);
         s_lastPacedRetraceCount = g_vi.retraceCount;
     }
