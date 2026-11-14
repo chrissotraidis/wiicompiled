@@ -6,7 +6,8 @@
 #include "host_context.h"
 #include "runtime_log.h"
 
-// Defined in hle/os/os_sleep.cpp; the sleep-timer table is file-local there.
+// Defined in hle/os/os_thread.cpp.
+extern "C" void OSExitThread_HLE_801aa0f0(CpuContext* ctx);
 
 #include <algorithm>
 #include <chrono>
@@ -14,6 +15,27 @@
 #include <iostream>
 #include <iomanip>
 #include <sstream>
+
+#if defined(__ANDROID__)
+#include <sys/system_properties.h>
+#endif
+
+namespace {
+// For comparisons: `adb shell setprop debug.kartpad.thread_exit_reschedule 0` before starting the
+// game restores the old hand-off to the scheduler fiber when a thread's entry function returns.
+bool ThreadExitReschedules()
+{
+#if defined(__ANDROID__)
+    static const bool enabled = [] {
+        char value[PROP_VALUE_MAX] = {};
+        return __system_property_get("debug.kartpad.thread_exit_reschedule", value) <= 0 || value[0] != '0';
+    }();
+    return enabled;
+#else
+    return true;
+#endif
+}
+} // namespace
 
 namespace Fiber {
 
@@ -31,10 +53,22 @@ void GuestFiberManager::PurgePendingFibers() {
         std::lock_guard<std::mutex> lock(s_mutex);
         toDelete.swap(s_fibersPendingDelete);
     }
+    std::vector<void*> stillRunning;
     for (void* f : toDelete) {
-        if (f && !HostContext::IsCurrent(f)) {
+        if (!f) {
+            continue;
+        }
+        if (HostContext::IsCurrent(f)) {
+            // An exiting thread purges on its own stack, on its way to the next thread. Keep its
+            // stack until some other fiber purges; dropping it here leaked 1 MiB per exited thread.
+            stillRunning.push_back(f);
+        } else {
             HostContext::Destroy(f);
         }
+    }
+    if (!stillRunning.empty()) {
+        std::lock_guard<std::mutex> lock(s_mutex);
+        s_fibersPendingDelete.insert(s_fibersPendingDelete.end(), stillRunning.begin(), stillRunning.end());
     }
 }
 
@@ -635,16 +669,35 @@ void GuestFiberManager::FiberProc(void* param)
                   << " not found in registry!" << std::dec << std::endl;
     }
     
-    // Thread entry functions normally return into OSExitThread on hardware.
-    // Our host fiber call boundary observes the return directly, so complete the
-    // guest OSThread lifecycle here before handing control back to the scheduler.
+    // On hardware a thread's entry function returns into OSExitThread (OSCreateThread seeds LR
+    // with it). Take the same exit: it publishes the return value in r3, releases the thread's
+    // mutexes, wakes its joiners and lets the scheduler choose who runs next. The call comes back
+    // only if the scheduler could not switch away (it was disabled, or this fiber is not the
+    // running thread); the fallback below then hands control to the scheduler fiber as before.
+    //
+    // The fallback used to be the only path. It resumed the main thread's fiber even while the
+    // main thread was parked in OSSleepTicks or on a wait queue, and with the running-thread
+    // pointer cleared. The park ended early ("failed to switch away while parking", in every
+    // online log of KartPad #554) and OSGetCurrentThread() stayed null until the main thread
+    // next blocked, so its sleeps, mutex calls and reschedules in between were skipped.
+    bool isRunningThread = false;
+    try {
+        isRunningThread = Memory::Read32(kOSRunningContextAddr) == guestThreadAddr;
+    } catch (const Memory::AccessViolation&) {
+        isRunningThread = false;
+    }
+    isRunningThread = isRunningThread && ThreadExitReschedules();
+    if (isRunningThread) {
+        OSExitThread_HLE_801aa0f0(cpu);
+    }
 
     try {
         RemoveGuestThreadFromQueue(guestThreadAddr);
         const uint16_t attributes = Memory::Read16(guestThreadAddr + kThreadAttrOffset);
         const bool detached = (attributes & 1u) != 0;
         const uint16_t finalState = detached ? 0u : static_cast<uint16_t>(ThreadState::MORIBUND);
-        if (!detached) {
+        if (!detached && !isRunningThread) {
+            // OSExitThread has already published the entry function's return value.
             Memory::Write32(guestThreadAddr + kThreadExitValueOffset, 0);
         }
         Memory::Write16(guestThreadAddr + kThreadStateOffset, finalState);
