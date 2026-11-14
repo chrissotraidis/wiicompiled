@@ -367,6 +367,22 @@ void apply_port_preferences() noexcept {
       }
     }
   }
+
+  // Player 1's saved controller isn't here. A Bluetooth Wii Remote can stop matching its own saved
+  // slot: macOS gives it a new device path on every connection, and a different extension changes
+  // its GUID. Rather than leave the game ignoring every controller, the first one that no saved
+  // port claims drives Player 1 for this session. The saved choice is unchanged, so the saved
+  // controller takes Player 1 back when it connects. An explicit None for Player 1 is respected.
+  if (g_portPreferences[0].state == PortPreferenceState::Controller && !portClaimed[0]) {
+    for (auto& [instance, controller] : g_GameControllers) {
+      if (effective_player_index(controller) < 0 &&
+          std::find(claimedInstances.begin(), claimedInstances.begin() + claimedCount, instance) ==
+              claimedInstances.begin() + claimedCount) {
+        assign_player_index(controller, 0);
+        break;
+      }
+    }
+  }
   if (upgraded) {
     save_port_preferences();
   }

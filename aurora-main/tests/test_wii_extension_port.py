@@ -116,6 +116,34 @@ int main() {
   g_portPreferences[0].state = PortPreferenceState::None;
   apply_port_preferences();
   assert(g_GameControllers.at(40).player == -1);
+
+  // KartPad #476: Player 1 was saved for this remote on an earlier connection, with another
+  // extension and another device path, so nothing matches it. It still drives Player 1 for the
+  // session, without changing the saved choice, and gives Player 1 back to the saved controller.
+  g_GameControllers.clear();
+  g_portPreferences = {};
+  g_portPreferences[0] = {PortPreferenceState::Controller, remote("earlier-connection", 130)};
+  g_GameControllers[50] = {remote("this-connection", 128), -1};
+  apply_port_preferences();
+  assert(g_GameControllers.at(50).player == 0);
+  assert(g_portPreferences[0].identity.path == "earlier-connection");
+  g_GameControllers[60] = {remote("earlier-connection", 130), -1};
+  apply_port_preferences();
+  assert(g_GameControllers.at(60).player == 0);
+  assert(g_GameControllers.at(50).player == -1);
+  // A controller saved to Player 2 stays there and does not fill Player 1.
+  g_GameControllers.clear();
+  g_portPreferences[1] = {PortPreferenceState::Controller, remote("second-hid-device", 128)};
+  g_GameControllers[70] = {remote("second-hid-device", 128), -1};
+  apply_port_preferences();
+  assert(g_GameControllers.at(70).player == 1);
+  // Player 1 explicitly set to no controller stays empty.
+  g_GameControllers.clear();
+  g_portPreferences = {};
+  g_portPreferences[0].state = PortPreferenceState::None;
+  g_GameControllers[80] = {remote("this-connection", 128), -1};
+  apply_port_preferences();
+  assert(g_GameControllers.at(80).player == -1);
 }
 '''
 with tempfile.TemporaryDirectory(prefix="wii-port-test-") as temporary:
@@ -126,4 +154,4 @@ with tempfile.TemporaryDirectory(prefix="wii-port-test-") as temporary:
     subprocess.run(["clang++", "-std=c++20", "-Wall", "-Wextra", "-Werror",
                     str(test), "-o", str(executable)], check=True)
     subprocess.run([str(executable)], check=True)
-print("PASS: Wii extension reconnect retains its port; distinct devices and explicit None stay separate")
+print("PASS: Wii extension reconnect retains its port; an unmatched remote drives Player 1 for the session; distinct devices and explicit None stay separate")
