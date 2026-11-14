@@ -183,6 +183,9 @@ else()
     # FetchContent uses the first declaration for a dependency. Declare the
     # two Aurora source archives that lack upstream URL_HASH values before the
     # Aurora subdirectory so tag retargeting or archive mutation fails closed.
+    # Because this declaration wins, it must also carry Aurora's SDL source
+    # fixes (Wii Remote reconnect and Classic Controller D-pad among them);
+    # without the PATCH_COMMAND they were silently skipped (KartPad #476, #306).
     include(FetchContent)
     FetchContent_Declare(abseil-cpp
         URL https://github.com/abseil/abseil-cpp/archive/refs/tags/20240722.0.tar.gz
@@ -193,6 +196,8 @@ else()
         URL https://github.com/libsdl-org/SDL/releases/download/release-3.4.4/SDL3-3.4.4.tar.gz
         URL_HASH SHA256=ee712dbe6a89bb140bbfc2ce72358fb5ee5cc2240abeabd54855012db30b3864
         DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+        PATCH_COMMAND "${CMAKE_COMMAND}" -DSDL_SOURCE_DIR=<SOURCE_DIR>
+            -P "${MKW_AURORA_DIR}/cmake/AuroraSDL3Patches.cmake"
         EXCLUDE_FROM_ALL)
 
     # MinGW/WSL can choke on SDL precompiled headers; disable PCH for aurora/SDL.
@@ -209,6 +214,15 @@ else()
         set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE BOTH)
     endif()
     add_subdirectory(${MKW_AURORA_DIR} ${CMAKE_BINARY_DIR}/aurora-build EXCLUDE_FROM_ALL)
+    FetchContent_GetProperties(SDL SOURCE_DIR MKW_SDL_SOURCE_DIR)
+    if(MKW_SDL_SOURCE_DIR)
+        file(STRINGS "${MKW_SDL_SOURCE_DIR}/src/joystick/hidapi/SDL_hidapi_wii.c"
+            MKW_SDL_WII_PATCHED REGEX "m_ulNextReconnect" LIMIT_COUNT 1)
+        if(NOT MKW_SDL_WII_PATCHED)
+            message(FATAL_ERROR "SDL at ${MKW_SDL_SOURCE_DIR} is missing Aurora's source fixes "
+                "(cmake/AuroraSDL3Patches.cmake). Delete that directory and configure again.")
+        endif()
+    endif()
     if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
         if(MKW_SAVED_FIND_ROOT_PATH_MODE_PACKAGE)
             set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE "${MKW_SAVED_FIND_ROOT_PATH_MODE_PACKAGE}")
