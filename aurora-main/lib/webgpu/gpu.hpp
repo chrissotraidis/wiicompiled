@@ -80,9 +80,10 @@ inline int adreno_model_from_name(std::string_view name) noexcept {
 }
 
 // Dawn's Vulkan adapter description starts with the driver's own name. Qualcomm's is "Qualcomm
-// Technologies Inc. Adreno Vulkan Driver"; Turnip and its forks name themselves ("turnip Mesa
-// driver", "PurpleVK public driver"). A driver that doesn't report its name gets "Vulkan driver
-// version ..." and still counts as Qualcomm's: that is an old phone driver, not a custom one.
+// Technologies Inc. Adreno Vulkan Driver" on every Adreno 6xx-8xx log so far; Turnip and its forks
+// name themselves ("Turnip: Mesa 26.3.0-devel", "PurpleVK public driver: ..."). A driver that
+// doesn't report its name gets "Vulkan driver version ..." and still counts as Qualcomm's: that
+// is an old phone driver, not a custom one.
 inline bool is_non_qualcomm_vulkan_driver(std::string_view description) noexcept {
   return !description.empty() && !description.starts_with("Vulkan driver version") &&
          description.find("Qualcomm") == std::string_view::npos;
