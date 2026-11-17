@@ -59,7 +59,8 @@ extern wgpu::RenderPipeline g_CopyPipeline;
 extern wgpu::BindGroup g_CopyBindGroup;
 extern wgpu::Instance g_instance;
 extern bool g_bcTexturesSupported;
-// Qualcomm/Adreno adapter; selects the KartPad vertex repack workaround by default.
+// Adreno running Qualcomm's own driver; selects the KartPad vertex repack workaround by default.
+// False under Mesa Turnip: the workarounds are for Qualcomm's shader compiler, not the GPU.
 extern bool g_adapterIsQualcomm;
 extern int g_adapterAdrenoModel;
 // True when Dawn reads uniform buffers natively instead of decomposing them (#104/#301).
@@ -76,6 +77,14 @@ inline int adreno_model_from_name(std::string_view name) noexcept {
   int model = 0;
   while (i < name.size() && name[i] >= '0' && name[i] <= '9' && model < 100000) model = model * 10 + (name[i++] - '0');
   return model;
+}
+
+// Mesa's Adreno driver names itself "Turnip Adreno (TM) 650" and reports "turnip Mesa driver".
+inline bool is_mesa_driver_name(std::string_view name) noexcept {
+  for (const std::string_view needle : {"Turnip", "turnip", "Mesa", "MESA"}) {
+    if (name.find(needle) != std::string_view::npos) return true;
+  }
+  return false;
 }
 
 bool initialize(AuroraBackend backend);

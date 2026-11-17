@@ -195,4 +195,13 @@ TEST(KartPadVertexRepack, AdrenoModelParsing) {
   EXPECT_EQ(aurora::webgpu::adreno_model_from_name("Adreno (TM) 610"), 610);
   EXPECT_EQ(aurora::webgpu::adreno_model_from_name("Mali-G715"), 0);
   EXPECT_EQ(aurora::webgpu::adreno_model_from_name("Adreno"), 0);
+  EXPECT_EQ(aurora::webgpu::adreno_model_from_name("Turnip Adreno (TM) 830"), 830);
+}
+
+TEST(KartPadVertexRepack, MesaDriverNames) {
+  EXPECT_TRUE(aurora::webgpu::is_mesa_driver_name("Turnip Adreno (TM) 650"));
+  EXPECT_TRUE(aurora::webgpu::is_mesa_driver_name("turnip Mesa driver"));
+  EXPECT_FALSE(aurora::webgpu::is_mesa_driver_name("Adreno (TM) 650"));
+  EXPECT_FALSE(aurora::webgpu::is_mesa_driver_name(
+      "Qualcomm Technologies Inc. Adreno Vulkan Driver: Driver Build: db3d445dbc"));
 }

@@ -691,8 +691,14 @@ bool initialize(AuroraBackend auroraBackend) {
     const auto contains = [](wgpu::StringView text, std::string_view needle) {
       return !text.IsUndefined() && std::string_view(text.data, text.length).find(needle) != std::string_view::npos;
     };
-    g_adapterIsQualcomm = g_adapterInfo.vendorID == 0x5143 || contains(g_adapterInfo.device, "Adreno") ||
-                          contains(g_adapterInfo.vendor, "Qualcomm") || contains(g_adapterInfo.description, "Adreno");
+    const auto mesa = [](wgpu::StringView text) {
+      return !text.IsUndefined() && is_mesa_driver_name(std::string_view(text.data, text.length));
+    };
+    // A custom Turnip driver keeps Qualcomm's vendor ID and the Adreno name, but none of the
+    // Qualcomm-driver bugs the automatic workarounds exist for, so it gets none of their cost.
+    g_adapterIsQualcomm = !mesa(g_adapterInfo.device) && !mesa(g_adapterInfo.description) &&
+                          (g_adapterInfo.vendorID == 0x5143 || contains(g_adapterInfo.device, "Adreno") ||
+                           contains(g_adapterInfo.vendor, "Qualcomm") || contains(g_adapterInfo.description, "Adreno"));
     g_adapterAdrenoModel = 0;
     for (const wgpu::StringView text : {g_adapterInfo.device, g_adapterInfo.description}) {
       if (!text.IsUndefined() && g_adapterAdrenoModel == 0) {
