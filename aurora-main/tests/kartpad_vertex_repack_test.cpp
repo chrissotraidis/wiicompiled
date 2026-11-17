@@ -195,4 +195,17 @@ TEST(KartPadVertexRepack, AdrenoModelParsing) {
   EXPECT_EQ(aurora::webgpu::adreno_model_from_name("Adreno (TM) 610"), 610);
   EXPECT_EQ(aurora::webgpu::adreno_model_from_name("Mali-G715"), 0);
   EXPECT_EQ(aurora::webgpu::adreno_model_from_name("Adreno"), 0);
+  EXPECT_EQ(aurora::webgpu::adreno_model_from_name("Turnip Adreno (TM) 830"), 830);
+}
+
+TEST(KartPadVertexRepack, CustomVulkanDriverDescriptions) {
+  // Descriptions as players' logs record them (#554 phone driver and Turnip, #104 PurpleVK).
+  EXPECT_FALSE(aurora::webgpu::is_non_qualcomm_vulkan_driver(
+      "Qualcomm Technologies Inc. Adreno Vulkan Driver: Driver Build: db3d445dbc, Ia06b22fa1a"));
+  EXPECT_TRUE(aurora::webgpu::is_non_qualcomm_vulkan_driver(
+      "PurpleVK public driver: PurpleVK 26.3.0-devel (git-62ac221a33) 26.2.99"));
+  EXPECT_TRUE(aurora::webgpu::is_non_qualcomm_vulkan_driver(
+      "Turnip: Mesa 26.3.0-devel (git-a995eaeda4) 26.2.99"));
+  EXPECT_FALSE(aurora::webgpu::is_non_qualcomm_vulkan_driver("Vulkan driver version 512.502.0"));
+  EXPECT_FALSE(aurora::webgpu::is_non_qualcomm_vulkan_driver(""));
 }

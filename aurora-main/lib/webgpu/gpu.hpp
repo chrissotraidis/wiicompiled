@@ -59,7 +59,8 @@ extern wgpu::RenderPipeline g_CopyPipeline;
 extern wgpu::BindGroup g_CopyBindGroup;
 extern wgpu::Instance g_instance;
 extern bool g_bcTexturesSupported;
-// Qualcomm/Adreno adapter; selects the KartPad vertex repack workaround by default.
+// Adreno running Qualcomm's own driver; selects the KartPad vertex repack workaround by default.
+// False under a custom driver such as Turnip: the workarounds are for Qualcomm's shader compiler.
 extern bool g_adapterIsQualcomm;
 extern int g_adapterAdrenoModel;
 // True when Dawn reads uniform buffers natively instead of decomposing them (#104/#301).
@@ -76,6 +77,16 @@ inline int adreno_model_from_name(std::string_view name) noexcept {
   int model = 0;
   while (i < name.size() && name[i] >= '0' && name[i] <= '9' && model < 100000) model = model * 10 + (name[i++] - '0');
   return model;
+}
+
+// Dawn's Vulkan adapter description starts with the driver's own name. Qualcomm's is "Qualcomm
+// Technologies Inc. Adreno Vulkan Driver" on every Adreno 6xx-8xx log so far; Turnip and its forks
+// name themselves ("Turnip: Mesa 26.3.0-devel", "PurpleVK public driver: ..."). A driver that
+// doesn't report its name gets "Vulkan driver version ..." and still counts as Qualcomm's: that
+// is an old phone driver, not a custom one.
+inline bool is_non_qualcomm_vulkan_driver(std::string_view description) noexcept {
+  return !description.empty() && !description.starts_with("Vulkan driver version") &&
+         description.find("Qualcomm") == std::string_view::npos;
 }
 
 bool initialize(AuroraBackend backend);
