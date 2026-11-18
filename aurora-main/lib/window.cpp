@@ -478,9 +478,19 @@ void show_window() {
   }
 }
 
+#if defined(__APPLE__)
+extern "C" bool KartPadDeviceIsIPad() __attribute__((weak_import));
+#endif
+
 bool initialize() {
   /* We don't want to initialize anything input related here, otherwise the add events will get lost to the void */
-  TRY(SDL_SetHint(SDL_HINT_ORIENTATIONS, "LandscapeLeft LandscapeRight"), "Error setting {}: {}", SDL_HINT_ORIENTATIONS,
+  const char* orientations = "LandscapeLeft LandscapeRight";
+#if defined(__APPLE__)
+  if (KartPadDeviceIsIPad && KartPadDeviceIsIPad()) {
+    orientations = "Portrait PortraitUpsideDown LandscapeLeft LandscapeRight";
+  }
+#endif
+  TRY(SDL_SetHint(SDL_HINT_ORIENTATIONS, orientations), "Error setting {}: {}", SDL_HINT_ORIENTATIONS,
       SDL_GetError());
   TRY(SDL_InitSubSystem(SDL_INIT_EVENTS | SDL_INIT_VIDEO), "Error initializing SDL: {}", SDL_GetError());
 
