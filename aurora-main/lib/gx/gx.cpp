@@ -1036,9 +1036,31 @@ void evict_tlut_object(u32 tlutObjId) noexcept {
 
 // GXInitTexObj mints a fresh object id per call and nothing ever emits DESTROY_TEXOBJ, so the texture object memo used to be bounded only by the fact that GXInvalidateTexAll dropped it six times a frame.
 constexpr u64 kTextureCacheIdleRevisions = 128;
-constexpr size_t kTextureObjectCacheSoftLimit = 1024;
 constexpr size_t kTlutObjectCacheSoftLimit = 512;
 constexpr size_t kTexObjSourceKeySoftLimit = 2048;
+// About ten seconds of play at six bumps a frame.
+constexpr u64 kSourceTextureIdleRevisions = 3600;
+
+// Converted textures nothing has drawn for a while (an earlier course's, typically) whose only owner is the source
+// cache itself. Each holds a GPU texture; drawing one again only repeats the conversion and upload. The check allows
+// one more owner, the front cache, which is emptied before the release.
+template <typename Map>
+static bool has_idle_source_textures(const Map& cache, u64 revision) noexcept {
+  for (const auto& [_, entry] : cache) {
+    if (revision - entry.validationRevision > kSourceTextureIdleRevisions && entry.handle.use_count() <= 2) {
+      return true;
+    }
+  }
+  return false;
+}
+
+template <typename Map>
+static void release_idle_source_textures(Map& cache, u64 revision) noexcept {
+  absl::erase_if(cache, [revision](const auto& item) {
+    return revision - item.second.validationRevision > kSourceTextureIdleRevisions &&
+           item.second.handle.use_count() <= 1;
+  });
+}
 
 static void prune_idle_texture_caches() noexcept {
   const u64 revision = s_staticTextureCacheValidationRevision;
@@ -1046,7 +1068,9 @@ static void prune_idle_texture_caches() noexcept {
   if (revision % (kTextureCacheIdleRevisions / 2) != 0) {
     return;
   }
-  if (s_textureObjectCaches.size() >= kTextureObjectCacheSoftLimit) {
+  // Swept at any size: below the old soft limit, entries for textures the game no longer draws kept those textures
+  // alive, so every new course added its textures on top of the last until the app restarted (#510).
+  {
     std::vector<std::pair<u32, u32>> retired;
     for (const auto& [texObjId, entry] : s_textureObjectCaches) {
       if (revision - entry.validationRevision > kTextureCacheIdleRevisions) {
@@ -1057,6 +1081,16 @@ static void prune_idle_texture_caches() noexcept {
       clear_texture_dependency(texObjId, tlutObjId);
       s_textureObjectCaches.erase(texObjId);
     }
+  }
+
+  // The source caches used to drop only unowned entries, and only once they held 512 (256 for palettes). The front
+  // cache keeps a second reference to up to 256 of them, so it is emptied first; it refills on the next lookups.
+  if (has_idle_source_textures(s_staticTextureSourceCache, revision)) {
+    clear_static_source_front_cache();
+    release_idle_source_textures(s_staticTextureSourceCache, revision);
+  }
+  if (has_idle_source_textures(s_staticPaletteTextureSourceCache, revision)) {
+    release_idle_source_textures(s_staticPaletteTextureSourceCache, revision);
   }
 
   if (s_tlutObjectCaches.size() >= kTlutObjectCacheSoftLimit) {
