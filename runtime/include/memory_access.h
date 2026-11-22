@@ -69,6 +69,16 @@ extern const SparseWritablePageTable* g_sparseWritablePageTables[kPageCount];
 // from "small but plain memory"; range resolution needs the explicit flag.
 extern uint8_t g_deferredReadCoveredPages[kPageCount];
 
+// True when a deferred read still covers part of the range, so its host bytes aren't loaded yet.
+inline bool RangeHasDeferredReads(uint32_t address, size_t length) {
+    const uint32_t first = address >> kPageShift;
+    const uint32_t last = static_cast<uint32_t>((static_cast<uint64_t>(address) + length - 1) >> kPageShift);
+    for (uint32_t page = first; page <= last; ++page) {
+        if (g_deferredReadCoveredPages[page] != 0) return true;
+    }
+    return false;
+}
+
 MKW_MEMORY_NO_INLINE MKW_MEMORY_COLD uint8_t Read8Slow(uint32_t addr);
 MKW_MEMORY_NO_INLINE MKW_MEMORY_COLD uint16_t Read16Slow(uint32_t addr);
 MKW_MEMORY_NO_INLINE MKW_MEMORY_COLD uint32_t Read32Slow(uint32_t addr);
