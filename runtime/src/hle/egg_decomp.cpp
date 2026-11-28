@@ -90,16 +90,6 @@ struct HostSZSAccess {
     void WriteOutput(uint32_t offset, uint8_t value) const { dst[offset] = value; }
 };
 
-static bool HasDeferredReadPages(uint32_t address, size_t length) {
-    const uint32_t first = address >> MemoryInline::kPageShift;
-    const uint32_t last = static_cast<uint32_t>(
-        (static_cast<uint64_t>(address) + length - 1) >> MemoryInline::kPageShift);
-    for (uint32_t page = first; page <= last; ++page) {
-        if (MemoryInline::g_deferredReadCoveredPages[page] != 0) return true;
-    }
-    return false;
-}
-
 extern "C" uint32_t EGG_Decomp_decodeSZS_80218c2c(uint32_t src, uint32_t dst)
 {
     const uint32_t expandSize = (static_cast<uint32_t>(MemoryInline::FlatRead8(src + 4)) << 24) |
@@ -114,7 +104,8 @@ extern "C" uint32_t EGG_Decomp_decodeSZS_80218c2c(uint32_t src, uint32_t dst)
     if (expandSize != 0 && expandSize <= static_cast<uint32_t>(std::numeric_limits<int32_t>::max()) &&
         !GuestFlat::RequiresCheckedAccess() &&
         Memory::Contains(src, maxSourceBytes) && Memory::Contains(dst, expandSize) &&
-        !HasDeferredReadPages(src, maxSourceBytes) && !HasDeferredReadPages(dst, expandSize) &&
+        !MemoryInline::RangeHasDeferredReads(src, maxSourceBytes) &&
+        !MemoryInline::RangeHasDeferredReads(dst, expandSize) &&
         !RecompMod::ExecutableWriteGuardMayHit(dst, expandSize)) {
         HostSZSAccess access{Memory::GetPointer(src, maxSourceBytes), Memory::GetPointer(dst, expandSize)};
         const uint32_t decoded = DecodeSZS(src, expandSize, access);
