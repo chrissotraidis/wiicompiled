@@ -631,7 +631,7 @@ static void ApplyFolderByNameMapping(const RuntimeRiivolution::Mapping& mapping)
 // game language (/Ucene/UI/Race_E.szs for Spanish NTSC, /Fcene/... for French),
 // but its XML maps only the Race archives. After a Grand Prix the awards section
 // then gets two empty UI archive slots and panics in ARCInitHandle (KartPad #131,
-// rr-pulsar #204). Register each missing Award archive from the file Retro Rewind
+// WiiCompiled #220). Register each missing Award archive from the file Retro Rewind
 // ships beside the matching Race archive (UI/Award.szs, Language/<LANG>/UI/Award_*).
 static void MapRetroRewindAwardArchives(const RuntimeRiivolution::PatchSet& patches) {
     static const std::string kRaceTail = "cene/UI/Race";
