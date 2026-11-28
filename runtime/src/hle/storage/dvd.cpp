@@ -627,6 +627,44 @@ static void ApplyFolderByNameMapping(const RuntimeRiivolution::Mapping& mapping)
               << " disc file(s) by filename" << std::endl;
 }
 
+// Retro Rewind 6 renames the 'S' of /Scene/UI/Race and /Scene/UI/Award for each
+// game language (/Ucene/UI/Race_E.szs for Spanish NTSC, /Fcene/... for French),
+// but its XML maps only the Race archives. After a Grand Prix the awards section
+// then gets two empty UI archive slots and panics in ARCInitHandle (KartPad #131,
+// rr-pulsar #204). Register each missing Award archive from the file Retro Rewind
+// ships beside the matching Race archive (UI/Award.szs, Language/<LANG>/UI/Award_*).
+static void MapRetroRewindAwardArchives(const RuntimeRiivolution::PatchSet& patches) {
+    static const std::string kRaceTail = "cene/UI/Race";
+    size_t added = 0;
+    for (const auto& mapping : patches.mappings) {
+        const std::string& disc = mapping.discPath;
+        if (mapping.kind != RuntimeRiivolution::Mapping::Kind::File ||
+            disc.size() < 2 + kRaceTail.size() || disc[0] != '/' || disc[1] == 'S' ||
+            disc.compare(2, kRaceTail.size(), kRaceTail) != 0) {
+            continue;
+        }
+        const std::string awardDisc =
+            disc.substr(0, 2) + "cene/UI/Award" + disc.substr(2 + kRaceTail.size());
+        const std::string hostName = mapping.hostPath.filename().string();
+        if (hostName.rfind("Race", 0) != 0 || DvdEntryExists(awardDisc)) {
+            continue;
+        }
+        const fs::path awardHost = mapping.hostPath.parent_path() / ("Award" + hostName.substr(4));
+        std::error_code ec;
+        const std::uintmax_t size = fs::file_size(awardHost, ec);
+        if (ec) {
+            continue;
+        }
+        RegisterFileEntry(awardDisc, awardHost, static_cast<uint32_t>(size));
+        ++added;
+    }
+    if (added != 0) {
+        RT_LOG(RT_TAG_DVD) << "mapped " << added
+                           << " language Award archive(s) the Retro Rewind XML leaves out"
+                           << std::endl;
+    }
+}
+
 static void ScanOverlayRoot(const RuntimeRiivolution::Overlay& overlay) {
     if (!overlay.patches) {
         // Fallback for mod roots that mirror the disc filesystem directly (not a
@@ -659,6 +697,7 @@ static void ScanOverlayRoot(const RuntimeRiivolution::Overlay& overlay) {
             break;
         }
     }
+    MapRetroRewindAwardArchives(*overlay.patches);
 }
 
 static fs::path ResolveDvdMappedHostPath(const std::string& dvdPath, const fs::path& fallbackHostPath) {
