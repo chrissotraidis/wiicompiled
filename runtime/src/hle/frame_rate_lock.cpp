@@ -21,6 +21,8 @@
 #include "abi_bridge.h"
 #include "memory.h"
 
+#include <aurora/gfx.h>
+
 #include <atomic>
 #include <cstdio>
 
@@ -33,16 +35,27 @@ constexpr uint32_t kRacedataPointer = 0x809BD728u;  // Racedata::sInstance
 constexpr uint32_t kGameModeOffset = 0xB70u;
 constexpr uint32_t kSceneKindOffset = 0x28u;  // in the GameScene passed in r3
 constexpr uint32_t kRaceSceneKind = 2u;      // 1 is a menu scene
+// Raceinfo::sInstance: set while a race exists, cleared by Raceinfo::DestroyInstance (0x805320D4).
+constexpr uint32_t kRaceinfoPointer = 0x809BD730u;
+// Racedata's race scenario, first player's type: 0 is a local player, 1 a computer player (the
+// title screen's demo race has only computer players).
+constexpr uint32_t kFirstPlayerTypeOffset = 0x38u;
+constexpr uint32_t kLocalPlayer = 0u;
+
+// A guest pointer's target field, or fallback when either is outside mapped memory.
+uint32_t ReadThroughPointer(uint32_t pointer, uint32_t offset, uint32_t fallback) {
+    if (!Memory::Contains(pointer, 4)) {
+        return fallback;
+    }
+    const uint32_t base = Memory::Read32(pointer);
+    if (base == 0 || !Memory::Contains(base + offset, 4)) {
+        return fallback;
+    }
+    return Memory::Read32(base + offset);
+}
 
 bool SixtyOnlyMode() {
-    if (!Memory::Contains(kRacedataPointer, 4)) {
-        return false;
-    }
-    const uint32_t racedata = Memory::Read32(kRacedataPointer);
-    if (!Memory::Contains(racedata + kGameModeOffset, 4)) {
-        return false;
-    }
-    const uint32_t mode = Memory::Read32(racedata + kGameModeOffset);
+    const uint32_t mode = ReadThroughPointer(kRacedataPointer, kGameModeOffset, 0xFFFFFFFFu);
     return mode == 2u || mode == 5u;
 }
 
@@ -52,6 +65,21 @@ std::atomic<bool> g_enabled{false};
 
 extern "C" __attribute__((visibility("default"))) void RuntimeSetThirtyFpsRaces(bool enabled) noexcept {
     g_enabled.store(enabled, std::memory_order_relaxed);
+}
+
+// The displayed frame rate while the player races a mode that 30 FPS Races changes (not Time
+// Trials, ghost races or the title demo), or -1 otherwise. KartPad's Android app polls it to
+// offer 30 FPS Races after a slow race. Reads guest memory from the caller's thread: two aligned
+// words that the game only changes when a race starts or ends.
+extern "C" __attribute__((visibility("default"))) float RuntimeRaceFramesPerSecond() noexcept {
+    const bool racing = Memory::Contains(kRaceinfoPointer, 4) && Memory::Read32(kRaceinfoPointer) != 0;
+    if (!racing || SixtyOnlyMode() ||
+        ReadThroughPointer(kRacedataPointer, kFirstPlayerTypeOffset, 0xFFFFFFFFu) != kLocalPlayer) {
+        return -1.0f;
+    }
+    AuroraPresentTiming timing{};
+    aurora_get_present_timing(&timing);
+    return timing.sampleCount == 0 ? -1.0f : static_cast<float>(timing.effectiveFramesPerSecond);
 }
 
 extern "C" __attribute__((visibility("default"))) void RuntimeFrameRateLockHook(CpuContext* ctx) {
